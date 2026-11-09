@@ -37,7 +37,11 @@ func (v Violation) String() string {
 //     Counted per workflow, not per key, so a bug that mints a new key is caught.
 //   - I2: every ledger transaction sums to zero, and so does the whole ledger.
 //   - I3: the ledger agrees with the provider: per workflow and kind, as many
-//     postings as effects, with the same amounts.
+//     postings as effects, with the same amounts; and every refund reverses a
+//     charge of its own workflow. Workflows in NEEDS_ATTENTION are exempt from
+//     the amount comparison: by definition their outcome is unresolved (money
+//     may have moved without a posting) until a human reconciles them. Use
+//     NeedsAttention to list them.
 //   - I5: no payout without a charge.
 //   - I7: terminal workflows match what moved: SUCCEEDED = charge + payout,
 //     COMPENSATED = charge + refund and no payout, FAILED = nothing.
@@ -50,7 +54,12 @@ func Check(ctx context.Context, pool *pgxpool.Pool, effects []fakeprovider.Effec
 	if err != nil {
 		return nil, fmt.Errorf("query ledger summary: %w", err)
 	}
-	violations = append(violations, checkLedgerMatchesProvider(effects, postings)...)
+	attention, err := NeedsAttention(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
+	violations = append(violations, checkLedgerMatchesProvider(effects, postings, attention)...)
+	violations = append(violations, checkRefundOwnership(effects)...)
 
 	terminal, err := q.TerminalWorkflows(ctx)
 	if err != nil {
@@ -114,7 +123,49 @@ func checkDuplicateEffects(effects []fakeprovider.Effect) []Violation {
 
 type kindKey struct{ workflowID, kind string }
 
-func checkLedgerMatchesProvider(effects []fakeprovider.Effect, postings []db.LedgerTransactionsSummaryRow) []Violation {
+// NeedsAttention returns the IDs of workflows waiting for a human.
+func NeedsAttention(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	ids, err := db.New(pool).NeedsAttentionWorkflows(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query workflows needing attention: %w", err)
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out, nil
+}
+
+func checkRefundOwnership(effects []fakeprovider.Effect) []Violation {
+	chargeOwner := map[string]string{}
+	for _, e := range effects {
+		if e.Type == "charge" {
+			chargeOwner[e.ID] = e.WorkflowID
+		}
+	}
+	var violations []Violation
+	for _, e := range effects {
+		if e.Type != "refund" {
+			continue
+		}
+		owner, ok := chargeOwner[e.RefundOf]
+		switch {
+		case !ok:
+			violations = append(violations, Violation{Invariant: "I3", WorkflowID: e.WorkflowID,
+				Detail: fmt.Sprintf("refund %s reverses unknown charge %s", e.ID, e.RefundOf)})
+		case owner != e.WorkflowID:
+			violations = append(violations, Violation{Invariant: "I3", WorkflowID: e.WorkflowID,
+				Detail: fmt.Sprintf("refund %s reverses charge %s of another workflow (%s)", e.ID, e.RefundOf, owner)})
+		}
+	}
+	return violations
+}
+
+func checkLedgerMatchesProvider(effects []fakeprovider.Effect, postings []db.LedgerTransactionsSummaryRow, attention []string) []Violation {
+	exempt := map[string]bool{}
+	for _, id := range attention {
+		exempt[id] = true
+	}
 	provider := map[kindKey][]int64{}
 	ledger := map[kindKey][]int64{}
 	var keys []kindKey
@@ -135,6 +186,9 @@ func checkLedgerMatchesProvider(effects []fakeprovider.Effect, postings []db.Led
 
 	var violations []Violation
 	for _, k := range keys {
+		if exempt[k.workflowID] {
+			continue
+		}
 		pa, la := sortedCopy(provider[k]), sortedCopy(ledger[k])
 		if !slices.Equal(pa, la) {
 			violations = append(violations, Violation{

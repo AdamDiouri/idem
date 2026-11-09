@@ -254,3 +254,18 @@ func TestCheck_AllInvariantsCleanFlow(t *testing.T) {
 	e.setStatus(t, wf, "SUCCEEDED")
 	require.Empty(t, e.check(t))
 }
+
+// Review finding: a refund aimed at ANOTHER workflow's charge must be caught —
+// that customer was refunded while their merchant was also paid.
+func TestCheck_I3_RefundOfAnotherWorkflowsCharge(t *testing.T) {
+	ctx := context.Background()
+	e := setup(t)
+	wfA, _ := newWorkflow(t, e.pool)
+	wfB, _ := newWorkflow(t, e.pool)
+	chargeA := e.client.CreateCharge(ctx, "ch-a", provider.ChargeRequest{AmountCents: 10000, Currency: "EUR", CustomerID: "cus_1", WorkflowID: wfA})
+	require.Equal(t, provider.Success, chargeA.Class)
+	refund := e.client.CreateRefund(ctx, "re-b", provider.RefundRequest{AmountCents: 10000, Currency: "EUR", ChargeID: chargeA.ProviderRef, WorkflowID: wfB})
+	require.Equal(t, provider.Success, refund.Class)
+
+	requireViolation(t, e.check(t), "I3", wfB, "another workflow")
+}

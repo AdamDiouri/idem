@@ -3,10 +3,10 @@ package provider_test
 import (
 	"context"
 	"io"
-	"sync/atomic"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -120,9 +120,9 @@ func TestCreateCharge_CancelledContextIsAmbiguous(t *testing.T) {
 func TestClassify(t *testing.T) {
 	const valid = `{"id":"ch_1","status":"succeeded","amount_cents":10000,"currency":"EUR"}`
 	cases := []struct {
-		name   string
-		status int
-		body   string
+		name     string
+		status   int
+		body     string
 		want     provider.Class
 		inFlight bool
 	}{

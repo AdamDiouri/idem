@@ -125,8 +125,17 @@ func checkCmd() *cobra.Command {
 				return err
 			}
 
+			attention, err := invariants.NeedsAttention(e.ctx, e.pool)
+			if err != nil {
+				return err
+			}
+
 			out := cmd.OutOrStdout()
-			_, _ = fmt.Fprintf(out, "%d effects checked, %d violations\n", len(effects), len(violations))
+			_, _ = fmt.Fprintf(out, "%d effects checked, %d violations, %d workflows need attention\n",
+				len(effects), len(violations), len(attention))
+			for _, id := range attention {
+				_, _ = fmt.Fprintln(out, "needs attention:", id)
+			}
 			for _, v := range violations {
 				_, _ = fmt.Fprintln(out, v.String())
 			}
