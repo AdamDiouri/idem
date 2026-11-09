@@ -210,8 +210,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	return nil
 }
 
-// RunSweeper reclaims expired leases every interval until ctx is cancelled.
-func RunSweeper(ctx context.Context, pool *pgxpool.Pool, interval time.Duration, logger *slog.Logger) error {
+// RunSweeper reclaims expired leases every interval until ctx is cancelled,
+// and logs every workflow that has not progressed for stuckAfter (§11.1).
+func RunSweeper(ctx context.Context, pool *pgxpool.Pool, interval, stuckAfter time.Duration, logger *slog.Logger) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -222,6 +223,15 @@ func RunSweeper(ctx context.Context, pool *pgxpool.Pool, interval time.Duration,
 		case n > 0:
 			logger.Warn("reclaimed expired leases; steps are now IN_DOUBT", "count", n)
 		}
+
+		stuck, err := FindStuckWorkflows(ctx, pool, stuckAfter)
+		if err != nil && ctx.Err() == nil {
+			logger.Error("find stuck workflows", "error", err)
+		}
+		for _, wf := range stuck {
+			logger.Warn("workflow stuck", "workflow_id", wf.ID.String(), "status", wf.Status, "age", wf.Age.String())
+		}
+
 		select {
 		case <-ctx.Done():
 			return nil

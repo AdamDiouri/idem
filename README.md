@@ -58,7 +58,18 @@ curl -X PUT localhost:9090/_faults \
   -d '{"rules":[{"endpoint":"charges","mode":"timeout_after_effect","times":1}]}'
 ```
 
-Submit another workflow and wait ~15s. Its charge step shows attempt 1 `IN_DOUBT` (timeout) and attempt 2 `SUCCEEDED`: the retry reused the idempotency key, the provider replayed the original response, and `idem check` still reports one charge per workflow. Other modes: `timeout_before_effect`, `error_before_effect`, `error_after_effect`, `decline`. Customers whose ID starts with `cus_decline` are always declined.
+Submit another workflow and wait ~15s. Its charge step shows attempt 1 `IN_DOUBT` (timeout) and attempt 2 `SUCCEEDED`: the retry reused the idempotency key, the provider replayed the original response, and `idem check` still reports one charge per workflow. Other modes: `timeout_before_effect`, `error_before_effect`, `error_after_effect`, `rate_limit` (429, provably no effect), `decline`. Customers whose ID starts with `cus_decline` are always declined.
+
+Retries back off exponentially with jitter. When a step runs out of attempts it becomes `DEAD` (the dead-letter state), its workflow becomes `NEEDS_ATTENTION`, and the worker logs an ERROR saying whether money may have moved. To see it quickly, make every charge fail and lower a fresh step's attempt limit:
+
+```bash
+curl -X PUT localhost:9090/_faults -d '{"rules":[{"endpoint":"charges","mode":"error_before_effect"}]}'
+# submit a workflow, then:
+docker compose exec postgres psql -U idem -c "update steps set max_attempts = 2 where status in ('PENDING','IN_DOUBT')"
+docker compose exec postgres psql -U idem -c "select name, status, dead_reason from steps"   # charge DEAD, attempts_exhausted_in_doubt
+```
+
+A `500` is ambiguous, so the reason says money may have moved. With `rate_limit` it would be `attempts_exhausted_no_effect`. The sweeper also logs `workflow stuck` for workflows that have not progressed for `IDEM_STUCK_AFTER`.
 
 Failpoints crash or pause a worker at a named point (`after_claim`, `before_provider_call`, `after_provider_call`, `before_commit`, `after_commit`), e.g. `IDEM_FAILPOINTS=after_provider_call=exit@0.2` on the worker.
 
@@ -97,7 +108,12 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_PROVIDER_TIMEOUT` | `10s` | Provider call timeout; timeout + 2s must be below the lease TTL |
 | `IDEM_LEASE_TTL` | `30s` | How long a worker owns a claimed step |
 | `IDEM_POLL_INTERVAL` | `500ms` | Idle wait between claims |
-| `IDEM_RETRY_DELAY` | `2s` | Delay before retrying an `IN_DOUBT` step (fixed until slice 1.3 adds backoff) |
+| `IDEM_RETRY_BASE` | `2s` | First retry delay upper bound; doubles per attempt (full jitter) |
+| `IDEM_RETRY_CAP` | `5m` | Maximum retry delay; also caps a provider's `Retry-After` |
+| `IDEM_PROVIDER_KEY_RETENTION` | `24h` | How long the provider remembers idempotency keys |
+| `IDEM_KEY_RETENTION_MARGIN` | `1h` | In-doubt steps older than retention − margin are resolved by lookup, never by a new key |
+| `IDEM_SHUTDOWN_GRACE` | `15s` | How long an in-flight step may finish after SIGTERM; at least provider timeout + 2s |
+| `IDEM_STUCK_AFTER` | `15m` | Sweeper logs non-terminal workflows unchanged for this long |
 | `IDEM_SWEEP_INTERVAL` | `5s` | How often the sweeper reclaims expired leases |
 | `IDEM_WORKER_ID` | `hostname-pid` | |
 | `IDEM_FAILPOINTS` | (none) | `name=exit\|panic\|sleep:<d>[@probability],...` |

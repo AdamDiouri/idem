@@ -15,7 +15,9 @@ func setWorkerRequired(t *testing.T) {
 	t.Setenv("IDEM_PROVIDER_URL", "http://localhost:9090")
 	for _, k := range []string{
 		"IDEM_API_TOKENS", "IDEM_PROVIDER_TIMEOUT", "IDEM_LEASE_TTL", "IDEM_POLL_INTERVAL",
-		"IDEM_RETRY_DELAY", "IDEM_SWEEP_INTERVAL", "IDEM_WORKER_ID", "IDEM_FAILPOINTS", "IDEM_LOG_LEVEL",
+		"IDEM_RETRY_BASE", "IDEM_RETRY_CAP", "IDEM_PROVIDER_KEY_RETENTION", "IDEM_KEY_RETENTION_MARGIN",
+		"IDEM_SHUTDOWN_GRACE", "IDEM_STUCK_AFTER",
+		"IDEM_SWEEP_INTERVAL", "IDEM_WORKER_ID", "IDEM_FAILPOINTS", "IDEM_LOG_LEVEL",
 	} {
 		t.Setenv(k, "")
 	}
@@ -29,7 +31,12 @@ func TestLoadWorker_Defaults(t *testing.T) {
 	require.Equal(t, 10*time.Second, cfg.ProviderTimeout)
 	require.Equal(t, 30*time.Second, cfg.LeaseTTL)
 	require.Equal(t, 500*time.Millisecond, cfg.PollInterval)
-	require.Equal(t, 2*time.Second, cfg.RetryDelay)
+	require.Equal(t, 2*time.Second, cfg.RetryBase)
+	require.Equal(t, 5*time.Minute, cfg.RetryCap)
+	require.Equal(t, 24*time.Hour, cfg.ProviderKeyRetention)
+	require.Equal(t, time.Hour, cfg.KeyRetentionMargin)
+	require.Equal(t, 15*time.Second, cfg.ShutdownGrace)
+	require.Equal(t, 15*time.Minute, cfg.StuckAfter)
 	require.Equal(t, 5*time.Second, cfg.SweepInterval)
 	require.Equal(t, "", cfg.WorkerID)
 	require.Equal(t, "", cfg.Failpoints)
@@ -48,7 +55,12 @@ func TestLoadWorker_Invalid(t *testing.T) {
 		{"zero provider timeout", "IDEM_PROVIDER_TIMEOUT", "0s", "IDEM_PROVIDER_TIMEOUT"},
 		{"zero poll interval", "IDEM_POLL_INTERVAL", "0s", "IDEM_POLL_INTERVAL"},
 		{"zero sweep interval", "IDEM_SWEEP_INTERVAL", "0s", "IDEM_SWEEP_INTERVAL"},
-		{"negative retry delay", "IDEM_RETRY_DELAY", "-1s", "IDEM_RETRY_DELAY"},
+		{"zero retry base", "IDEM_RETRY_BASE", "0s", "IDEM_RETRY_BASE"},
+		{"retry cap below base", "IDEM_RETRY_CAP", "1s", "IDEM_RETRY_CAP"},
+		{"margin not below retention", "IDEM_KEY_RETENTION_MARGIN", "24h", "IDEM_KEY_RETENTION_MARGIN"},
+		{"zero margin", "IDEM_KEY_RETENTION_MARGIN", "0s", "IDEM_KEY_RETENTION_MARGIN"},
+		{"shutdown grace below provider timeout", "IDEM_SHUTDOWN_GRACE", "5s", "IDEM_SHUTDOWN_GRACE"},
+		{"zero stuck after", "IDEM_STUCK_AFTER", "0s", "IDEM_STUCK_AFTER"},
 		{"bad failpoints", "IDEM_FAILPOINTS", "x=fly", "IDEM_FAILPOINTS"},
 		{"unknown failpoint name", "IDEM_FAILPOINTS", "after_provider_cal=exit", "IDEM_FAILPOINTS"},
 		{"unknown log level", "IDEM_LOG_LEVEL", "loud", "IDEM_LOG_LEVEL"},

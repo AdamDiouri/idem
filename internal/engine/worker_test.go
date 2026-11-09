@@ -357,7 +357,7 @@ func TestWorker_RunSurvivesStepErrors(t *testing.T) {
 
 	_, _ = runInBackground(t, h.worker("w1", step).Run)
 	_, _ = runInBackground(t, func(ctx context.Context) error {
-		return engine.RunSweeper(ctx, h.pool, 50*time.Millisecond, slog.New(slog.DiscardHandler))
+		return engine.RunSweeper(ctx, h.pool, 50*time.Millisecond, time.Hour, slog.New(slog.DiscardHandler))
 	})
 
 	require.Eventually(t, func() bool { return h.chargeStatus(t, wf) == "SUCCEEDED" }, 5*time.Second, 20*time.Millisecond)
@@ -563,4 +563,57 @@ func TestWorker_RunFinishesInFlightStepOnCancel(t *testing.T) {
 		t.Fatal("Run did not return")
 	}
 	h.assertChargedOnce(t, wf)
+}
+
+// recordingHandler captures log records for assertions.
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *recordingHandler) find(msg, key, value string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Message != msg {
+			continue
+		}
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == key && a.Value.String() == value {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRunSweeper_LogsStuckWorkflows(t *testing.T) {
+	h := newHarness(t)
+	wf := submit(t, h.pool, "cus_1")
+	_, err := h.pool.Exec(context.Background(),
+		`UPDATE workflows SET status = 'RUNNING', updated_at = now() - interval '2 hours' WHERE id = $1`, wf)
+	require.NoError(t, err)
+
+	rec := &recordingHandler{}
+	_, _ = runInBackground(t, func(ctx context.Context) error {
+		return engine.RunSweeper(ctx, h.pool, 10*time.Millisecond, time.Hour, slog.New(rec))
+	})
+	require.Eventually(t, func() bool { return rec.find("workflow stuck", "workflow_id", wf.String()) },
+		time.Second, 10*time.Millisecond)
 }

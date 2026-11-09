@@ -46,6 +46,7 @@ services:
   worker:
     build: .
     command: ["worker"]
+    stop_grace_period: 20s # > IDEM_SHUTDOWN_GRACE so in-flight steps finish
     environment: &worker-env
       IDEM_DATABASE_URL: postgres://idem:idem@postgres:5432/idem?sslmode=disable
       IDEM_PROVIDER_URL: http://fakeprovider:9090
