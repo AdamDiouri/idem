@@ -115,3 +115,14 @@ func TestReport_TextIncludesSeedAndReproduceCommand(t *testing.T) {
 	require.Contains(t, text, "PASSED")
 	require.Contains(t, text, "bin/chaos --seed 42 --duration 30s --workflows 10 --workers 4 --sweepers 2")
 }
+
+func TestReport_TextShowsRecoveryCounts(t *testing.T) {
+	r := healthy()
+	r.FencedCommits = 3
+	r.InDoubtResolved = 7
+	r.Evaluate()
+	require.True(t, r.Passed, "recovery counts are informational: %v", r.Reasons)
+	text := r.Text()
+	require.Contains(t, text, "fenced commits: 3")
+	require.Contains(t, text, "in-doubt resolved: 7")
+}

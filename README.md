@@ -5,7 +5,7 @@ Work may be attempted more than once; its effects happen at most once.
 
 See [`docs/design.md`](docs/design.md) for the design, guarantees, fault model and failure-mode table.
 
-**Status:** Milestone 1, slice 1.4: the full saga runs end to end — charge the customer, pay the merchant (amount − fee), or refund the customer if the payout definitively fails — with retries, dead letters and invariant checks. The chaos harness and operability (metrics, admin CLI) come next.
+**Status:** Milestone 1 complete. The full saga (charge, payout, or refund on a definite payout failure) runs with leases, fencing, retries, dead letters and invariant checks. A chaos harness proves it under crashes and faults, and operators get audited admin actions, Prometheus metrics, alerts and a runbook. Next: milestone 2 (async payouts with webhooks, generic workflow definitions).
 
 ## Prerequisites
 
@@ -23,7 +23,8 @@ make up   # postgres → migrate → api (:8080), worker, sweeper, fakeprovider 
 |---|---|---|
 | `api` | `idem api` | Accepts workflows idempotently |
 | `worker` | `idem worker` | Claims steps under a lease, calls the provider, posts the ledger |
-| `sweeper` | `idem sweeper` | Moves steps with expired leases to `IN_DOUBT` (crashed/paused workers) |
+| `sweeper` | `idem sweeper` | Moves steps with expired leases to `IN_DOUBT` (crashed/paused workers); exports state gauges |
+| `prometheus` | `prom/prometheus` | Scrapes every process; evaluates the alert rules (<http://localhost:9091>) |
 | `fakeprovider` | `/fakeprovider` | Stripe-like provider with fault injection and an effects oracle |
 
 Submit a workflow:
@@ -97,6 +98,35 @@ Failpoints crash or pause a worker at a named point (`after_claim`, `before_prov
 ```bash
 make down
 ```
+
+## Operate it
+
+When idem cannot finish a workflow without guessing about money, it parks it in `NEEDS_ATTENTION` and alerts. The [runbook](docs/runbooks/needs-attention.md) explains every parking reason and which command resolves it.
+
+```bash
+export IDEM_DATABASE_URL=postgres://idem:idem@localhost:5432/idem?sslmode=disable
+idem admin list                                              # what is parked, and why
+idem admin retry-step <step-id> --reason "provider recovered"  # same key: always safe
+idem admin confirm-step <step-id> --provider-ref po_… --reason "provider shows the payout"
+idem admin compensate <workflow-id> --reason "merchant not paid; refund customer"
+idem admin fail <workflow-id> --reason "customer was never charged"
+idem admin new-generation <step-id> --reason … --confirm-no-effect   # new key: verify first
+```
+
+(With compose: `docker compose run --rm --entrypoint /idem worker admin list`.)
+
+Every change needs `--reason`, refuses anything that isn't parked, and is recorded in `admin_actions`.
+
+**Metrics:**
+- `/metrics` on the API (`:8080`) and on workers and sweepers (`IDEM_METRICS_ADDR`, default `:9100`).
+- Prometheus in compose: <http://localhost:9091>.
+- Alert rules: [`deploy/prometheus/alerts.yml`](deploy/prometheus/alerts.yml):
+  - `IdemWorkflowsNeedAttention`
+  - `IdemMoneyMayHaveMoved`
+  - `IdemWorkflowsStuck`
+  - `IdemStepsOverAttemptLimit`
+  - `IdemFencedCommitsSpike`
+  - `IdemProviderSlow`
 
 ## Run a chaos campaign
 
@@ -186,4 +216,5 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_STUCK_AFTER` | `15m` | Sweeper logs non-terminal workflows unchanged for this long |
 | `IDEM_SWEEP_INTERVAL` | `5s` | How often the sweeper reclaims expired leases |
 | `IDEM_WORKER_ID` | `hostname-pid` | |
+| `IDEM_METRICS_ADDR` | `:9100` | Where worker/sweeper serve `/metrics`; `off` disables |
 | `IDEM_FAILPOINTS` | (none) | `name=exit\|panic\|sleep:<d>[@probability],...` |

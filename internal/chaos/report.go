@@ -44,22 +44,26 @@ var expectedParking = map[string]bool{
 
 // Report is a campaign's verdict and evidence.
 type Report struct {
-	Seed           int64                  `json:"seed"`
-	Config         Config                 `json:"config"`
-	Events         []ExecutedEvent        `json:"events"`
-	Clients        ClientResult           `json:"clients"`
-	Outcomes       map[string]int         `json:"outcomes"` // workflow status → count
-	NeedsAttention []string               `json:"needs_attention"`
-	Parked         []Parked               `json:"parked"`
-	AckMismatches  []string               `json:"ack_mismatches"` // accepted IDs the database disagrees with
-	FaultHits      map[string]int         `json:"fault_hits"`     // provider faults that actually fired
-	FailpointExits int                    `json:"failpoint_exits"`
-	Violations     []invariants.Violation `json:"violations"`
-	Liveness       []invariants.Violation `json:"liveness"`
-	Restarts       map[string]int         `json:"restarts"` // process → crash restarts
-	SettleTime     time.Duration          `json:"settle_time"`
-	Passed         bool                   `json:"passed"`
-	Reasons        []string               `json:"reasons"`
+	Seed           int64           `json:"seed"`
+	Config         Config          `json:"config"`
+	Events         []ExecutedEvent `json:"events"`
+	Clients        ClientResult    `json:"clients"`
+	Outcomes       map[string]int  `json:"outcomes"` // workflow status → count
+	NeedsAttention []string        `json:"needs_attention"`
+	Parked         []Parked        `json:"parked"`
+	AckMismatches  []string        `json:"ack_mismatches"` // accepted IDs the database disagrees with
+	FaultHits      map[string]int  `json:"fault_hits"`     // provider faults that actually fired
+	FailpointExits int             `json:"failpoint_exits"`
+	// Recovery evidence (informational): completions discarded because the
+	// worker had lost its lease, and steps that succeeded after being IN_DOUBT.
+	FencedCommits   int                    `json:"fenced_commits"`
+	InDoubtResolved int                    `json:"in_doubt_resolved"`
+	Violations      []invariants.Violation `json:"violations"`
+	Liveness        []invariants.Violation `json:"liveness"`
+	Restarts        map[string]int         `json:"restarts"` // process → crash restarts
+	SettleTime      time.Duration          `json:"settle_time"`
+	Passed          bool                   `json:"passed"`
+	Reasons         []string               `json:"reasons"`
 }
 
 // Evaluate sets Passed and Reasons. A run passes only if every check holds AND
@@ -197,6 +201,7 @@ func (r *Report) Text() string {
 	}
 	fmt.Fprintf(&b, "provider fault hits: %v\n", r.FaultHits)
 	fmt.Fprintf(&b, "failpoint exits: %d\n", r.FailpointExits)
+	fmt.Fprintf(&b, "fenced commits: %d\nin-doubt resolved: %d\n", r.FencedCommits, r.InDoubtResolved)
 
 	fmt.Fprintf(&b, "crash restarts:\n")
 	for _, name := range slices.Sorted(maps.Keys(r.Restarts)) {
