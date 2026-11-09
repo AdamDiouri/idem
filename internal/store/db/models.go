@@ -9,6 +9,11 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Account struct {
+	Code        string
+	Description string
+}
+
 type ApiIdempotencyKey struct {
 	ClientID           string
 	Key                string
@@ -16,6 +21,22 @@ type ApiIdempotencyKey struct {
 	WorkflowID         *uuid.UUID
 	ResponseBody       []byte
 	CreatedAt          pgtype.Timestamptz
+}
+
+type LedgerEntry struct {
+	ID            uuid.UUID
+	TransactionID uuid.UUID
+	Account       string
+	AmountCents   int64
+	Currency      string
+}
+
+type LedgerTransaction struct {
+	ID         uuid.UUID
+	WorkflowID uuid.UUID
+	StepID     uuid.UUID
+	Kind       string
+	CreatedAt  pgtype.Timestamptz
 }
 
 type Step struct {
@@ -37,6 +58,18 @@ type Step struct {
 	LastError        *string
 	FirstAttemptedAt pgtype.Timestamptz
 	CreatedAt        pgtype.Timestamptz
+}
+
+type StepAttempt struct {
+	StepID     uuid.UUID
+	AttemptNo  int32
+	LeaseEpoch int64
+	WorkerID   string
+	StartedAt  pgtype.Timestamptz
+	FinishedAt pgtype.Timestamptz
+	Outcome    *string
+	HttpStatus *int32
+	Error      *string
 }
 
 type Workflow struct {

@@ -69,7 +69,9 @@ func NewPool(t *testing.T, dsn string) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 
-	if _, err := pool.Exec(ctx, `TRUNCATE api_idempotency_keys, steps, workflows CASCADE`); err != nil {
+	// TRUNCATE bypasses the ledger's append-only row triggers; accounts are seed data.
+	if _, err := pool.Exec(ctx, `TRUNCATE ledger_entries, ledger_transactions, step_attempts,
+		api_idempotency_keys, steps, workflows CASCADE`); err != nil {
 		t.Fatalf("truncate tables: %v", err)
 	}
 	return pool
