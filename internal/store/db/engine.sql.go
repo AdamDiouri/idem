@@ -23,8 +23,11 @@ func (q *Queries) BumpWorkflowVersion(ctx context.Context, id uuid.UUID) error {
 const chargeProviderRef = `-- name: ChargeProviderRef :one
 SELECT provider_ref::text FROM steps
 WHERE workflow_id = $1 AND name = 'charge' AND status = 'SUCCEEDED' AND provider_ref IS NOT NULL
+ORDER BY generation DESC
+LIMIT 1
 `
 
+// The latest successful charge (admin new-generation can create several charge steps).
 func (q *Queries) ChargeProviderRef(ctx context.Context, workflowID uuid.UUID) (string, error) {
 	row := q.db.QueryRow(ctx, chargeProviderRef, workflowID)
 	var provider_ref string

@@ -583,3 +583,43 @@ func TestComplete_ChargeSuccessOnParkedWorkflowRollsBack(t *testing.T) {
 	require.Equal(t, 0, scalar[int](t, pool, `SELECT count(*) FROM steps WHERE workflow_id = $1 AND name = 'payout'`, wf),
 		"a parked workflow must not advance to the payout")
 }
+
+func TestSchema_RefundChargeRefIsImmutable(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.NewPool(t, dsn)
+	wf := submit(t, pool, "cus_1")
+	ref := "ch_1"
+	require.NoError(t, insertRefundStep(t, pool, wf, &ref))
+
+	_, err := pool.Exec(ctx, `UPDATE steps SET refund_charge_ref = 'ch_2' WHERE name = 'refund'`)
+	require.Error(t, err)
+	var pgErr interface{ SQLState() string }
+	require.True(t, errors.As(err, &pgErr))
+	require.Equal(t, "42501", pgErr.SQLState())
+
+	_, err = pool.Exec(ctx, `UPDATE steps SET status = 'IN_DOUBT' WHERE name = 'refund'`)
+	require.NoError(t, err, "other columns stay updatable")
+}
+
+// new-generation can leave several charge steps; the refund must reverse the
+// one that actually succeeded last.
+func TestChargeProviderRef_PicksHighestGeneration(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.NewPool(t, dsn)
+	wf := submit(t, pool, "cus_1")
+	_, err := pool.Exec(ctx, `UPDATE steps SET status = 'SUCCEEDED', provider_ref = 'ch_a' WHERE workflow_id = $1`, wf)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		INSERT INTO steps (id, workflow_id, name, generation, status, idempotency_key, max_attempts, provider_ref)
+		VALUES (gen_random_uuid(), $1, 'charge', 1, 'SUCCEEDED', $2, 8, 'ch_b'),
+		       (gen_random_uuid(), $1, 'payout', 0, 'PENDING', $3, 8, NULL)`, wf, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `UPDATE workflows SET status = 'RUNNING' WHERE id = $1`, wf)
+	require.NoError(t, err)
+
+	s, ok, err := engine.Claim(ctx, pool, "w1", []string{"payout"}, time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, engine.Complete(ctx, pool, s, engine.Result{Kind: engine.ResultFailedPermanent, HTTPStatus: 422}, engine.NewPayoutStep(nil)))
+	require.Equal(t, "ch_b", scalar[string](t, pool, `SELECT refund_charge_ref FROM steps WHERE workflow_id = $1 AND name = 'refund'`, wf))
+}

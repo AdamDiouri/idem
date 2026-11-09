@@ -94,8 +94,11 @@ SET status = sqlc.arg(to_status)::text, version = version + 1, updated_at = now(
 WHERE id = sqlc.arg(id) AND status = ANY(sqlc.arg(from_statuses)::text[]);
 
 -- name: ChargeProviderRef :one
+-- The latest successful charge (admin new-generation can create several charge steps).
 SELECT provider_ref::text FROM steps
-WHERE workflow_id = sqlc.arg(workflow_id) AND name = 'charge' AND status = 'SUCCEEDED' AND provider_ref IS NOT NULL;
+WHERE workflow_id = sqlc.arg(workflow_id) AND name = 'charge' AND status = 'SUCCEEDED' AND provider_ref IS NOT NULL
+ORDER BY generation DESC
+LIMIT 1;
 
 -- name: FindStuckWorkflows :many
 SELECT id, status, (EXTRACT(EPOCH FROM (now() - updated_at)) * 1000)::bigint AS age_ms

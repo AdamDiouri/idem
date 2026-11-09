@@ -151,8 +151,15 @@ func TestFlow_RefundRejectedNeedsAttention(t *testing.T) {
 	h := newHarness(t)
 	wf := submitTo(t, h, "cus_1", "mer_invalid_1")
 	h.drain(t, h.workerWith("w1", nil, h.chargeStep(), h.payoutStep()))
-	_, err := h.pool.Exec(context.Background(), `UPDATE steps SET refund_charge_ref = 'ch_missing' WHERE workflow_id = $1 AND name = 'refund'`, wf)
+	// The reference is immutable; plant the corruption with triggers disabled.
+	ctx := context.Background()
+	tx, err := h.pool.Begin(ctx)
 	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `SET LOCAL session_replication_role = replica`)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `UPDATE steps SET refund_charge_ref = 'ch_missing' WHERE workflow_id = $1 AND name = 'refund'`, wf)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
 
 	h.drain(t, h.workerWith("w1", nil, h.refundStep()))
 	require.Equal(t, "FAILED_PERMANENT", h.stepStatus(t, wf, "refund"))
