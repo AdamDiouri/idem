@@ -120,6 +120,23 @@ func TestSweeper_StepAttemptCountsAsProgress(t *testing.T) {
 	require.Less(t, testutil.ToFloat64(sweepOnce(t, h).UnsettledIdle), 60.0)
 }
 
+// Review finding I1: a crash-looping step (claimed, then abandoned when its
+// lease is reclaimed, again and again) is not progress. Counting every claim
+// as progress made IdemWorkflowsStuck blind to exactly the loop it exists for.
+func TestSweeper_CrashLoopIsNotProgress(t *testing.T) {
+	h := newHarness(t)
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	_, err := h.pool.Exec(context.Background(),
+		`UPDATE workflows SET status = 'RUNNING', updated_at = now() - interval '1 hour' WHERE id = $1`, wf)
+	require.NoError(t, err)
+	for range 3 {
+		mustClaim(t, h.pool, "crashy", 10*time.Millisecond) // the worker dies before finishing
+		time.Sleep(30 * time.Millisecond)
+		require.EqualValues(t, 1, h.reclaim(t))
+	}
+	require.Greater(t, testutil.ToFloat64(sweepOnce(t, h).UnsettledIdle), 3500.0)
+}
+
 // Review focus: labels must stay bounded — no IDs, keys or error text.
 func TestMetrics_NoUnboundedLabels(t *testing.T) {
 	h := newHarness(t)

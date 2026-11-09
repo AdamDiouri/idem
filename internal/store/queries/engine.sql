@@ -101,16 +101,17 @@ ORDER BY generation DESC
 LIMIT 1;
 
 -- name: FindStuckWorkflows :many
--- Unsettled workflows without progress (a status change or a step attempt) for
+-- Unsettled workflows without progress (a status change or a FINISHED step
+-- attempt: a claim alone, or an attempt abandoned by a crash, is not) for
 -- older_than_ms, longest idle first. Same definition as UnsettledIdleMs.
 SELECT id, status, idle_ms FROM (
   SELECT w.id, w.status,
          (EXTRACT(EPOCH FROM (now() - GREATEST(w.updated_at, a.last_attempt))) * 1000)::bigint AS idle_ms
   FROM workflows w
   LEFT JOIN LATERAL (
-    SELECT max(sa.started_at) AS last_attempt
+    SELECT max(sa.finished_at) AS last_attempt
     FROM steps s JOIN step_attempts sa ON sa.step_id = s.id
-    WHERE s.workflow_id = w.id
+    WHERE s.workflow_id = w.id AND sa.outcome IS DISTINCT FROM 'ABANDONED'
   ) a ON true
   WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
 ) idle
@@ -125,14 +126,15 @@ SELECT name, status, count(*)::int AS n FROM steps GROUP BY name, status;
 
 -- name: UnsettledIdleMs :one
 -- The longest any unsettled workflow has gone without progress: a status
--- change or a step attempt (0 if none). Age since creation would page as soon
+-- change or a finished step attempt (0 if none). Claims alone and attempts
+-- abandoned by a crash don't count, or a crash loop would look busy forever. Age since creation would page as soon
 -- as an operator retried an old parked workflow.
 SELECT COALESCE(max(EXTRACT(EPOCH FROM (now() - GREATEST(w.updated_at, a.last_attempt))) * 1000), 0)::bigint AS idle_ms
 FROM workflows w
 LEFT JOIN LATERAL (
-  SELECT max(sa.started_at) AS last_attempt
+  SELECT max(sa.finished_at) AS last_attempt
   FROM steps s JOIN step_attempts sa ON sa.step_id = s.id
-  WHERE s.workflow_id = w.id
+  WHERE s.workflow_id = w.id AND sa.outcome IS DISTINCT FROM 'ABANDONED'
 ) a ON true
 WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING');
 

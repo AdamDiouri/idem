@@ -45,7 +45,7 @@ Worker logs carry `workflow_id`, `step_id`, `attempt` and `lease_epoch` on every
 
 ## 2. The actions
 
-Every command below also takes **`--expect-version <VERSION>`** from `idem admin list` (omitted from the table for brevity). It ties your decision to the facts you checked. If someone else acted in between, for example a retry that has since charged the customer and parked again, the command is refused as **stale** and changes nothing: list again, re-check with the provider, and decide again.
+Every command below also takes **`--expect-version <VERSION>`** from `idem admin list` (omitted from the table for brevity). It ties your decision to the facts you checked. If someone else acted in between, the command changes nothing and exits `1`: it is refused as **not actionable** while their action is still under way, and as **stale** once the workflow has been parked again (for example after a retry that charged the customer). Either way: list again, re-check with the provider, and decide again.
 
 | Command | Use it when | What it does |
 |---|---|---|
@@ -129,10 +129,11 @@ A parked workflow's reason is anything other than `attempts_exhausted_no_effect`
 
 ### IdemWorkflowsStuck
 
-An unsettled workflow (not parked) has made **no progress** for 15 minutes: no status change and no step attempt. Age alone doesn't count, so a workflow retried hours after it was parked doesn't page. Usual causes:
-- the workers are down or crash-looping (check process restarts and worker logs)
+An unsettled workflow (not parked) has made **no progress** for 15 minutes: no status change and no *finished* step attempt. Age alone doesn't count, so a workflow retried hours after it was parked doesn't page. A claim alone doesn't count either, and neither does an attempt abandoned by a crash, so a step that crash-loops still pages. Usual causes:
+- the workers are down, or crash-loop on this step (check process restarts and worker logs; a step that is claimed and abandoned again and again also shows in `IdemStepsOverAttemptLimit`)
 - the database is unreachable
-- a provider is slow enough that backoff keeps pushing retries out
+
+A slow provider does **not** show here, because its attempts still finish; that is `IdemProviderSlow`.
 
 The sweeper also logs `stuck workflows count=… longest_idle=…` with the longest-idle workflow's ID (`longest_idle_workflow_id`).
 

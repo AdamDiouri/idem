@@ -414,7 +414,7 @@ As built in slice 1.6.
   - `idem admin new-generation <step-id> --confirm-no-effect`: a new key. **Dangerous**: a new payment as far as the provider is concerned. The old step stays as history.
 - **Why not the original `resolve --as SUCCEEDED|FAILED`:** relabelling a workflow would leave its ledger and saga inconsistent, so `confirm-step`, `compensate` and `fail` replace it.
 - **Exit codes:** `0` done, `1` refused or failed (not parked, stale, doesn't fit), `2` usage mistake (decided by error type, never by error text) or a missing `--confirm-no-effect`.
-- **Concurrency:** regression tests race every action against the others and against running workers; exactly one wins, and losers leave no trace.
+- **Concurrency:** regression tests race every action against the others on the same listing (exactly one wins, losers leave no trace), with workers running so the winner's result settles cleanly. Workers can't touch a parked workflow, so the worker-reparks-while-an-operator-acts case is covered by a sequential stale-version test.
 - **Runbook:** `docs/runbooks/needs-attention.md` maps each `dead_reason` to an investigation and an action.
 
 ---
@@ -530,7 +530,7 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 - **Structured logs** (`log/slog`, JSON) with `workflow_id`, `step`, `attempt`, `lease_epoch`, `worker_id` on every line.
 - **Prometheus metrics** (as built). Labels never carry IDs, keys or error text.
   - **Workers:** `idem_step_attempts_total{step,outcome}` (including `fenced`), `idem_provider_request_duration_seconds{step,class}`, `idem_key_retention_lookups_total{step,found}`.
-  - **Sweepers:** `idem_leases_reclaimed_total`, `idem_workflows{status}`, `idem_steps{step,status}`, `idem_unsettled_workflow_max_idle_seconds` (time without progress, a status change or a step attempt; age since creation paged as soon as an operator retried an old workflow), `idem_steps_over_attempt_limit`, `idem_parked_workflows{reason}`.
+  - **Sweepers:** `idem_leases_reclaimed_total`, `idem_workflows{status}`, `idem_steps{step,status}`, `idem_unsettled_workflow_max_idle_seconds` (time without progress: a status change or a finished, non-abandoned step attempt. Age since creation paged as soon as an operator retried an old workflow; counting bare claims hid crash loops), `idem_steps_over_attempt_limit`, `idem_parked_workflows{reason}`.
   - **API:** `idem_workflow_submissions_total{result}`.
   - **Not yet:** `webhook_inbox_unprocessed` arrives with M2.
 - **Ports:** the API serves `/metrics` on its own address; workers and sweepers on `IDEM_METRICS_ADDR` (default `:8090`, outside the 9100–9999 range Prometheus allocates to exporters).
