@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -22,35 +21,61 @@ import (
 type usageError struct{ error }
 
 // exitCode maps a command error to a process exit code: 0 ok, 2 usage, 1 other.
+// Usage mistakes are recognised by type only (see markUsageErrors), never by
+// error text: an operational error must not exit 2 because of its wording.
 func exitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	if errors.Is(err, engine.ErrConfirmationRequired) {
-		return 2 // a missing flag, discovered once the step's history is known
-	}
 	var ue usageError
-	msg := err.Error()
-	if errors.As(err, &ue) || strings.Contains(msg, "required flag") || strings.Contains(msg, "unknown flag") ||
-		strings.Contains(msg, "accepts ") || strings.Contains(msg, "unknown command") {
-		return 2
+	if errors.As(err, &ue) || errors.Is(err, engine.ErrConfirmationRequired) {
+		return 2 // ErrConfirmationRequired: a missing flag, found once the step's history is known
 	}
 	return 1
 }
 
-// runAdmin runs `idem admin <args>` and returns the exit code. main and the
-// tests share it.
-func runAdmin(args []string, stdout, stderr io.Writer) int {
-	root := &cobra.Command{Use: "idem", SilenceUsage: true, SilenceErrors: true}
-	root.AddCommand(adminCmd())
-	root.SetArgs(append([]string{"admin"}, args...))
-	root.SetOut(stdout)
-	root.SetErr(stderr)
-	err := root.Execute()
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "error:", err)
+// markUsageErrors makes every command-line mistake cobra can detect a
+// usageError: bad or unknown flags, missing required flags, wrong argument
+// counts, and unknown subcommands (which cobra would otherwise answer with
+// help and exit 0).
+func markUsageErrors(root *cobra.Command) {
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err} })
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		if err := cmd.ValidateRequiredFlags(); err != nil {
+			return usageError{err}
+		}
+		return nil
 	}
-	return exitCode(err)
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		switch {
+		case c.HasSubCommands() && c.RunE == nil && c.Run == nil:
+			c.Args = cobra.ArbitraryArgs
+			c.RunE = func(cmd *cobra.Command, args []string) error {
+				if len(args) > 0 {
+					return usageError{fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())}
+				}
+				return cmd.Help()
+			}
+		case c.Args != nil:
+			validate := c.Args
+			c.Args = func(cmd *cobra.Command, args []string) error {
+				if err := validate(cmd, args); err != nil {
+					return usageError{err}
+				}
+				return nil
+			}
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(root)
+}
+
+// runAdmin runs `idem admin <args>` and returns the exit code.
+func runAdmin(args []string, stdout, stderr io.Writer) int {
+	return runIdem(append([]string{"admin"}, args...), stdout, stderr)
 }
 
 func adminCmd() *cobra.Command {

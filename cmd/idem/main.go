@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,6 +25,11 @@ import (
 const shutdownGrace = 10 * time.Second
 
 func main() {
+	os.Exit(runIdem(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// newRootCmd builds the idem command tree.
+func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "idem",
 		Short:         "Effectively-once payments workflow engine",
@@ -31,11 +37,22 @@ func main() {
 		SilenceErrors: true,
 	}
 	root.AddCommand(migrateCmd(), apiCmd(), workerCmd(), sweeperCmd(), checkCmd(), adminCmd())
+	markUsageErrors(root)
+	return root
+}
 
-	if err := root.Execute(); err != nil {
-		slog.Error("idem failed", "error", err)
-		os.Exit(exitCode(err))
+// runIdem runs idem with args and returns the process exit code. main and the
+// tests share it.
+func runIdem(args []string, stdout, stderr io.Writer) int {
+	root := newRootCmd()
+	root.SetArgs(args)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	err := root.Execute()
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "error:", err)
 	}
+	return exitCode(err)
 }
 
 func migrateCmd() *cobra.Command {
