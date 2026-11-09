@@ -9,8 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AdamDiouri/idem/internal/fakeprovider"
 	"github.com/AdamDiouri/idem/internal/invariants"
@@ -35,7 +39,7 @@ func DefaultConfig() Config {
 	return Config{
 		Duration:      90 * time.Second,
 		SettleTimeout: 120 * time.Second,
-		Workflows:     300,
+		Workflows:     1000,
 		Workers:       4,
 		Sweepers:      2,
 		BinDir:        "bin",
@@ -91,7 +95,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		return rep, err
 	}
 	logger.Info("starting postgres", "port", pgPort)
-	pg, err := StartPostgres(ctx, fmt.Sprintf("idem-chaos-%d", cfg.Seed), pgPort)
+	pg, err := StartPostgres(ctx, containerName(cfg.Seed), pgPort)
 	if err != nil {
 		return rep, err
 	}
@@ -106,6 +110,12 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	if out, err := migrate.CombinedOutput(); err != nil {
 		return rep, fmt.Errorf("migrate: %w: %s", err, out)
 	}
+
+	pool, err := store.Open(ctx, pg.DSN())
+	if err != nil {
+		return rep, err
+	}
+	defer pool.Close()
 
 	sup := NewSupervisor(logger)
 	defer func() {
@@ -162,9 +172,13 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	clientCtx, cancelClients := context.WithTimeout(ctx, cfg.Duration+cfg.SettleTimeout)
 	defer cancelClients()
 	clientsDone := make(chan ClientResult, 1)
+	var outstanding atomic.Int64
 	go func() {
 		clientsDone <- RunClients(clientCtx, ClientConfig{
-			BaseURL: apiURL, Token: apiToken, Workflows: cfg.Workflows, Concurrency: 16, Seed: cfg.Seed,
+			BaseURL: apiURL, Token: apiToken, Workflows: cfg.Workflows, Seed: cfg.Seed,
+			// Open-loop arrivals over the whole campaign, so faults meet work in flight.
+			Spread:      cfg.Duration,
+			Outstanding: &outstanding,
 		})
 	}()
 
@@ -177,13 +191,18 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 			return rep, ctx.Err()
 		case <-time.After(time.Until(start.Add(ev.At))):
 		}
+		inFlight := unsettled(ctx, pool) + int(outstanding.Load())
 		err := apply(ctx, ev, workers, apiProc, pg, providerURL, &pauses)
-		ex := ExecutedEvent{Event: ev, WallTime: time.Now()}
-		if err != nil {
+		ex := ExecutedEvent{Event: ev, WallTime: time.Now(), InFlight: inFlight}
+		switch {
+		case errors.Is(err, ErrNotRunning):
+			ex.Skipped = err.Error() // target already down (restarting): harmless
+			logger.Info("event skipped", "kind", ev.Kind, "reason", err)
+		case err != nil:
 			ex.Err = err.Error()
 			logger.Warn("event failed", "kind", ev.Kind, "error", err)
-		} else {
-			logger.Info("event", "kind", ev.Kind, "target", ev.Target)
+		default:
+			logger.Info("event", "kind", ev.Kind, "target", ev.Target, "in_flight", inFlight)
 		}
 		rep.Events = append(rep.Events, ex)
 	}
@@ -201,10 +220,11 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	}
 	pauses.Wait() // every pause resumes itself
 	for i, w := range workers {
-		rep.Restarts[w.Name()] = w.Restarts()
 		if err := w.Stop(ctx); err != nil {
 			return rep, err
 		}
+		rep.Restarts[w.Name()] = w.Restarts()
+		rep.FailpointExits += w.FailpointExits()
 		if _, err := sup.Start(ProcSpec{Name: fmt.Sprintf("worker-%d-settle", i), Path: idem, Args: []string{"worker"},
 			LogPath: logPath(fmt.Sprintf("worker-%d", i)), Env: append(env, fmt.Sprintf("IDEM_WORKER_ID=w%d-settle", i))}); err != nil {
 			return rep, err
@@ -214,11 +234,6 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 
 	rep.Clients = <-clientsDone
 
-	pool, err := store.Open(ctx, pg.DSN())
-	if err != nil {
-		return rep, err
-	}
-	defer pool.Close()
 	deadline := settleStart.Add(cfg.SettleTimeout)
 	for {
 		if rep.Liveness, err = invariants.CheckLiveness(ctx, pool); err != nil {
@@ -246,6 +261,15 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	if rep.NeedsAttention, err = invariants.NeedsAttention(ctx, pool); err != nil {
 		return rep, err
 	}
+	if rep.FaultHits, err = fakeprovider.FetchFaultHits(ctx, providerURL); err != nil {
+		return rep, err
+	}
+	if rep.Parked, err = parked(ctx, pool); err != nil {
+		return rep, err
+	}
+	if rep.AckMismatches, err = ackMismatches(ctx, pool, rep.Clients.Accepted); err != nil {
+		return rep, err
+	}
 	rep.Outcomes = map[string]int{}
 	rows, err := pool.Query(ctx, `SELECT status, count(*) FROM workflows GROUP BY status`)
 	if err != nil {
@@ -267,6 +291,79 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		return rep, err
 	}
 	return rep, nil
+}
+
+// unsettled counts workflows not yet terminal or parked (0 if the database is
+// unreachable, e.g. during a restart: then the event is not counted as effective).
+func unsettled(ctx context.Context, pool *pgxpool.Pool) int {
+	qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var n int
+	if err := pool.QueryRow(qctx, `SELECT count(*) FROM workflows WHERE status IN ('PENDING','RUNNING','COMPENSATING')`).Scan(&n); err != nil {
+		return 0
+	}
+	return n
+}
+
+// parked lists workflows needing attention with the step and reason that parked them.
+func parked(ctx context.Context, pool *pgxpool.Pool) ([]Parked, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT w.id::text, COALESCE(s.name, ''), COALESCE(s.dead_reason, s.status, 'unknown')
+		FROM workflows w
+		LEFT JOIN steps s ON s.workflow_id = w.id AND s.status IN ('DEAD', 'FAILED_PERMANENT')
+		WHERE w.status = 'NEEDS_ATTENTION' ORDER BY w.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Parked
+	for rows.Next() {
+		var p Parked
+		if err := rows.Scan(&p.WorkflowID, &p.Step, &p.Reason); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ackMismatches checks every workflow a client was told about against the
+// database: the key must exist and map to the same workflow, and the database
+// must hold no workflow the clients were not told about.
+func ackMismatches(ctx context.Context, pool *pgxpool.Pool, accepted map[string]string) ([]string, error) {
+	rows, err := pool.Query(ctx, `SELECT key, workflow_id::text FROM api_idempotency_keys WHERE client_id = 'chaos' AND workflow_id IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	db := map[string]string{}
+	for rows.Next() {
+		var key, wf string
+		if err := rows.Scan(&key, &wf); err != nil {
+			return nil, err
+		}
+		db[key] = wf
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var out []string
+	for key, wf := range accepted {
+		switch got, ok := db[key]; {
+		case !ok:
+			out = append(out, fmt.Sprintf("%s: client was told %s, database has no such key", key, wf))
+		case got != wf:
+			out = append(out, fmt.Sprintf("%s: client was told %s, database has %s", key, wf, got))
+		}
+	}
+	for key, wf := range db {
+		if _, ok := accepted[key]; !ok {
+			out = append(out, fmt.Sprintf("%s: database has %s, no client was told", key, wf))
+		}
+	}
+	slices.Sort(out)
+	return out, nil
 }
 
 func apply(ctx context.Context, ev Event, workers []*Proc, api *Proc, pg *Postgres, providerURL string, pauses *sync.WaitGroup) error {

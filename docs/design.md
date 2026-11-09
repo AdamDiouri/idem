@@ -490,7 +490,10 @@ Initial set: `after_claim`, `before_provider_call`, `after_provider_call`, `befo
      - **Child timings:** short (4s lease, 1s provider timeout, 100ms–2s retries), so a short run exercises many recoveries.
      - **Clients misbehave:** polite, impatient, double-click, reformatted-retry and malformed. They must never see two workflows for one key.
      - **Settling:** after the campaign, faults are cleared and workers restart without failpoints, then liveness (I4) must hold within the settle timeout.
-     - **A pass must not be vacuous:** it requires accepted workflows, at least one executed fault event, and at least one crash or pause.
+     - **Traffic:** arrivals are open-loop and spread over the whole campaign, so disruptions meet work in flight.
+     - **Effective events:** each event records how much work was in flight when it fired (unsettled workflows plus client requests in progress); an event that met no work is not *effective*.
+     - **A pass must not be vacuous:** it requires every disruption kind to have been effective (runs ≥ 60s), provider faults that actually fired (the fake provider counts hits), and failpoints that actually fired (failpoint exits are told apart from kills).
+     - **Strict verdict:** events that fail to apply, accepted workflow IDs the database disagrees with, steps left `RUNNING`/`IN_DOUBT` (I4), and parking for any reason other than the pivot safety rule all fail the run.
      - **Artifacts:** each run writes `report.txt`, `report.json` and per-process logs to `chaos-runs/`.
 
 **Order of work (failure-first):** the fake provider, failpoints, and invariant checker are built *alongside* the first step, not after the flow is complete (§15).

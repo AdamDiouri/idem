@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,25 +85,73 @@ func TestClients_MalformedIsRejectedNotRetried(t *testing.T) {
 	require.Equal(t, len(res.Accepted), workflowCount(t, pool))
 }
 
+// Review finding I9: the outage must actually be hit. The API is down when
+// the clients start; arrivals are spread so traffic continues after it returns.
 func TestClients_SurviveAPIOutage(t *testing.T) {
 	pool := testutil.NewPool(t, dsn)
 	url, stop := startAPI(t, pool, "")
 	addr := url[len("http://"):]
+	stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	cfg := clientConfig(url, 30, 3)
+	cfg.Spread = time.Second
 	done := make(chan ClientResult, 1)
-	go func() { done <- RunClients(ctx, clientConfig(url, 60, 3)) }()
-	time.Sleep(100 * time.Millisecond)
-	stop()
+	go func() { done <- RunClients(ctx, cfg) }()
 	time.Sleep(500 * time.Millisecond)
 	startAPI(t, pool, addr)
 
 	res := <-done
+	require.Positive(t, res.Retries, "some requests must have hit the outage")
 	require.Empty(t, res.Unfinished)
 	require.Empty(t, res.Conflicts)
 	require.Empty(t, res.Unexpected)
 	require.Equal(t, len(res.Accepted), workflowCount(t, pool))
+}
+
+// Review finding C1: arrivals are spread over the campaign, so faults meet
+// work in flight instead of an idle system.
+func TestClients_ArrivalsAreSpread(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	url, _ := startAPI(t, pool, "")
+	cfg := clientConfig(url, 20, 5)
+	cfg.Spread = time.Second
+
+	start := time.Now()
+	res := RunClients(context.Background(), cfg)
+	require.GreaterOrEqual(t, time.Since(start), 600*time.Millisecond, "all requests were sent at once")
+	require.Empty(t, res.Unfinished)
+}
+
+// The orchestrator reads Outstanding to tell whether an event met work in flight.
+func TestClients_OutstandingCounter(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	url, _ := startAPI(t, pool, "")
+	var outstanding atomic.Int64
+	var peak atomic.Int64
+	cfg := clientConfig(url, 30, 9)
+	cfg.Spread = 500 * time.Millisecond
+	cfg.Outstanding = &outstanding
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunClients(context.Background(), cfg)
+	}()
+	for {
+		select {
+		case <-done:
+			require.Positive(t, peak.Load(), "outstanding never rose above zero")
+			require.Zero(t, outstanding.Load(), "outstanding must return to zero")
+			return
+		default:
+			if n := outstanding.Load(); n > peak.Load() {
+				peak.Store(n)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
 }
 
 func TestClients_SeededMixIsDeterministic(t *testing.T) {

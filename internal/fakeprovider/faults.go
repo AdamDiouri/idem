@@ -76,6 +76,7 @@ func (p *Provider) pickFault(endpoint string) string {
 			continue
 		}
 		p.ruleUses[i]++
+		p.hits[r.Endpoint+"/"+r.Mode]++
 		return r.Mode
 	}
 	return ""

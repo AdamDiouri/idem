@@ -11,7 +11,7 @@ import (
 )
 
 // CheckLiveness evaluates I4: every workflow has reached a terminal or
-// attention state. It is only meaningful after quiescence (no new traffic, no
+// attention state, and no step is left RUNNING, IN_DOUBT or AWAITING_CALLBACK. It is only meaningful after quiescence (no new traffic, no
 // faults); during normal operation in-flight workflows are expected.
 func CheckLiveness(ctx context.Context, pool *pgxpool.Pool) ([]Violation, error) {
 	rows, err := db.New(pool).NonTerminalWorkflows(ctx)
@@ -24,6 +24,18 @@ func CheckLiveness(ctx context.Context, pool *pgxpool.Pool) ([]Violation, error)
 			Invariant:  "I4",
 			WorkflowID: r.ID.String(),
 			Detail:     fmt.Sprintf("%s since %s", r.Status, r.UpdatedAt.Time.UTC().Format(time.RFC3339)),
+		})
+	}
+
+	steps, err := db.New(pool).UnsettledSteps(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query unsettled steps: %w", err)
+	}
+	for _, st := range steps {
+		violations = append(violations, Violation{
+			Invariant:  "I4",
+			WorkflowID: st.WorkflowID.String(),
+			Detail:     fmt.Sprintf("step %s is still %s", st.Name, st.Status),
 		})
 	}
 	return violations, nil

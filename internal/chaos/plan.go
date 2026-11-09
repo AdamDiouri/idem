@@ -32,7 +32,7 @@ var AllKinds = []EventKind{KillWorker, PauseWorker, RestartAPI, RestartPostgres,
 type Event struct {
 	At       time.Duration       `json:"at"`
 	Kind     EventKind           `json:"kind"`
-	Target   int                 `json:"target,omitempty"`   // worker index
+	Target   int                 `json:"target"`             // worker index
 	Duration time.Duration       `json:"duration,omitempty"` // pauses
 	Faults   fakeprovider.Faults `json:"faults,omitzero"`
 }

@@ -8,7 +8,9 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,8 +32,15 @@ type ClientConfig struct {
 	BaseURL     string
 	Token       string
 	Workflows   int
-	Concurrency int
+	Concurrency int // used when Spread is 0
 	Seed        int64
+	// Spread, if set, makes arrivals open-loop: workflows arrive at seeded
+	// random times over this window, whether or not earlier ones finished, so
+	// work is in flight for the whole campaign.
+	Spread time.Duration
+	// Outstanding, if set, holds the number of workflows a client is still
+	// working on (submitting or retrying) at any moment.
+	Outstanding *atomic.Int64
 }
 
 // ClientResult is what the clients observed.
@@ -42,6 +51,7 @@ type ClientResult struct {
 	Conflicts  []string          `json:"conflicts"`  // keys that saw two different workflow IDs
 	Unfinished []string          `json:"unfinished"` // keys not accepted before the context ended
 	Unexpected []string          `json:"unexpected"` // responses no correct server should give
+	Retries    int64             `json:"retries"`    // attempts that hit an error, 5xx, 409 or 429
 	Behaviors  map[Behavior]int  `json:"behaviors"`
 }
 
@@ -108,39 +118,74 @@ func RunClients(ctx context.Context, cfg ClientConfig) ClientResult {
 	jobs := planJobs(cfg.Seed, cfg.Workflows)
 	res := ClientResult{Submitted: len(jobs), Accepted: map[string]string{}, Behaviors: map[Behavior]int{}}
 	var mu sync.Mutex
+	var retries atomic.Int64
 
-	work := make(chan job)
+	run := func(j job) outcome {
+		if cfg.Outstanding != nil {
+			cfg.Outstanding.Add(1)
+			defer cfg.Outstanding.Add(-1)
+		}
+		return runJob(ctx, cfg, j, &retries)
+	}
+	record := func(j job, o outcome) {
+		mu.Lock()
+		defer mu.Unlock()
+		res.Behaviors[j.behavior]++
+		switch {
+		case o.unexpected != "":
+			res.Unexpected = append(res.Unexpected, j.key+": "+o.unexpected)
+		case o.conflict:
+			res.Conflicts = append(res.Conflicts, j.key)
+		case o.rejected:
+			res.Rejected++
+		case o.workflowID != "":
+			res.Accepted[j.key] = o.workflowID
+		default:
+			res.Unfinished = append(res.Unfinished, j.key)
+		}
+	}
+
 	var wg sync.WaitGroup
-	for range max(cfg.Concurrency, 1) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := range work {
-				o := runJob(ctx, cfg, j)
-				mu.Lock()
-				res.Behaviors[j.behavior]++
-				switch {
-				case o.unexpected != "":
-					res.Unexpected = append(res.Unexpected, j.key+": "+o.unexpected)
-				case o.conflict:
-					res.Conflicts = append(res.Conflicts, j.key)
-				case o.rejected:
-					res.Rejected++
-				case o.workflowID != "":
-					res.Accepted[j.key] = o.workflowID
-				default:
-					res.Unfinished = append(res.Unfinished, j.key)
-				}
-				mu.Unlock()
+	if cfg.Spread > 0 {
+		// Open loop: each workflow starts at its own arrival time.
+		start := time.Now()
+		for i, at := range arrivals(cfg.Seed, len(jobs), cfg.Spread) {
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Until(start.Add(at))):
 			}
-		}()
+			j := jobs[i]
+			wg.Go(func() { record(j, run(j)) })
+		}
+	} else {
+		work := make(chan job)
+		for range max(cfg.Concurrency, 1) {
+			wg.Go(func() {
+				for j := range work {
+					record(j, run(j))
+				}
+			})
+		}
+		for _, j := range jobs {
+			work <- j
+		}
+		close(work)
 	}
-	for _, j := range jobs {
-		work <- j
-	}
-	close(work)
 	wg.Wait()
+	res.Retries = retries.Load()
 	return res
+}
+
+// arrivals returns n sorted arrival offsets uniformly spread over window — the
+// arrival times of a Poisson process conditioned on n arrivals.
+func arrivals(seed int64, n int, window time.Duration) []time.Duration {
+	rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed)+2)) //nolint:gosec // reproducible traffic
+	out := make([]time.Duration, n)
+	for i := range out {
+		out[i] = time.Duration(rng.Int64N(int64(window)))
+	}
+	slices.Sort(out)
+	return out
 }
 
 type outcome struct {
@@ -150,37 +195,37 @@ type outcome struct {
 	unexpected string
 }
 
-func runJob(ctx context.Context, cfg ClientConfig, j job) outcome {
+func runJob(ctx context.Context, cfg ClientConfig, j job, retries *atomic.Int64) outcome {
 	rng := rand.New(rand.NewPCG(j.seed, j.seed^0x9e3779b97f4a7c15)) //nolint:gosec // reproducible traffic
 	compact, _ := json.Marshal(j.body)
 
 	switch j.behavior {
 	case Malformed:
-		return submitUntilAnswered(ctx, cfg, j.key, []byte(`{"amount_cents":`), nil)
+		return submitUntilAnswered(ctx, cfg, retries, j.key, []byte(`{"amount_cents":`), nil)
 
 	case Impatient:
 		timeout := func() time.Duration { return time.Duration(50+rng.IntN(250)) * time.Millisecond }
-		return submitUntilAnswered(ctx, cfg, j.key, compact, timeout)
+		return submitUntilAnswered(ctx, cfg, retries, j.key, compact, timeout)
 
 	case DoubleClick:
 		var a, b outcome
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); a = submitUntilAnswered(ctx, cfg, j.key, compact, nil) }()
-		go func() { defer wg.Done(); b = submitUntilAnswered(ctx, cfg, j.key, compact, nil) }()
+		go func() { defer wg.Done(); a = submitUntilAnswered(ctx, cfg, retries, j.key, compact, nil) }()
+		go func() { defer wg.Done(); b = submitUntilAnswered(ctx, cfg, retries, j.key, compact, nil) }()
 		wg.Wait()
 		return merge(a, b)
 
 	case Reformatted:
-		first := submitUntilAnswered(ctx, cfg, j.key, compact, nil)
+		first := submitUntilAnswered(ctx, cfg, retries, j.key, compact, nil)
 		if first.workflowID == "" {
 			return first
 		}
 		pretty, _ := json.MarshalIndent(reordered(j.body), "", "    ")
-		return merge(first, submitUntilAnswered(ctx, cfg, j.key, pretty, nil))
+		return merge(first, submitUntilAnswered(ctx, cfg, retries, j.key, pretty, nil))
 
 	default: // Polite
-		return submitUntilAnswered(ctx, cfg, j.key, compact, nil)
+		return submitUntilAnswered(ctx, cfg, retries, j.key, compact, nil)
 	}
 }
 
@@ -219,7 +264,7 @@ func merge(a, b outcome) outcome {
 // submitUntilAnswered retries with the same key until the server gives a final
 // answer (2xx, or 4xx for a malformed body) or ctx ends. timeout, if set,
 // returns a fresh per-attempt client timeout.
-func submitUntilAnswered(ctx context.Context, cfg ClientConfig, key string, body []byte, timeout func() time.Duration) outcome {
+func submitUntilAnswered(ctx context.Context, cfg ClientConfig, retries *atomic.Int64, key string, body []byte, timeout func() time.Duration) outcome {
 	backoff := 50 * time.Millisecond
 	for ctx.Err() == nil {
 		d := 5 * time.Second
@@ -243,6 +288,7 @@ func submitUntilAnswered(ctx context.Context, cfg ClientConfig, key string, body
 		default:
 			return outcome{unexpected: fmt.Sprintf("status %d: %s", status, respBody)}
 		}
+		retries.Add(1)
 		select {
 		case <-ctx.Done():
 		case <-time.After(backoff):

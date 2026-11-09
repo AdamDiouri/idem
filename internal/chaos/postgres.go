@@ -2,6 +2,8 @@ package chaos
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os/exec"
@@ -20,22 +22,48 @@ type Postgres struct {
 }
 
 // StartPostgres runs postgres:18 as container `name`, published on
-// 127.0.0.1:port, and waits until it accepts connections. A stale container
-// with the same name is removed first.
+// 127.0.0.1:port, and waits until it accepts connections. On any failure,
+// including cancellation, the container is removed before returning.
 func StartPostgres(ctx context.Context, name string, port int) (*Postgres, error) {
 	pg := &Postgres{Name: name, Port: port}
-	_ = pg.Remove(ctx)
 	if out, err := exec.CommandContext(ctx, "docker", "run", "-d", "--name", name, //nolint:gosec // harness-controlled args
 		"-p", fmt.Sprintf("127.0.0.1:%d:5432", port),
 		"-e", "POSTGRES_USER=idem", "-e", "POSTGRES_PASSWORD=idem", "-e", "POSTGRES_DB=idem",
 		"postgres:18").CombinedOutput(); err != nil {
+		// Killing the CLI does not stop the daemon from creating the container.
+		pg.removeEventually()
 		return nil, fmt.Errorf("docker run: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	if err := pg.waitReady(ctx); err != nil {
-		_ = pg.Remove(context.Background())
+		pg.removeEventually()
 		return nil, err
 	}
 	return pg, nil
+}
+
+// containerName returns a container name unique to this run, so two campaigns
+// with the same seed never remove each other's database.
+func containerName(seed int64) string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("idem-chaos-%d-%s", seed, hex.EncodeToString(b))
+}
+
+// removeEventually removes the container even if the daemon is still creating
+// it: it retries until the container has been absent twice in a row (5s max).
+func (pg *Postgres) removeEventually() {
+	ctx := context.Background()
+	absent := 0
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline) && absent < 2; {
+		_ = pg.Remove(ctx)
+		time.Sleep(500 * time.Millisecond)
+		out, err := exec.CommandContext(ctx, "docker", "ps", "-a", "-q", "--filter", "name=^"+pg.Name+"$").Output() //nolint:gosec // harness-controlled args
+		if err == nil && len(strings.TrimSpace(string(out))) == 0 {
+			absent++
+		} else {
+			absent = 0
+		}
+	}
 }
 
 // DSN is the connection string for the container.
@@ -51,9 +79,10 @@ func (pg *Postgres) Restart(ctx context.Context) error {
 	return pg.waitReady(ctx)
 }
 
-// Remove deletes the container. Removing a missing container is not an error.
+// Remove deletes the container and its anonymous data volume. Removing a
+// missing container is not an error.
 func (pg *Postgres) Remove(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, "docker", "rm", "-f", pg.Name).CombinedOutput() //nolint:gosec // harness-controlled args
+	out, err := exec.CommandContext(ctx, "docker", "rm", "-f", "-v", pg.Name).CombinedOutput() //nolint:gosec // harness-controlled args
 	if err != nil && !strings.Contains(string(out), "No such container") {
 		return fmt.Errorf("docker rm: %w: %s", err, strings.TrimSpace(string(out)))
 	}

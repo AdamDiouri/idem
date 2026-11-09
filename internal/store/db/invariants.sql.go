@@ -208,6 +208,37 @@ func (q *Queries) UnbalancedLedgerTransactions(ctx context.Context) ([]Unbalance
 	return items, nil
 }
 
+const unsettledSteps = `-- name: UnsettledSteps :many
+SELECT workflow_id, name, status FROM steps
+WHERE status IN ('RUNNING', 'IN_DOUBT', 'AWAITING_CALLBACK') ORDER BY created_at
+`
+
+type UnsettledStepsRow struct {
+	WorkflowID uuid.UUID
+	Name       string
+	Status     string
+}
+
+func (q *Queries) UnsettledSteps(ctx context.Context) ([]UnsettledStepsRow, error) {
+	rows, err := q.db.Query(ctx, unsettledSteps)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UnsettledStepsRow
+	for rows.Next() {
+		var i UnsettledStepsRow
+		if err := rows.Scan(&i.WorkflowID, &i.Name, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const workflowsWithoutKey = `-- name: WorkflowsWithoutKey :many
 SELECT w.id FROM workflows w
 WHERE NOT EXISTS (SELECT 1 FROM api_idempotency_keys k WHERE k.workflow_id = w.id)

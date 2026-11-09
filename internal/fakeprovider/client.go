@@ -49,3 +49,24 @@ func PutFaults(ctx context.Context, baseURL string, f Faults) error {
 	}
 	return nil
 }
+
+// FetchFaultHits reads how many times each fault fired on a provider at baseURL.
+func FetchFaultHits(ctx context.Context, baseURL string) (map[string]int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/_fault_hits", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch fault hits: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch fault hits: status %d", resp.StatusCode)
+	}
+	hits := map[string]int{}
+	if err := json.NewDecoder(resp.Body).Decode(&hits); err != nil {
+		return nil, fmt.Errorf("decode fault hits: %w", err)
+	}
+	return hits, nil
+}

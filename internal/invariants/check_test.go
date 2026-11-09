@@ -313,3 +313,18 @@ func TestCheck_I6_SubmittedWorkflowsClean(t *testing.T) {
 	newWorkflow(t, e.pool)
 	require.Empty(t, only(e.check(t), "I6"))
 }
+
+// Review finding I7: liveness also covers steps — a finished or parked
+// workflow must not leave a step RUNNING or IN_DOUBT behind.
+func TestCheckLiveness_ReportsLeftoverSteps(t *testing.T) {
+	ctx := context.Background()
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	e.setStatus(t, wf, "NEEDS_ATTENTION")
+	_, err := e.pool.Exec(ctx, `UPDATE steps SET status = 'IN_DOUBT' WHERE id = $1`, step)
+	require.NoError(t, err)
+
+	v, err := invariants.CheckLiveness(ctx, e.pool)
+	require.NoError(t, err)
+	requireViolation(t, v, "I4", wf, "IN_DOUBT")
+}

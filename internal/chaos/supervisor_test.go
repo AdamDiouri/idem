@@ -21,11 +21,15 @@ var dsn string
 // TestMain lets the test binary double as a long-running child process;
 // otherwise it provides a Postgres for the client tests.
 func TestMain(m *testing.M) {
-	if os.Getenv("CHAOS_HELPER") == "sleep" {
+	switch os.Getenv("CHAOS_HELPER") {
+	case "sleep":
 		for {
 			fmt.Println("heartbeat")
 			time.Sleep(50 * time.Millisecond)
 		}
+	case "exit137": // what a failpoint "exit" does
+		time.Sleep(100 * time.Millisecond)
+		os.Exit(137)
 	}
 	os.Exit(testutil.RunWithPostgres(m, &dsn))
 }
@@ -120,4 +124,52 @@ func TestSupervisor_StopAllResumesAndKills(t *testing.T) {
 		require.False(t, alive(p.PID()), "%s was restarted after StopAll", p.Name())
 	}
 	require.NoError(t, s.StopAll(context.Background()), "StopAll is idempotent")
+}
+
+// Review finding I1: stopping a process during the restart window must not let
+// the monitor bring it back (it would still carry its failpoints).
+func TestSupervisor_StopDuringRestartWindowDoesNotRelaunch(t *testing.T) {
+	s := newSupervisor(t)
+	p, err := s.Start(helperSpec(t, "w0"))
+	require.NoError(t, err)
+	first := p.PID()
+	require.NoError(t, p.Kill())
+	time.Sleep(100 * time.Millisecond) // inside the 500ms restart delay
+
+	require.NoError(t, p.Stop(context.Background()))
+	time.Sleep(restartDelay + 300*time.Millisecond)
+	require.False(t, alive(first))
+	require.False(t, alive(p.PID()), "stopped process was relaunched")
+}
+
+// Review finding I1: an event aimed at a process that is not running must
+// fail, not be reported as executed.
+func TestSupervisor_SignalDuringRestartWindowErrors(t *testing.T) {
+	s := newSupervisor(t)
+	p, err := s.Start(helperSpec(t, "w0"))
+	require.NoError(t, err)
+	require.NoError(t, p.Kill())
+	time.Sleep(100 * time.Millisecond)
+
+	require.ErrorIs(t, p.Kill(), ErrNotRunning)
+	require.ErrorIs(t, p.Pause(), ErrNotRunning)
+	require.Eventually(t, func() bool { return p.Kill() == nil }, 3*time.Second, 50*time.Millisecond, "running again after the restart")
+}
+
+// Review finding I4: failpoint exits (status 137) are told apart from kills.
+func TestSupervisor_CountsFailpointExitsSeparately(t *testing.T) {
+	s := newSupervisor(t)
+	spec := helperSpec(t, "w0")
+	spec.Env = []string{"CHAOS_HELPER=exit137"}
+	p, err := s.Start(spec)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return p.FailpointExits() >= 2 }, 5*time.Second, 50*time.Millisecond)
+	require.Equal(t, p.Restarts(), p.FailpointExits()+p.Kills())
+	require.Zero(t, p.Kills())
+
+	k, err := s.Start(helperSpec(t, "w1"))
+	require.NoError(t, err)
+	require.NoError(t, k.Kill())
+	require.Eventually(t, func() bool { return k.Kills() == 1 }, 3*time.Second, 50*time.Millisecond)
+	require.Zero(t, k.FailpointExits())
 }

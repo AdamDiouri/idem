@@ -43,7 +43,7 @@ func run() int {
 
 	rep, err := chaos.Run(ctx, cfg, logger)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 			logger.Error("campaign interrupted; processes and container cleaned up")
 		} else {
 			logger.Error("campaign could not run", "error", err)
