@@ -216,6 +216,45 @@ func TestFault_DeclineMode(t *testing.T) {
 	require.Empty(t, p.Effects())
 }
 
+func TestFault_RateLimit(t *testing.T) {
+	p, srv := newServer(t)
+	p.SetFaults(faults(fakeprovider.Rule{Endpoint: "charges", Mode: fakeprovider.ModeRateLimit, Times: 1}))
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/charges", strings.NewReader(body("cus_1", 10000)))
+	require.NoError(t, err)
+	req.Header.Set("Idempotency-Key", "k1")
+	r, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	r.Body.Close()
+	require.Equal(t, http.StatusTooManyRequests, r.StatusCode)
+	require.Equal(t, "1", r.Header.Get("Retry-After"))
+	require.Empty(t, p.Effects())
+
+	require.Equal(t, http.StatusCreated, mustCharge(t, srv.URL, "k1", body("cus_1", 10000)).status)
+	require.Len(t, p.Effects(), 1)
+}
+
+// A real provider forgets idempotency keys after its retention period; reusing
+// an expired key performs a NEW charge. The engine must look up instead.
+func TestKeyRetention(t *testing.T) {
+	p := fakeprovider.New(fakeprovider.Options{Hang: time.Second, KeyRetention: 100 * time.Millisecond})
+	srv := httptest.NewServer(p.Handler())
+	t.Cleanup(srv.Close)
+
+	first := mustCharge(t, srv.URL, "k1", body("cus_1", 10000))
+	time.Sleep(150 * time.Millisecond)
+
+	r, err := http.Get(srv.URL + "/charges?idempotency_key=k1")
+	require.NoError(t, err)
+	r.Body.Close()
+	require.Equal(t, http.StatusNotFound, r.StatusCode)
+
+	second := mustCharge(t, srv.URL, "k1", body("cus_1", 10000))
+	require.Equal(t, http.StatusCreated, second.status)
+	require.NotEqual(t, chargeID(t, first.body), chargeID(t, second.body))
+	require.Len(t, p.Effects(), 2)
+}
+
 func TestFault_TimesLimitsRule(t *testing.T) {
 	p, srv := newServer(t)
 	p.SetFaults(faults(fakeprovider.Rule{Endpoint: "charges", Mode: "error_before_effect", Times: 2}))
@@ -255,7 +294,7 @@ func TestControlAPI_RejectsInvalidFaults(t *testing.T) {
 	ctx := context.Background()
 	for _, r := range []fakeprovider.Rule{
 		{Endpoint: "charges", Mode: "timeout_after_efect"},
-		{Endpoint: "charges", Mode: "rate_limit"},
+		{Endpoint: "charges", Mode: "latency"},
 		{Endpoint: "payouts", Mode: fakeprovider.ModeErrorBeforeEffect},
 		{Endpoint: "charges", Mode: fakeprovider.ModeErrorBeforeEffect, Probability: 1.5},
 		{Endpoint: "charges", Mode: fakeprovider.ModeErrorBeforeEffect, Probability: -0.1},
