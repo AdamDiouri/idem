@@ -484,6 +484,14 @@ Initial set: `after_claim`, `before_provider_call`, `after_provider_call`, `befo
    4. Stop faults; wait for quiescence (or timeout).
    5. Run the invariant checker; write a report (counts per terminal state, fenced commits, `IN_DOUBT` resolutions, violations with workflow IDs).
    - Runs are seeded. Honest caveat: OS scheduling isn't deterministic, so a seed reproduces the *fault plan*, not the exact interleaving. Fully deterministic simulation is a stretch goal.
+   - As built (slice 1.5): `make chaos CHAOS_ARGS="--seed N --duration 90s"`.
+     - **Processes:** a throwaway Postgres container, the fake provider, the API, 4 workers and 2 sweepers.
+     - **Supervision:** a supervisor restarts any process that crashes (modelling Kubernetes); the fake provider is never killed, because it is the oracle.
+     - **Child timings:** short (4s lease, 1s provider timeout, 100ms–2s retries), so a short run exercises many recoveries.
+     - **Clients misbehave:** polite, impatient, double-click, reformatted-retry and malformed. They must never see two workflows for one key.
+     - **Settling:** after the campaign, faults are cleared and workers restart without failpoints, then liveness (I4) must hold within the settle timeout.
+     - **A pass must not be vacuous:** it requires accepted workflows, at least one executed fault event, and at least one crash or pause.
+     - **Artifacts:** each run writes `report.txt`, `report.json` and per-process logs to `chaos-runs/`.
 
 **Order of work (failure-first):** the fake provider, failpoints, and invariant checker are built *alongside* the first step, not after the flow is complete (§15).
 
@@ -499,7 +507,7 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 | **1.2** One step, end to end | Claim/lease/fencing, `charge` against fake provider, ledger posting, fake provider + oracle, failpoint package, invariant checker v0 (I1, I2), **lease-expiry reclaim (pulled forward from 1.3)** | F4–F6, F7–F9 (fixed-delay retry), F10, F12, F13, F27 |
 | **1.3** Ambiguity | Outcome classification (incl. no-effect 429 / refused connections, `Retry-After`, 409 in-flight), retries with full-jitter backoff, sticky `IN_DOUBT`, `DEAD`/`NEEDS_ATTENTION` with `dead_reason`, lookup near key retention, stuck-workflow reporting, bounded shutdown | F7–F9, F11, F22, F23, F25 |
 | **1.4** Full flow | `payout` (synchronous, the pivot), `refund` compensation only on a *definite* payout failure, refund charge reference frozen in a typed column, CAS workflow transitions, fees, I3, I5, I7 | F20, F21 |
-| **1.5** Chaos harness | `cmd/chaos`, process kill/pause/DB restart, report | F13, F14, F26; full invariant suite |
+| **1.5** Chaos harness | `cmd/chaos`: real processes under a supervisor, seeded kill/pause/API and DB restart/provider-fault plan, exit failpoints, misbehaving clients, settle + verdict report; invariants I4 (liveness) and I6; pivot safety rule (a payout refused after an ambiguous attempt is parked, not refunded) | F4–F6 and F12–F14 at process level, F26; full invariant suite |
 | **1.6** Operability | Metrics, structured logs, admin CLI, runbook for `NEEDS_ATTENTION` | — |
 
 ### Observability (M1 minimum)

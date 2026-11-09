@@ -191,6 +191,9 @@ func (p *Proc) Restart(ctx context.Context) error {
 	return p.launchLocked()
 }
 
+// Stop ends the process gracefully for good: no automatic restart.
+func (p *Proc) Stop(ctx context.Context) error { return p.stop(ctx, gracefulWait) }
+
 // stop ends the current process for good (no automatic restart).
 func (p *Proc) stop(ctx context.Context, wait time.Duration) error {
 	p.mu.Lock()

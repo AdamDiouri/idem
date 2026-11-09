@@ -98,6 +98,42 @@ Failpoints crash or pause a worker at a named point (`after_claim`, `before_prov
 make down
 ```
 
+## Run a chaos campaign
+
+The chaos harness runs the real binaries as separate processes and does its best to break them:
+- **Infrastructure:** a throwaway Postgres container, the fake provider, the API, 4 workers and 2 sweepers.
+- **Traffic:** about 300 workflows from misbehaving clients (impatient retries, double-clicks, reformatted retries, malformed bodies).
+- **Disruptions:** a seeded plan of `kill -9`, `SIGSTOP` beyond the lease, API and database restarts, and provider faults. Workers also carry crash failpoints that make them `exit` mid-step, and a supervisor restarts them like Kubernetes would.
+
+Afterwards it clears every fault, lets the system settle, and checks every invariant.
+
+```bash
+make chaos CHAOS_ARGS="--seed 1 --duration 90s"   # needs Docker
+```
+
+Example result (seed 1):
+
+```
+chaos run seed 1: PASSED
+events executed: 34 (kill_worker 16, pause_worker 5, restart_api 1, restart_postgres 5, provider faults 7)
+crash restarts: worker-0 12, worker-1 10, worker-2 10, worker-3 10
+clients: submitted 300, accepted 263, malformed rejected 37
+outcomes: COMPENSATED=26 FAILED=16 NEEDS_ATTENTION=3 SUCCEEDED=218
+violations: 0
+```
+
+**How to read the result:**
+- **`PASSED`** requires:
+  - zero invariant violations (I1–I7)
+  - every workflow terminal or parked
+  - no idempotency key that ever returned two different workflows
+  - a non-vacuous run (traffic was accepted, faults fired, processes crashed or froze)
+- **`NEEDS_ATTENTION`** entries are expected. They are payouts refused after an ambiguous attempt, parked for a human by the pivot safety rule instead of being refunded on a guess.
+- **Exit codes:** `0` passed, `1` failed, `2` could not run.
+- **Artifacts:** `chaos-runs/<time>-seed<N>/` holds `report.txt`, `report.json` and every process's log.
+- **Reproducing a run:** `bin/chaos --seed N …` (printed in the report) replays the same fault plan. OS scheduling still differs between runs.
+- **Interrupting:** Ctrl-C stops a campaign and still removes its container and processes.
+
 ## Develop
 
 ```bash
@@ -105,6 +141,7 @@ make test       # go test -race ./... (starts Postgres containers)
 make lint
 make generate        # regenerate sqlc code after editing internal/store/queries/*.sql
 make build-release   # binary with failpoints compiled out
+go test -tags chaos ./internal/chaos/   # 30s chaos campaign as a test (after make build)
 ```
 
 ## Configuration
