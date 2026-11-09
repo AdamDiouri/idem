@@ -18,7 +18,10 @@ func TestRun_ShortCampaign(t *testing.T) {
 	cfg.Seed = 1
 	cfg.Duration = 30 * time.Second
 	cfg.SettleTimeout = 90 * time.Second
-	cfg.Workflows = 60
+	// Same load density as a default campaign (~10 workflows/s). Much lighter
+	// load leaves the system idle at most instants, and the verdict rightly
+	// fails a run whose faults met no work in flight (vacuous).
+	cfg.Workflows = 300
 	cfg.BinDir = "../../bin"
 	cfg.RunDir = t.TempDir()
 

@@ -42,21 +42,28 @@ func transitionWorkflow(ctx context.Context, q *db.Queries, id uuid.UUID, from [
 // idempotency key derived once, here, and stored forever (D6). refundChargeRef
 // is set only for refunds.
 func newStep(ctx context.Context, q *db.Queries, workflowID uuid.UUID, name string, maxAttempts int32, refundChargeRef string) error {
+	_, err := newStepGeneration(ctx, q, workflowID, name, 0, maxAttempts, refundChargeRef)
+	return err
+}
+
+// newStepGeneration creates a step of the given generation and returns its ID.
+// Only admin new-generation uses a generation above 0 (a new idempotency key).
+func newStepGeneration(ctx context.Context, q *db.Queries, workflowID uuid.UUID, name string, generation, maxAttempts int32, refundChargeRef string) (uuid.UUID, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
-		return fmt.Errorf("new %s step id: %w", name, err)
+		return uuid.Nil, fmt.Errorf("new %s step id: %w", name, err)
 	}
 	if err := q.InsertStep(ctx, db.InsertStepParams{
 		ID:              id,
 		WorkflowID:      workflowID,
 		Name:            name,
-		Generation:      0,
+		Generation:      generation,
 		Status:          "PENDING",
-		IdempotencyKey:  workflow.StepIdempotencyKey(workflowID, name, 0),
+		IdempotencyKey:  workflow.StepIdempotencyKey(workflowID, name, int(generation)),
 		MaxAttempts:     maxAttempts,
 		RefundChargeRef: optional(refundChargeRef),
 	}); err != nil {
-		return fmt.Errorf("create %s step: %w", name, err)
+		return uuid.Nil, fmt.Errorf("create %s step: %w", name, err)
 	}
-	return nil
+	return id, nil
 }

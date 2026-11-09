@@ -94,12 +94,52 @@ SET status = sqlc.arg(to_status)::text, version = version + 1, updated_at = now(
 WHERE id = sqlc.arg(id) AND status = ANY(sqlc.arg(from_statuses)::text[]);
 
 -- name: ChargeProviderRef :one
+-- The latest successful charge (admin new-generation can create several charge steps).
 SELECT provider_ref::text FROM steps
-WHERE workflow_id = sqlc.arg(workflow_id) AND name = 'charge' AND status = 'SUCCEEDED' AND provider_ref IS NOT NULL;
+WHERE workflow_id = sqlc.arg(workflow_id) AND name = 'charge' AND status = 'SUCCEEDED' AND provider_ref IS NOT NULL
+ORDER BY generation DESC
+LIMIT 1;
 
 -- name: FindStuckWorkflows :many
-SELECT id, status, (EXTRACT(EPOCH FROM (now() - updated_at)) * 1000)::bigint AS age_ms
-FROM workflows
-WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING')
-  AND updated_at < now() - (sqlc.arg(older_than_ms)::bigint * interval '1 millisecond')
-ORDER BY updated_at;
+-- Unsettled workflows without progress (a status change or a FINISHED step
+-- attempt: a claim alone, or an attempt abandoned by a crash, is not) for
+-- older_than_ms, longest idle first. Same definition as UnsettledIdleMs.
+SELECT id, status, idle_ms FROM (
+  SELECT w.id, w.status,
+         (EXTRACT(EPOCH FROM (now() - GREATEST(w.updated_at, a.last_attempt))) * 1000)::bigint AS idle_ms
+  FROM workflows w
+  LEFT JOIN LATERAL (
+    SELECT max(sa.finished_at) AS last_attempt
+    FROM steps s JOIN step_attempts sa ON sa.step_id = s.id
+    WHERE s.workflow_id = w.id AND sa.outcome IS DISTINCT FROM 'ABANDONED'
+  ) a ON true
+  WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+) idle
+WHERE idle_ms > sqlc.arg(older_than_ms)::bigint
+ORDER BY idle_ms DESC;
+
+-- name: WorkflowStatusCounts :many
+SELECT status, count(*)::int AS n FROM workflows GROUP BY status;
+
+-- name: StepStatusCounts :many
+SELECT name, status, count(*)::int AS n FROM steps GROUP BY name, status;
+
+-- name: UnsettledIdleMs :one
+-- The longest any unsettled workflow has gone without progress: a status
+-- change or a finished step attempt (0 if none). Claims alone and attempts
+-- abandoned by a crash don't count, or a crash loop would look busy forever. Age since creation would page as soon
+-- as an operator retried an old parked workflow.
+SELECT COALESCE(max(EXTRACT(EPOCH FROM (now() - GREATEST(w.updated_at, a.last_attempt))) * 1000), 0)::bigint AS idle_ms
+FROM workflows w
+LEFT JOIN LATERAL (
+  SELECT max(sa.finished_at) AS last_attempt
+  FROM steps s JOIN step_attempts sa ON sa.step_id = s.id
+  WHERE s.workflow_id = w.id AND sa.outcome IS DISTINCT FROM 'ABANDONED'
+) a ON true
+WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING');
+
+-- name: StepsOverAttemptLimit :one
+-- Unfinished steps claimed more than once past their limit. (A crash or lost
+-- lease on the final attempt legitimately leaves attempt_count = max + 1.)
+SELECT count(*)::int AS n FROM steps
+WHERE status IN ('PENDING', 'IN_DOUBT', 'RUNNING') AND attempt_count > max_attempts + 1;

@@ -80,3 +80,9 @@ func TestPlan_FaultsAreValid(t *testing.T) {
 		}
 	}
 }
+
+// Deferred minor 4: chaos runs several workers and sweepers on one host; they
+// must not all try to bind the same metrics port (nothing scrapes them).
+func TestWorkerEnv_DisablesMetricsListener(t *testing.T) {
+	require.Contains(t, workerEnv("postgres://x", "http://p"), "IDEM_METRICS_ADDR=off")
+}

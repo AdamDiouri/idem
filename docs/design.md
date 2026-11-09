@@ -399,10 +399,23 @@ After a fully successful workflow, `provider_receivable` holds exactly the fee a
 Workflow lifecycle events (`workflow.succeeded`, `workflow.compensated`, …) are written to `outbox` in the same transaction as the transition. M1 only writes them; a relay that publishes and marks `published_at` comes in M2.
 
 ### 11.4 Admin actions (CLI, audited)
-- `idem admin list --status NEEDS_ATTENTION|DEAD`
-- `idem admin retry-step <id>` — same key; resets attempts. Safe.
-- `idem admin new-generation <step-id> --reason "..."` — new key. **Dangerous.** Requires a reason, writes an audit row.
-- `idem admin resolve <workflow-id> --as SUCCEEDED|FAILED --reason "..."` — record a human's verified conclusion.
+As built in slice 1.6.
+- **Safeguards on every mutating action:**
+  - it needs `--reason`, and `--expect-version`: the workflow version from `list`. The workflow's `version` goes up on every status change, so a workflow that left `NEEDS_ATTENTION` and came back (e.g. another operator's retry that then charged the customer) no longer matches, and the action is refused as stale. Checked under the row lock.
+  - it runs in one transaction that checks the workflow is `NEEDS_ATTENTION` and the step is its parked (latest, `DEAD`/`FAILED_PERMANENT`) step, refusing otherwise
+  - it bumps `lease_epoch` when handing work back to workers
+  - it writes an `admin_actions` audit row
+- **The commands:**
+  - `idem admin list [--reason R] [--json]`: parked workflows with their version, step, reason, attempts and last error.
+  - `idem admin retry-step <step-id>`: same key, so it is safe. The step goes back `IN_DOUBT` if money may have moved (sticky), else `PENDING`. Attempt history is kept and the budget extended.
+  - `idem admin confirm-step <step-id> --provider-ref REF`: a human verified the effect happened. The step goes `SUCCEEDED` and the step's own success hook runs (ledger posting, saga advance).
+  - `idem admin compensate <workflow-id>`: a parked **payout** whose merchant was verified not paid. Creates the refund and moves the workflow to `COMPENSATING`.
+  - `idem admin fail <workflow-id>`: a parked **charge** whose customer was verified not charged. Moves the workflow to `FAILED`.
+  - `idem admin new-generation <step-id> --confirm-no-effect`: a new key. **Dangerous**: a new payment as far as the provider is concerned. The old step stays as history.
+- **Why not the original `resolve --as SUCCEEDED|FAILED`:** relabelling a workflow would leave its ledger and saga inconsistent, so `confirm-step`, `compensate` and `fail` replace it.
+- **Exit codes:** `0` done, `1` refused or failed (not parked, stale, doesn't fit), `2` usage mistake (decided by error type, never by error text) or a missing `--confirm-no-effect`.
+- **Concurrency:** regression tests race every action against the others on the same listing (exactly one wins, losers leave no trace), with workers running so the winner's result settles cleanly. Workers can't touch a parked workflow, so the worker-reparks-while-an-operator-acts case is covered by a sequential stale-version test.
+- **Runbook:** `docs/runbooks/needs-attention.md` maps each `dead_reason` to an investigation and an action.
 
 ---
 
@@ -511,11 +524,20 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 | **1.3** Ambiguity | Outcome classification (incl. no-effect 429 / refused connections, `Retry-After`, 409 in-flight), retries with full-jitter backoff, sticky `IN_DOUBT`, `DEAD`/`NEEDS_ATTENTION` with `dead_reason`, lookup near key retention, stuck-workflow reporting, bounded shutdown | F7–F9, F11, F22, F23, F25 |
 | **1.4** Full flow | `payout` (synchronous, the pivot), `refund` compensation only on a *definite* payout failure, refund charge reference frozen in a typed column, CAS workflow transitions, fees, I3, I5, I7 | F20, F21 |
 | **1.5** Chaos harness | `cmd/chaos`: real processes under a supervisor, seeded kill/pause/API and DB restart/provider-fault plan, exit failpoints, misbehaving clients, settle + verdict report; invariants I4 (liveness) and I6; pivot safety rule (a payout refused after an ambiguous attempt is parked, not refunded) | F4–F6 and F12–F14 at process level, F26; full invariant suite |
-| **1.6** Operability | Metrics, structured logs, admin CLI, runbook for `NEEDS_ATTENTION` | — |
+| **1.6** Operability | Audited admin actions (`list`, `retry-step`, `confirm-step`, `compensate`, `fail`, `new-generation`), Prometheus metrics on every process, Prometheus + alert rules in compose, runbook, chaos recovery counts | — (milestone 1 complete) |
 
 ### Observability (M1 minimum)
 - **Structured logs** (`log/slog`, JSON) with `workflow_id`, `step`, `attempt`, `lease_epoch`, `worker_id` on every line.
-- **Prometheus metrics:** `steps{status}`, `in_doubt_steps`, `oldest_nonterminal_workflow_age_seconds`, `fenced_commits_total`, `step_attempts_total{step,outcome_class}`, `provider_request_duration_seconds{endpoint,outcome_class}`, `needs_attention_workflows`, `webhook_inbox_unprocessed`.
+- **Prometheus metrics** (as built). Labels never carry IDs, keys or error text.
+  - **Workers:** `idem_step_attempts_total{step,outcome}` (including `fenced`), `idem_provider_request_duration_seconds{step,class}`, `idem_key_retention_lookups_total{step,found}`.
+  - **Sweepers:** `idem_leases_reclaimed_total`, `idem_workflows{status}`, `idem_steps{step,status}`, `idem_unsettled_workflow_max_idle_seconds` (time without progress: a status change or a finished, non-abandoned step attempt. Age since creation paged as soon as an operator retried an old workflow; counting bare claims hid crash loops), `idem_steps_over_attempt_limit`, `idem_parked_workflows{reason}`.
+  - **API:** `idem_workflow_submissions_total{result}`.
+  - **Not yet:** `webhook_inbox_unprocessed` arrives with M2.
+- **Ports:** the API serves `/metrics` on its own address; workers and sweepers on `IDEM_METRICS_ADDR` (default `:8090`, outside the 9100–9999 range Prometheus allocates to exporters).
+- **Alerts:** `deploy/prometheus/alerts.yml`, each linking to the runbook.
+- **Deferred to where they belong:**
+  - *Sweeper snapshot cost* (whole-table counts every tick): measure with `cmd/loadgen` in M3, then index, sample or slow the interval with real numbers.
+  - *`/metrics` authentication:* the endpoints reveal volumes, never IDs or secrets. Restrict them in M4 with a NetworkPolicy, or a separate internal-only port for the API.
 - OpenTelemetry tracing → Milestone 3.
 
 ### Later milestones (outline only)

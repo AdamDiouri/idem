@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,6 +68,7 @@ func workerEnv(dsn, providerURL string) []string {
 		"IDEM_SWEEP_INTERVAL=500ms",
 		"IDEM_POLL_INTERVAL=50ms",
 		"IDEM_STUCK_AFTER=30s",
+		"IDEM_METRICS_ADDR=off", // several processes per host; nothing scrapes them
 	}
 }
 
@@ -270,6 +272,13 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	if rep.AckMismatches, err = ackMismatches(ctx, pool, rep.Clients.Accepted); err != nil {
 		return rep, err
 	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM steps s
+		WHERE s.status = 'SUCCEEDED' AND EXISTS (
+			SELECT 1 FROM step_attempts a WHERE a.step_id = s.id AND a.outcome IN ('IN_DOUBT', 'ABANDONED'))`).Scan(&rep.InDoubtResolved); err != nil {
+		return rep, err
+	}
+	rep.FencedCommits = countLogLines(cfg.RunDir, "worker-", "lease lost before completion")
 	rep.Outcomes = map[string]int{}
 	rows, err := pool.Query(ctx, `SELECT status, count(*) FROM workflows GROUP BY status`)
 	if err != nil {
@@ -291,6 +300,20 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		return rep, err
 	}
 	return rep, nil
+}
+
+// countLogLines counts lines containing needle in RunDir files named prefix*.
+func countLogLines(dir, prefix, needle string) int {
+	paths, _ := filepath.Glob(filepath.Join(dir, prefix+"*.log"))
+	n := 0
+	for _, p := range paths {
+		data, err := os.ReadFile(p) //nolint:gosec // harness-owned log files
+		if err != nil {
+			continue
+		}
+		n += strings.Count(string(data), needle)
+	}
+	return n
 }
 
 // unsettled counts workflows not yet terminal or parked (0 if the database is

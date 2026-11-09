@@ -1,0 +1,79 @@
+# idem alert rules. Every alert links to the runbook section that says what it
+# means and what to do. State gauges are read from sweepers only (job
+# "idem-sweeper"; other processes export them at 0) and aggregated with max(),
+# never sum(), since several sweepers export the same values. Because every
+# state alert depends on a live sweeper, two alerts watch the sweeper itself.
+groups:
+  - name: idem
+    rules:
+      - alert: IdemWorkflowsNeedAttention
+        expr: sum(max by (reason) (idem_parked_workflows{job="idem-sweeper"})) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} workflows are parked and need a human"
+          runbook: docs/runbooks/needs-attention.md#idemworkflowsneedattention
+
+      - alert: IdemMoneyMayHaveMoved
+        expr: sum(max by (reason) (idem_parked_workflows{job="idem-sweeper", reason!="attempts_exhausted_no_effect"})) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} parked workflows may have moved money without a ledger record"
+          runbook: docs/runbooks/needs-attention.md#idemmoneymayhavemoved
+
+      - alert: IdemWorkflowsStuck
+        expr: max(idem_unsettled_workflow_max_idle_seconds{job="idem-sweeper"}) > 900
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "An unsettled workflow has made no progress for {{ $value | humanizeDuration }}"
+          runbook: docs/runbooks/needs-attention.md#idemworkflowsstuck
+
+      - alert: IdemStepsOverAttemptLimit
+        expr: max(idem_steps_over_attempt_limit{job="idem-sweeper"}) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} unfinished steps were claimed more than once past their attempt limit"
+          runbook: docs/runbooks/needs-attention.md#idemstepsoverattemptlimit
+
+      - alert: IdemFencedCommitsSpike
+        expr: sum(rate(idem_step_attempts_total{outcome="fenced"}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Workers keep losing leases mid-step ({{ $value | humanize }}/s)"
+          runbook: docs/runbooks/needs-attention.md#idemfencedcommitsspike
+
+      - alert: IdemProviderSlow
+        expr: histogram_quantile(0.99, sum by (le) (rate(idem_provider_request_duration_seconds_bucket[5m]))) > 2
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Provider p99 latency is {{ $value | humanizeDuration }}"
+          runbook: docs/runbooks/needs-attention.md#idemproviderslow
+
+      - alert: IdemSweeperDown
+        expr: absent(up{job="idem-sweeper"} == 1)
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "No sweeper is up: leases are not reclaimed and every state alert is blind"
+          runbook: docs/runbooks/needs-attention.md#idemsweeperdown
+
+      - alert: IdemSweeperSnapshotStale
+        expr: time() - max(idem_sweeper_last_snapshot_timestamp_seconds{job="idem-sweeper"}) > 120
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Sweeper state gauges are {{ $value | humanizeDuration }} old: state alerts may be wrong"
+          runbook: docs/runbooks/needs-attention.md#idemsweepersnapshotstale

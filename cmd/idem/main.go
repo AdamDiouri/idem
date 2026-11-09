@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/AdamDiouri/idem/internal/api"
 	"github.com/AdamDiouri/idem/internal/config"
+	"github.com/AdamDiouri/idem/internal/metrics"
 	"github.com/AdamDiouri/idem/internal/store"
 	"github.com/AdamDiouri/idem/internal/workflow"
 )
@@ -23,18 +25,34 @@ import (
 const shutdownGrace = 10 * time.Second
 
 func main() {
+	os.Exit(runIdem(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// newRootCmd builds the idem command tree.
+func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "idem",
 		Short:         "Effectively-once payments workflow engine",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(migrateCmd(), apiCmd(), workerCmd(), sweeperCmd(), checkCmd())
+	root.AddCommand(migrateCmd(), apiCmd(), workerCmd(), sweeperCmd(), checkCmd(), adminCmd())
+	markUsageErrors(root)
+	return root
+}
 
-	if err := root.Execute(); err != nil {
-		slog.Error("idem failed", "error", err)
-		os.Exit(1)
+// runIdem runs idem with args and returns the process exit code. main and the
+// tests share it.
+func runIdem(args []string, stdout, stderr io.Writer) int {
+	root := newRootCmd()
+	root.SetArgs(args)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	err := root.Execute()
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "error:", err)
 	}
+	return exitCode(err)
 }
 
 func migrateCmd() *cobra.Command {
@@ -86,7 +104,9 @@ func apiCmd() *cobra.Command {
 			defer pool.Close()
 
 			fees := workflow.FeeConfig{RateBps: cfg.FeeRateBps, FixedCents: cfg.FeeFixedCents}
+			m := metrics.New() // served on the API's own address at /metrics
 			handler := api.NewServer(api.Options{
+				Metrics:        m,
 				Tokens:         cfg.TokenToClient(),
 				Logger:         logger,
 				RequestTimeout: cfg.RequestTimeout,

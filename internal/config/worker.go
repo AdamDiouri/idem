@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"time"
 
@@ -36,6 +37,10 @@ type WorkerConfig struct {
 	WorkerID             string        `env:"IDEM_WORKER_ID"`  // empty → hostname-pid
 	Failpoints           string        `env:"IDEM_FAILPOINTS"` // see failpoint.EnableFromEnv
 	LogLevel             string        `env:"IDEM_LOG_LEVEL" envDefault:"info"`
+	// MetricsAddr is where worker and sweeper serve /metrics ("off" disables). The
+	// default stays outside 9100-9999, which Prometheus allocates to exporters
+	// (node_exporter is 9100 and runs on most monitored hosts).
+	MetricsAddr string `env:"IDEM_METRICS_ADDR" envDefault:":8090"`
 }
 
 // LoadWorker parses and validates the worker environment. It does not need API tokens.
@@ -90,6 +95,11 @@ func (c WorkerConfig) validate() error {
 	}
 	if err := failpoint.ValidateSpec(c.Failpoints, engine.FailpointNames...); err != nil {
 		return fmt.Errorf("IDEM_FAILPOINTS: %w", err)
+	}
+	if c.MetricsAddr != "off" {
+		if _, _, err := net.SplitHostPort(c.MetricsAddr); err != nil {
+			return fmt.Errorf("IDEM_METRICS_ADDR must be host:port or \"off\": %w", err)
+		}
 	}
 	if _, err := c.SlogLevel(); err != nil {
 		return err

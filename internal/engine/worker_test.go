@@ -357,7 +357,7 @@ func TestWorker_RunSurvivesStepErrors(t *testing.T) {
 
 	_, _ = runInBackground(t, h.worker("w1", step).Run)
 	_, _ = runInBackground(t, func(ctx context.Context) error {
-		return engine.RunSweeper(ctx, h.pool, 50*time.Millisecond, time.Hour, slog.New(slog.DiscardHandler))
+		return engine.RunSweeper(ctx, h.pool, engine.SweeperOptions{Interval: 50 * time.Millisecond, StuckAfter: time.Hour, Logger: slog.New(slog.DiscardHandler)})
 	})
 
 	require.Eventually(t, func() bool { return h.chargeStatus(t, wf) == "SUCCEEDED" }, 5*time.Second, 20*time.Millisecond)
@@ -612,8 +612,8 @@ func TestRunSweeper_LogsStuckWorkflows(t *testing.T) {
 
 	rec := &recordingHandler{}
 	_, _ = runInBackground(t, func(ctx context.Context) error {
-		return engine.RunSweeper(ctx, h.pool, 10*time.Millisecond, time.Hour, slog.New(rec))
+		return engine.RunSweeper(ctx, h.pool, engine.SweeperOptions{Interval: 10 * time.Millisecond, StuckAfter: time.Hour, Logger: slog.New(rec)})
 	})
-	require.Eventually(t, func() bool { return rec.find("workflow stuck", "workflow_id", wf.String()) },
+	require.Eventually(t, func() bool { return rec.find("stuck workflows", "count", "1") },
 		time.Second, 10*time.Millisecond)
 }

@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	"github.com/AdamDiouri/idem/internal/api"
+	"github.com/AdamDiouri/idem/internal/metrics"
 	"github.com/AdamDiouri/idem/internal/testutil"
 	"github.com/AdamDiouri/idem/internal/workflow"
 )
@@ -237,4 +239,25 @@ func TestReadyz(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	require.JSONEq(t, `{"status":"unavailable"}`, rec.Body.String())
+}
+
+func TestAPI_CountsSubmissions(t *testing.T) {
+	m := metrics.New()
+	opts := options()
+	opts.Metrics = m
+	body := json.RawMessage(`{"workflow_id":"x"}`)
+
+	post(t, api.NewServer(opts, &fakeSubmitter{res: workflow.SubmitResult{Body: body}}, fakePinger{}), validBody, nil)
+	post(t, api.NewServer(opts, &fakeSubmitter{res: workflow.SubmitResult{Body: body, Replayed: true}}, fakePinger{}), validBody, nil)
+	post(t, api.NewServer(opts, &fakeSubmitter{err: &workflow.ValidationError{Field: "currency", Message: "x"}}, fakePinger{}), validBody, nil)
+	post(t, api.NewServer(opts, &fakeSubmitter{err: workflow.ErrKeyReuseMismatch}, fakePinger{}), validBody, nil)
+
+	for _, result := range []string{"created", "replayed", "validation_failed", "key_reused"} {
+		require.Equal(t, 1.0, promtestutil.ToFloat64(m.Submissions.WithLabelValues(result)), result)
+	}
+
+	rec := httptest.NewRecorder()
+	api.NewServer(opts, &fakeSubmitter{}, fakePinger{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "idem_workflow_submissions_total")
 }

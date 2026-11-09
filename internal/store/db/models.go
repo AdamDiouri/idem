@@ -14,6 +14,17 @@ type Account struct {
 	Description string
 }
 
+type AdminAction struct {
+	ID         uuid.UUID
+	At         pgtype.Timestamptz
+	Actor      string
+	Action     string
+	WorkflowID uuid.UUID
+	StepID     *uuid.UUID
+	Reason     string
+	Details    []byte
+}
+
 type ApiIdempotencyKey struct {
 	ClientID           string
 	Key                string
