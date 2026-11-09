@@ -288,7 +288,7 @@ func TestFlow_ManyWorkflowsUnderFaults(t *testing.T) {
 		}, h.allSteps()...).Run)
 	}
 	_, _ = runInBackground(t, func(ctx context.Context) error {
-		return engine.RunSweeper(ctx, h.pool, 50*time.Millisecond, time.Hour, slog.New(slog.DiscardHandler))
+		return engine.RunSweeper(ctx, h.pool, engine.SweeperOptions{Interval: 50 * time.Millisecond, StuckAfter: time.Hour, Logger: slog.New(slog.DiscardHandler)})
 	})
 
 	require.Eventually(t, func() bool {

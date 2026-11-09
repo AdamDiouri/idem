@@ -243,6 +243,18 @@ func (q *Queries) MarkWorkflowRunning(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const oldestUnsettledAgeMs = `-- name: OldestUnsettledAgeMs :one
+SELECT COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000, 0)::bigint AS age_ms
+FROM workflows WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+`
+
+func (q *Queries) OldestUnsettledAgeMs(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, oldestUnsettledAgeMs)
+	var age_ms int64
+	err := row.Scan(&age_ms)
+	return age_ms, err
+}
+
 const reclaimExpiredLeases = `-- name: ReclaimExpiredLeases :one
 WITH reclaimed AS (
   UPDATE steps
@@ -274,6 +286,47 @@ func (q *Queries) ReclaimExpiredLeases(ctx context.Context) (int64, error) {
 	return reclaimed, err
 }
 
+const stepStatusCounts = `-- name: StepStatusCounts :many
+SELECT name, status, count(*)::int AS n FROM steps GROUP BY name, status
+`
+
+type StepStatusCountsRow struct {
+	Name   string
+	Status string
+	N      int32
+}
+
+func (q *Queries) StepStatusCounts(ctx context.Context) ([]StepStatusCountsRow, error) {
+	rows, err := q.db.Query(ctx, stepStatusCounts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []StepStatusCountsRow
+	for rows.Next() {
+		var i StepStatusCountsRow
+		if err := rows.Scan(&i.Name, &i.Status, &i.N); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const stepsOverAttemptLimit = `-- name: StepsOverAttemptLimit :one
+SELECT count(*)::int AS n FROM steps WHERE attempt_count > max_attempts
+`
+
+func (q *Queries) StepsOverAttemptLimit(ctx context.Context) (int32, error) {
+	row := q.db.QueryRow(ctx, stepsOverAttemptLimit)
+	var n int32
+	err := row.Scan(&n)
+	return n, err
+}
+
 const transitionWorkflow = `-- name: TransitionWorkflow :execrows
 UPDATE workflows
 SET status = $1::text, version = version + 1, updated_at = now()
@@ -293,4 +346,33 @@ func (q *Queries) TransitionWorkflow(ctx context.Context, arg TransitionWorkflow
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const workflowStatusCounts = `-- name: WorkflowStatusCounts :many
+SELECT status, count(*)::int AS n FROM workflows GROUP BY status
+`
+
+type WorkflowStatusCountsRow struct {
+	Status string
+	N      int32
+}
+
+func (q *Queries) WorkflowStatusCounts(ctx context.Context) ([]WorkflowStatusCountsRow, error) {
+	rows, err := q.db.Query(ctx, workflowStatusCounts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WorkflowStatusCountsRow
+	for rows.Next() {
+		var i WorkflowStatusCountsRow
+		if err := rows.Scan(&i.Status, &i.N); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

@@ -106,3 +106,16 @@ FROM workflows
 WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING')
   AND updated_at < now() - (sqlc.arg(older_than_ms)::bigint * interval '1 millisecond')
 ORDER BY updated_at;
+
+-- name: WorkflowStatusCounts :many
+SELECT status, count(*)::int AS n FROM workflows GROUP BY status;
+
+-- name: StepStatusCounts :many
+SELECT name, status, count(*)::int AS n FROM steps GROUP BY name, status;
+
+-- name: OldestUnsettledAgeMs :one
+SELECT COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000, 0)::bigint AS age_ms
+FROM workflows WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING');
+
+-- name: StepsOverAttemptLimit :one
+SELECT count(*)::int AS n FROM steps WHERE attempt_count > max_attempts;

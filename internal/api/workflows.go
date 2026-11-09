@@ -27,25 +27,35 @@ func (s *server) postWorkflows(w http.ResponseWriter, r *http.Request) {
 	key := r.Header.Get(idempotencyKeyName)
 	log := s.logger.With("client_id", clientID, "idempotency_key", key)
 
-	status, replayed, workflowID := s.handlePost(w, r, clientID, key, log)
+	res := s.handlePost(w, r, clientID, key, log)
+	s.opts.Metrics.ObserveSubmission(res.result)
 
-	attrs := []any{"status", status, "replayed", replayed}
-	if workflowID != "" {
-		attrs = append(attrs, "workflow_id", workflowID)
+	attrs := []any{"status", res.status, "result", res.result}
+	if res.workflowID != "" {
+		attrs = append(attrs, "workflow_id", res.workflowID)
 	}
 	log.Info("POST /workflows", attrs...)
 }
 
+// postResult is what the access log and metrics need. result is a bounded
+// label: created, replayed, bad_request, validation_failed, key_reused,
+// key_in_use, timeout, error.
+type postResult struct {
+	status     int
+	result     string
+	workflowID string
+}
+
 // handlePost writes the response and returns what the access log needs.
-func (s *server) handlePost(w http.ResponseWriter, r *http.Request, clientID, key string, log *slog.Logger) (status int, replayed bool, workflowID string) {
+func (s *server) handlePost(w http.ResponseWriter, r *http.Request, clientID, key string, log *slog.Logger) postResult {
 	if key == "" {
 		writeError(w, http.StatusBadRequest, "idempotency_key_required", "the Idempotency-Key header is required", "")
-		return http.StatusBadRequest, false, ""
+		return postResult{status: http.StatusBadRequest, result: "bad_request"}
 	}
 	if !validIdempotencyKey(key) {
 		writeError(w, http.StatusBadRequest, "idempotency_key_invalid",
 			"Idempotency-Key must be 1-255 printable ASCII characters without spaces", "")
-		return http.StatusBadRequest, false, ""
+		return postResult{status: http.StatusBadRequest, result: "bad_request"}
 	}
 
 	req, status, err := decodeRequest(w, r)
@@ -55,7 +65,7 @@ func (s *server) handlePost(w http.ResponseWriter, r *http.Request, clientID, ke
 			code = "body_too_large"
 		}
 		writeError(w, status, code, err.Error(), "")
-		return status, false, ""
+		return postResult{status: status, result: "bad_request"}
 	}
 
 	// Business validation happens inside Submit, after the key lookup, so a
@@ -69,26 +79,26 @@ func (s *server) handlePost(w http.ResponseWriter, r *http.Request, clientID, ke
 	switch {
 	case errors.As(err, &ve):
 		writeError(w, http.StatusUnprocessableEntity, "validation_failed", ve.Message, ve.Field)
-		return http.StatusUnprocessableEntity, false, ""
+		return postResult{status: http.StatusUnprocessableEntity, result: "validation_failed"}
 	case errors.Is(err, workflow.ErrKeyReuseMismatch):
 		writeError(w, http.StatusUnprocessableEntity, "idempotency_key_reused",
 			"this Idempotency-Key was already used with a different request body", "")
-		return http.StatusUnprocessableEntity, false, ""
+		return postResult{status: http.StatusUnprocessableEntity, result: "key_reused"}
 	case errors.Is(err, context.DeadlineExceeded):
 		// The transaction may or may not have committed; a retry with the same
 		// key either replays the workflow or creates it, never both.
 		log.Warn("submit workflow timed out", "error", err)
 		writeError(w, http.StatusServiceUnavailable, "request_timeout",
 			"request timed out; retry with the same Idempotency-Key", "")
-		return http.StatusServiceUnavailable, false, ""
+		return postResult{status: http.StatusServiceUnavailable, result: "timeout"}
 	case errors.Is(err, workflow.ErrKeyInUse):
 		writeError(w, http.StatusConflict, "idempotency_key_in_use",
 			"a request with this Idempotency-Key is still in progress; retry later", "")
-		return http.StatusConflict, false, ""
+		return postResult{status: http.StatusConflict, result: "key_in_use"}
 	case err != nil:
 		log.Error("submit workflow", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "internal error", "")
-		return http.StatusInternalServerError, false, ""
+		return postResult{status: http.StatusInternalServerError, result: "error"}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -97,7 +107,11 @@ func (s *server) handlePost(w http.ResponseWriter, r *http.Request, clientID, ke
 	}
 	w.WriteHeader(http.StatusCreated)
 	_, _ = w.Write(res.Body)
-	return http.StatusCreated, res.Replayed, extractWorkflowID(res.Body)
+	result := "created"
+	if res.Replayed {
+		result = "replayed"
+	}
+	return postResult{status: http.StatusCreated, result: result, workflowID: extractWorkflowID(res.Body)}
 }
 
 // decodeRequest reads exactly one JSON object with known fields from a body of at most maxBodyBytes.

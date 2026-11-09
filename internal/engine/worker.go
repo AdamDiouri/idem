@@ -11,7 +11,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AdamDiouri/idem/internal/failpoint"
+	"github.com/AdamDiouri/idem/internal/metrics"
 	"github.com/AdamDiouri/idem/internal/provider"
+	"github.com/AdamDiouri/idem/internal/store/db"
 )
 
 // completeTimeout bounds recording a step's result. It is separate from the
@@ -37,6 +39,7 @@ type WorkerOptions struct {
 	// context is cancelled.
 	ShutdownGrace time.Duration
 	Logger        *slog.Logger
+	Metrics       *metrics.Metrics // nil disables metrics
 }
 
 // RunResult describes one RunOnce call.
@@ -96,18 +99,21 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 	var r Result
 	var out provider.Outcome
 	failpoint.Hit(FPBeforeProviderCall)
+	callStart := time.Now()
 	if w.nearKeyRetention(s) {
 		// Re-sending could reach a provider that has forgotten the key and
 		// charge twice. Ask what happened instead (design §9.4).
 		log.Warn("idempotency key near provider retention; resolving by lookup", "key_age", s.KeyAge.String())
 		var found bool
 		out, found = w.lookup(ctx, step, s)
+		w.opts.Metrics.ObserveLookup(s.Name, found)
 		if !found && out.Class == provider.Permanent {
 			r = Result{Kind: ResultDead, DeadReason: DeadKeyExpiredUnknown, HTTPStatus: out.HTTPStatus, Error: errString(out.Err)}
 		}
 	} else {
 		out = w.execute(ctx, step, s)
 	}
+	w.opts.Metrics.ObserveProvider(s.Name, out.Class.String(), time.Since(callStart))
 	failpoint.Hit(FPAfterProviderCall)
 
 	if r.Kind == "" {
@@ -118,15 +124,18 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 	defer cancel()
 	err = Complete(completeCtx, w.pool, s, r, step)
 	if errors.Is(err, ErrFenced) {
+		w.opts.Metrics.ObserveAttempt(s.Name, "fenced")
 		log.Warn("lease lost before completion; result discarded", "provider_class", out.Class.String())
 		return RunResult{Claimed: true, StepID: s.ID, Outcome: "fenced"}, nil
 	}
 	if err != nil {
+		w.opts.Metrics.ObserveAttempt(s.Name, "error")
 		log.Error("complete step; it will be recovered when its lease expires", "error", err)
 		return RunResult{Claimed: true, StepID: s.ID}, err
 	}
 
 	outcome := outcomeNames[r.Kind]
+	w.opts.Metrics.ObserveAttempt(s.Name, outcome)
 	switch r.Kind {
 	case ResultDead:
 		log.Error("step is DEAD; workflow needs attention",
@@ -210,10 +219,23 @@ func (w *Worker) Run(ctx context.Context) error {
 	return nil
 }
 
+// SweeperOptions configures RunSweeper.
+type SweeperOptions struct {
+	Interval   time.Duration
+	StuckAfter time.Duration // workflows unchanged this long are reported as stuck
+	Logger     *slog.Logger
+	Metrics    *metrics.Metrics // nil disables the state gauges
+}
+
 // RunSweeper reclaims expired leases every interval until ctx is cancelled,
-// and logs every workflow that has not progressed for stuckAfter (§11.1).
-func RunSweeper(ctx context.Context, pool *pgxpool.Pool, interval, stuckAfter time.Duration, logger *slog.Logger) error {
-	ticker := time.NewTicker(interval)
+// reports stuck workflows (one summary line per tick, §11.1) and, with
+// metrics, exports the database state as gauges.
+func RunSweeper(ctx context.Context, pool *pgxpool.Pool, opts SweeperOptions) error {
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	ticker := time.NewTicker(opts.Interval)
 	defer ticker.Stop()
 	for {
 		n, err := ReclaimExpiredLeases(ctx, pool)
@@ -221,15 +243,27 @@ func RunSweeper(ctx context.Context, pool *pgxpool.Pool, interval, stuckAfter ti
 		case err != nil && ctx.Err() == nil:
 			logger.Error("sweep", "error", err)
 		case n > 0:
+			opts.Metrics.AddReclaimed(n)
 			logger.Warn("reclaimed expired leases; steps are now IN_DOUBT", "count", n)
 		}
 
-		stuck, err := FindStuckWorkflows(ctx, pool, stuckAfter)
-		if err != nil && ctx.Err() == nil {
+		stuck, err := FindStuckWorkflows(ctx, pool, opts.StuckAfter)
+		switch {
+		case err != nil && ctx.Err() == nil:
 			logger.Error("find stuck workflows", "error", err)
+		case len(stuck) > 0:
+			logger.Warn("stuck workflows", "count", len(stuck), "oldest", stuck[0].Age.Round(time.Second).String(),
+				"oldest_workflow_id", stuck[0].ID.String())
 		}
-		for _, wf := range stuck {
-			logger.Warn("workflow stuck", "workflow_id", wf.ID.String(), "status", wf.Status, "age", wf.Age.String())
+
+		if opts.Metrics != nil {
+			if snap, err := snapshot(ctx, pool); err != nil {
+				if ctx.Err() == nil {
+					logger.Error("metrics snapshot", "error", err)
+				}
+			} else {
+				opts.Metrics.SetSnapshot(snap)
+			}
 		}
 
 		select {
@@ -238,4 +272,47 @@ func RunSweeper(ctx context.Context, pool *pgxpool.Pool, interval, stuckAfter ti
 		case <-ticker.C:
 		}
 	}
+}
+
+// snapshot reads the state the sweeper exports as gauges.
+func snapshot(ctx context.Context, pool *pgxpool.Pool) (metrics.Snapshot, error) {
+	q := db.New(pool)
+	s := metrics.Snapshot{Workflows: map[string]int{}, Steps: map[[2]string]int{}, Parked: map[string]int{}}
+
+	wfs, err := q.WorkflowStatusCounts(ctx)
+	if err != nil {
+		return s, err
+	}
+	for _, r := range wfs {
+		s.Workflows[r.Status] = int(r.N)
+	}
+	steps, err := q.StepStatusCounts(ctx)
+	if err != nil {
+		return s, err
+	}
+	for _, r := range steps {
+		s.Steps[[2]string{r.Name, r.Status}] = int(r.N)
+	}
+	age, err := q.OldestUnsettledAgeMs(ctx)
+	if err != nil {
+		return s, err
+	}
+	s.OldestUnsettledAge = time.Duration(age) * time.Millisecond
+	over, err := q.StepsOverAttemptLimit(ctx)
+	if err != nil {
+		return s, err
+	}
+	s.StepsOverLimit = int(over)
+	parked, err := q.ListParkedSteps(ctx)
+	if err != nil {
+		return s, err
+	}
+	for _, p := range parked {
+		reason := "refused"
+		if p.DeadReason != nil {
+			reason = *p.DeadReason
+		}
+		s.Parked[reason]++
+	}
+	return s, nil
 }

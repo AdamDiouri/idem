@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/AdamDiouri/idem/internal/metrics"
 	"github.com/AdamDiouri/idem/internal/workflow"
 )
 
@@ -30,6 +31,8 @@ type Options struct {
 	// for a database connection. It must be below the server's WriteTimeout so
 	// the client always gets a status. Zero means defaultRequestTimeout.
 	RequestTimeout time.Duration
+	// Metrics, if set, are updated per request and served on GET /metrics.
+	Metrics *metrics.Metrics
 }
 
 const defaultRequestTimeout = 10 * time.Second
@@ -55,6 +58,9 @@ func NewServer(opts Options, sub Submitter, db Pinger) http.Handler {
 	mux.Handle("POST /workflows", requireToken(opts.Tokens, http.HandlerFunc(s.postWorkflows)))
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
+	if opts.Metrics != nil {
+		mux.Handle("GET /metrics", opts.Metrics.Handler())
+	}
 	return mux
 }
 

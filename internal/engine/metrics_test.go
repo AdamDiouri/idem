@@ -1,0 +1,110 @@
+package engine_test
+
+import (
+	"context"
+	"log/slog"
+	"regexp"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/require"
+
+	"github.com/AdamDiouri/idem/internal/engine"
+	"github.com/AdamDiouri/idem/internal/failpoint"
+	"github.com/AdamDiouri/idem/internal/metrics"
+)
+
+func withMetrics(m *metrics.Metrics) func(*engine.WorkerOptions) {
+	return func(o *engine.WorkerOptions) { o.Metrics = m }
+}
+
+func TestWorker_CountsOutcomes(t *testing.T) {
+	h := newHarness(t)
+	m := metrics.New()
+	submitTo(t, h, "cus_decline_1", "mer_1")
+	h.drain(t, h.workerWith("w1", withMetrics(m), h.chargeStep()))
+	submitTo(t, h, "cus_1", "mer_1")
+	h.drain(t, h.workerWith("w1", withMetrics(m), h.chargeStep()))
+
+	require.Equal(t, 1.0, testutil.ToFloat64(m.StepAttempts.WithLabelValues("charge", "failed_permanent")))
+	require.Equal(t, 1.0, testutil.ToFloat64(m.StepAttempts.WithLabelValues("charge", "succeeded")))
+	require.Equal(t, 2, testutil.CollectAndCount(m.ProviderDuration), "one latency series per class seen")
+}
+
+func TestWorker_CountsFencedCommits(t *testing.T) {
+	h := newHarness(t)
+	m := metrics.New()
+	submitTo(t, h, "cus_1", "mer_1")
+	action, entered, release := failpoint.BlockOnce()
+	failpoint.Enable(engine.FPAfterProviderCall, action)
+	defer release()
+
+	var wg sync.WaitGroup
+	wg.Go(func() { _, _ = h.workerWith("wA", withMetrics(m), h.chargeStep()).RunOnce(context.Background()) })
+	<-entered
+	time.Sleep(pastLease)
+	require.Equal(t, int64(1), h.reclaim(t))
+	require.Equal(t, "succeeded", h.runOnce(t, h.workerWith("wB", withMetrics(m), h.chargeStep())).Outcome)
+	release()
+	wg.Wait()
+
+	require.Equal(t, 1.0, testutil.ToFloat64(m.StepAttempts.WithLabelValues("charge", "fenced")))
+}
+
+func TestSweeper_ExportsGauges(t *testing.T) {
+	h := newHarness(t)
+	m := metrics.New()
+	parkPayoutAfterDoubt(t, h)
+	old := submitTo(t, h, "cus_2", "mer_2")
+	_, err := h.pool.Exec(context.Background(),
+		`UPDATE workflows SET status = 'RUNNING', created_at = now() - interval '1 hour' WHERE id = $1`, old)
+	require.NoError(t, err)
+
+	_, _ = runInBackground(t, func(ctx context.Context) error {
+		return engine.RunSweeper(ctx, h.pool, engine.SweeperOptions{
+			Interval: 10 * time.Millisecond, StuckAfter: time.Hour, Logger: slog.New(slog.DiscardHandler), Metrics: m,
+		})
+	})
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(m.Parked.WithLabelValues(engine.DeadPermanentAfterInDoubt)) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+	require.GreaterOrEqual(t, testutil.ToFloat64(m.OldestUnsettled), 3500.0)
+	require.Equal(t, 1.0, testutil.ToFloat64(m.Workflows.WithLabelValues("NEEDS_ATTENTION")))
+	require.Equal(t, 0.0, testutil.ToFloat64(m.StepsOverLimit))
+}
+
+// Review focus: labels must stay bounded — no IDs, keys or error text.
+func TestMetrics_NoUnboundedLabels(t *testing.T) {
+	h := newHarness(t)
+	m := metrics.New()
+	parkPayoutAfterDoubt(t, h)
+	submitTo(t, h, "cus_decline_1", "mer_1")
+	submitTo(t, h, "cus_1", "mer_invalid_2")
+	h.drain(t, h.workerWith("w1", withMetrics(m), h.allSteps()...))
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		_ = engine.RunSweeper(ctx, h.pool, engine.SweeperOptions{Interval: 10 * time.Millisecond, StuckAfter: time.Hour,
+			Logger: slog.New(slog.DiscardHandler), Metrics: m})
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	families, err := m.Gatherer().Gather()
+	require.NoError(t, err)
+	bounded := regexp.MustCompile(`^[A-Za-z_]{1,40}$`)
+	seen := 0
+	for _, f := range families {
+		if len(f.GetName()) < 5 || f.GetName()[:5] != "idem_" {
+			continue
+		}
+		for _, metric := range f.GetMetric() {
+			for _, l := range metric.GetLabel() {
+				seen++
+				require.Regexp(t, bounded, l.GetValue(), "%s{%s=%q}", f.GetName(), l.GetName(), l.GetValue())
+			}
+		}
+	}
+	require.Positive(t, seen)
+}
