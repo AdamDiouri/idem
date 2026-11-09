@@ -12,9 +12,14 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/AdamDiouri/idem/internal/testutil"
 )
 
-// TestMain lets the test binary double as a long-running child process.
+var dsn string
+
+// TestMain lets the test binary double as a long-running child process;
+// otherwise it provides a Postgres for the client tests.
 func TestMain(m *testing.M) {
 	if os.Getenv("CHAOS_HELPER") == "sleep" {
 		for {
@@ -22,7 +27,7 @@ func TestMain(m *testing.M) {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	os.Exit(m.Run())
+	os.Exit(testutil.RunWithPostgres(m, &dsn))
 }
 
 func helperSpec(t *testing.T, name string) ProcSpec {
