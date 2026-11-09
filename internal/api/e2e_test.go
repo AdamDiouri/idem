@@ -26,7 +26,7 @@ type response struct {
 func newE2EServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	pool := testutil.NewPool(t, dsn)
-	srv := httptest.NewServer(api.NewServer(options(), workflow.NewSubmitter(pool, 5*time.Second), pool))
+	srv := httptest.NewServer(api.NewServer(options(), workflow.NewSubmitter(pool, 5*time.Second, defaultFees), pool))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -85,6 +85,27 @@ func TestE2E_F2_DifferentBody(t *testing.T) {
 
 	require.Equal(t, http.StatusUnprocessableEntity, second.status)
 	require.Contains(t, second.body, `"idempotency_key_reused"`)
+}
+
+// Regression (review C1): a fee increase between the original request and a
+// retry must not turn the retry of an existing workflow into a 422.
+func TestE2E_RetryAfterFeeIncreaseReplays(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	body := `{"amount_cents":100,"currency":"EUR","customer_id":"cus_1","merchant_id":"mer_1"}`
+
+	before := httptest.NewServer(api.NewServer(options(), workflow.NewSubmitter(pool, 5*time.Second, defaultFees), pool))
+	t.Cleanup(before.Close)
+	first := postHTTP(t, before.URL, "fee-change", body)
+	require.Equal(t, http.StatusCreated, first.status, first.body)
+
+	raised := workflow.FeeConfig{RateBps: 150, FixedCents: 100} // 100 cents no longer covers the fee
+	after := httptest.NewServer(api.NewServer(options(), workflow.NewSubmitter(pool, 5*time.Second, raised), pool))
+	t.Cleanup(after.Close)
+	retry := postHTTP(t, after.URL, "fee-change", body)
+
+	require.Equal(t, http.StatusCreated, retry.status, retry.body)
+	require.Equal(t, "true", retry.replayed)
+	require.Equal(t, first.body, retry.body)
 }
 
 func TestE2E_F3_ConcurrentPosts(t *testing.T) {

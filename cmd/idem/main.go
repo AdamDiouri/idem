@@ -85,11 +85,11 @@ func apiCmd() *cobra.Command {
 			}
 			defer pool.Close()
 
+			fees := workflow.FeeConfig{RateBps: cfg.FeeRateBps, FixedCents: cfg.FeeFixedCents}
 			handler := api.NewServer(api.Options{
 				Tokens: cfg.TokenToClient(),
-				Fees:   workflow.FeeConfig{RateBps: cfg.FeeRateBps, FixedCents: cfg.FeeFixedCents},
 				Logger: logger,
-			}, workflow.NewSubmitter(pool, cfg.IdempotencyLockTimeout), pool)
+			}, workflow.NewSubmitter(pool, cfg.IdempotencyLockTimeout, fees), pool)
 
 			srv := &http.Server{
 				Addr:              cfg.HTTPAddr,

@@ -53,25 +53,18 @@ func (s *server) handlePost(w http.ResponseWriter, r *http.Request, clientID, ke
 		return status, false, ""
 	}
 
-	input, err := workflow.NewPaymentInput(req, s.opts.Fees)
-	var ve *workflow.ValidationError
-	if errors.As(err, &ve) {
-		writeError(w, http.StatusUnprocessableEntity, "validation_failed", ve.Message, ve.Field)
-		return http.StatusUnprocessableEntity, false, ""
-	}
-	if err != nil {
-		log.Error("build payment input", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal", "internal error", "")
-		return http.StatusInternalServerError, false, ""
-	}
-
+	// Business validation happens inside Submit, after the key lookup, so a
+	// retry of an existing workflow replays even if rules or fees changed.
 	res, err := s.sub.Submit(r.Context(), workflow.SubmitRequest{
 		ClientID:       clientID,
 		IdempotencyKey: key,
-		Fingerprint:    workflow.Fingerprint(req),
-		Input:          input,
+		Request:        req,
 	})
+	var ve *workflow.ValidationError
 	switch {
+	case errors.As(err, &ve):
+		writeError(w, http.StatusUnprocessableEntity, "validation_failed", ve.Message, ve.Field)
+		return http.StatusUnprocessableEntity, false, ""
 	case errors.Is(err, workflow.ErrKeyReuseMismatch):
 		writeError(w, http.StatusUnprocessableEntity, "idempotency_key_reused",
 			"this Idempotency-Key was already used with a different request body", "")

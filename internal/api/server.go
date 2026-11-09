@@ -25,7 +25,6 @@ type Pinger interface {
 // Options configures the HTTP server.
 type Options struct {
 	Tokens map[string]string // bearer token → client ID
-	Fees   workflow.FeeConfig
 	Logger *slog.Logger
 }
 

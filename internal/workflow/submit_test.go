@@ -23,15 +23,12 @@ func TestMain(m *testing.M) {
 	os.Exit(testutil.RunWithPostgres(m, &dsn))
 }
 
-func submit(t *testing.T, s *workflow.Submitter, client, key string, req workflow.CreateWorkflowRequest, fees workflow.FeeConfig) (workflow.SubmitResult, error) {
+func submit(t *testing.T, s *workflow.Submitter, client, key string, req workflow.CreateWorkflowRequest) (workflow.SubmitResult, error) {
 	t.Helper()
-	in, err := workflow.NewPaymentInput(req, fees)
-	require.NoError(t, err)
 	return s.Submit(context.Background(), workflow.SubmitRequest{
 		ClientID:       client,
 		IdempotencyKey: key,
-		Fingerprint:    workflow.Fingerprint(req),
-		Input:          in,
+		Request:        req,
 	})
 }
 
@@ -59,9 +56,9 @@ func decodeCreated(t *testing.T, body json.RawMessage) workflow.Created {
 func TestSubmit_CreatesWorkflowStepAndKey(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.NewPool(t, dsn)
-	s := workflow.NewSubmitter(pool, 5*time.Second)
+	s := workflow.NewSubmitter(pool, 5*time.Second, defaultFees)
 
-	res, err := submit(t, s, "client_a", "key-1", validReq(), defaultFees)
+	res, err := submit(t, s, "client_a", "key-1", validReq())
 	require.NoError(t, err)
 	require.False(t, res.Replayed)
 
@@ -108,11 +105,11 @@ func TestSubmit_CreatesWorkflowStepAndKey(t *testing.T) {
 // F1: a client retry with the same key and body replays the original response.
 func TestSubmit_ReplaySameKeySameBody(t *testing.T) {
 	pool := testutil.NewPool(t, dsn)
-	s := workflow.NewSubmitter(pool, 5*time.Second)
+	s := workflow.NewSubmitter(pool, 5*time.Second, defaultFees)
 
-	first, err := submit(t, s, "client_a", "key-1", validReq(), defaultFees)
+	first, err := submit(t, s, "client_a", "key-1", validReq())
 	require.NoError(t, err)
-	second, err := submit(t, s, "client_a", "key-1", validReq(), defaultFees)
+	second, err := submit(t, s, "client_a", "key-1", validReq())
 	require.NoError(t, err)
 
 	require.False(t, first.Replayed)
@@ -124,25 +121,25 @@ func TestSubmit_ReplaySameKeySameBody(t *testing.T) {
 // F2: reusing a key with a different body is rejected and creates nothing.
 func TestSubmit_SameKeyDifferentBody(t *testing.T) {
 	pool := testutil.NewPool(t, dsn)
-	s := workflow.NewSubmitter(pool, 5*time.Second)
+	s := workflow.NewSubmitter(pool, 5*time.Second, defaultFees)
 
-	_, err := submit(t, s, "client_a", "key-1", validReq(), defaultFees)
+	_, err := submit(t, s, "client_a", "key-1", validReq())
 	require.NoError(t, err)
 
 	other := validReq()
 	other.AmountCents = 20000
-	_, err = submit(t, s, "client_a", "key-1", other, defaultFees)
+	_, err = submit(t, s, "client_a", "key-1", other)
 	require.ErrorIs(t, err, workflow.ErrKeyReuseMismatch)
 	requireCounts(t, pool, 1)
 }
 
 func TestSubmit_KeyScopedPerClient(t *testing.T) {
 	pool := testutil.NewPool(t, dsn)
-	s := workflow.NewSubmitter(pool, 5*time.Second)
+	s := workflow.NewSubmitter(pool, 5*time.Second, defaultFees)
 
-	a, err := submit(t, s, "client_a", "shared-key", validReq(), defaultFees)
+	a, err := submit(t, s, "client_a", "shared-key", validReq())
 	require.NoError(t, err)
-	b, err := submit(t, s, "client_b", "shared-key", validReq(), defaultFees)
+	b, err := submit(t, s, "client_b", "shared-key", validReq())
 	require.NoError(t, err)
 
 	require.False(t, a.Replayed)
@@ -153,31 +150,52 @@ func TestSubmit_KeyScopedPerClient(t *testing.T) {
 
 func TestSubmit_ReplayIgnoresNewFeeConfig(t *testing.T) {
 	pool := testutil.NewPool(t, dsn)
-	s := workflow.NewSubmitter(pool, 5*time.Second)
+	req := validReq()
+	req.AmountCents = 100 // fee 27 under the original config
 
-	_, err := submit(t, s, "client_a", "key-1", validReq(), workflow.FeeConfig{RateBps: 150, FixedCents: 25})
+	original := workflow.NewSubmitter(pool, 5*time.Second, defaultFees)
+	_, err := submit(t, original, "client_a", "key-1", req)
 	require.NoError(t, err)
-	res, err := submit(t, s, "client_a", "key-1", validReq(), workflow.FeeConfig{RateBps: 300, FixedCents: 50})
+
+	// Under the raised config 100 cents no longer covers the fee; the replay
+	// must still succeed because the workflow already exists (review C1).
+	raised := workflow.NewSubmitter(pool, 5*time.Second, workflow.FeeConfig{RateBps: 150, FixedCents: 100})
+	res, err := submit(t, raised, "client_a", "key-1", req)
 	require.NoError(t, err)
 
 	require.True(t, res.Replayed)
-	require.Equal(t, int64(175), decodeCreated(t, res.Body).FeeCents)
+	require.Equal(t, int64(27), decodeCreated(t, res.Body).FeeCents)
+	requireCounts(t, pool, 1)
+}
+
+func TestSubmit_ValidationErrorReleasesKey(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	s := workflow.NewSubmitter(pool, 5*time.Second, defaultFees)
+
+	bad := validReq()
+	bad.Currency = "USD"
+	_, err := submit(t, s, "client_a", "key-1", bad)
+	var ve *workflow.ValidationError
+	require.True(t, errors.As(err, &ve), "expected *ValidationError, got %v", err)
+	require.Equal(t, "currency", ve.Field)
+	requireCounts(t, pool, 0)
+
+	res, err := submit(t, s, "client_a", "key-1", validReq())
+	require.NoError(t, err)
+	require.False(t, res.Replayed)
 	requireCounts(t, pool, 1)
 }
 
 // F3: concurrent identical submissions create exactly one workflow.
 func TestSubmit_ConcurrentSameKey(t *testing.T) {
 	pool := testutil.NewPool(t, dsn)
-	s := workflow.NewSubmitter(pool, 5*time.Second)
+	s := workflow.NewSubmitter(pool, 5*time.Second, defaultFees)
 
 	const n = 20
-	in, err := workflow.NewPaymentInput(validReq(), defaultFees)
-	require.NoError(t, err)
 	req := workflow.SubmitRequest{
 		ClientID:       "client_a",
 		IdempotencyKey: "key-1",
-		Fingerprint:    workflow.Fingerprint(validReq()),
-		Input:          in,
+		Request:        validReq(),
 	}
 
 	start := make(chan struct{})
@@ -214,7 +232,7 @@ func TestSubmit_ConcurrentSameKey(t *testing.T) {
 func TestSubmit_KeyHeldByUncommittedTxReturnsErrKeyInUse(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.NewPool(t, dsn)
-	s := workflow.NewSubmitter(pool, 200*time.Millisecond)
+	s := workflow.NewSubmitter(pool, 200*time.Millisecond, defaultFees)
 
 	txA, err := pool.Begin(ctx)
 	require.NoError(t, err)
@@ -222,11 +240,11 @@ func TestSubmit_KeyHeldByUncommittedTxReturnsErrKeyInUse(t *testing.T) {
 		`INSERT INTO api_idempotency_keys (client_id, key, request_fingerprint) VALUES ('client_a', 'key-1', 'x')`)
 	require.NoError(t, err)
 
-	_, err = submit(t, s, "client_a", "key-1", validReq(), defaultFees)
+	_, err = submit(t, s, "client_a", "key-1", validReq())
 	require.ErrorIs(t, err, workflow.ErrKeyInUse)
 
 	require.NoError(t, txA.Rollback(ctx))
-	res, err := submit(t, s, "client_a", "key-1", validReq(), defaultFees)
+	res, err := submit(t, s, "client_a", "key-1", validReq())
 	require.NoError(t, err)
 	require.False(t, res.Replayed)
 	requireCounts(t, pool, 1)
@@ -236,16 +254,16 @@ func TestSubmit_KeyHeldByUncommittedTxReturnsErrKeyInUse(t *testing.T) {
 // client's retry with the same key starts from scratch.
 func TestSubmit_FailureBeforeCommitLeavesNoTrace(t *testing.T) {
 	pool := testutil.NewPool(t, dsn)
-	s := workflow.NewSubmitter(pool, 5*time.Second)
+	s := workflow.NewSubmitter(pool, 5*time.Second, defaultFees)
 
 	boom := errors.New("boom")
 	workflow.SetBeforeCommit(s, func() error { return boom })
-	_, err := submit(t, s, "client_a", "key-1", validReq(), defaultFees)
+	_, err := submit(t, s, "client_a", "key-1", validReq())
 	require.ErrorIs(t, err, boom)
 	requireCounts(t, pool, 0)
 
 	workflow.SetBeforeCommit(s, nil)
-	res, err := submit(t, s, "client_a", "key-1", validReq(), defaultFees)
+	res, err := submit(t, s, "client_a", "key-1", validReq())
 	require.NoError(t, err)
 	require.False(t, res.Replayed)
 	requireCounts(t, pool, 1)

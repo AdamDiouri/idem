@@ -28,12 +28,13 @@ var (
 	ErrKeyInUse = errors.New("idempotency key is in use by a concurrent request")
 )
 
-// SubmitRequest is a validated workflow submission.
+// SubmitRequest is a decoded, not yet validated, workflow submission.
+// Validation happens inside Submit, only when the key is new: a replay must
+// return the stored response even if validation rules or fees changed since.
 type SubmitRequest struct {
 	ClientID       string
 	IdempotencyKey string
-	Fingerprint    string
-	Input          PaymentInput
+	Request        CreateWorkflowRequest
 }
 
 // SubmitResult is the response to return to the client. Body is byte-identical
@@ -57,20 +58,26 @@ type Created struct {
 type Submitter struct {
 	pool        *pgxpool.Pool
 	lockTimeout time.Duration
+	fees        FeeConfig
 
 	beforeCommit func() error // test hook; nil in production
 }
 
 // NewSubmitter returns a Submitter. lockTimeout bounds how long a request waits
-// for a concurrent request holding the same idempotency key.
-func NewSubmitter(pool *pgxpool.Pool, lockTimeout time.Duration) *Submitter {
-	return &Submitter{pool: pool, lockTimeout: lockTimeout}
+// for a concurrent request holding the same idempotency key; fees apply to new workflows only.
+func NewSubmitter(pool *pgxpool.Pool, lockTimeout time.Duration, fees FeeConfig) *Submitter {
+	return &Submitter{pool: pool, lockTimeout: lockTimeout, fees: fees}
 }
 
 // Submit creates the workflow, its first step and the stored response in one
 // transaction, or replays the stored response if the key was already used with
 // the same request. Nothing is visible to other transactions until COMMIT.
+//
+// A new request that fails validation returns *ValidationError and rolls back,
+// so the key is not reserved and the client may fix the body and reuse it.
 func (s *Submitter) Submit(ctx context.Context, req SubmitRequest) (SubmitResult, error) {
+	fingerprint := Fingerprint(req.Request)
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("begin: %w", err)
@@ -86,7 +93,7 @@ func (s *Submitter) Submit(ctx context.Context, req SubmitRequest) (SubmitResult
 	inserted, err := q.InsertIdempotencyKey(ctx, db.InsertIdempotencyKeyParams{
 		ClientID:           req.ClientID,
 		Key:                req.IdempotencyKey,
-		RequestFingerprint: req.Fingerprint,
+		RequestFingerprint: fingerprint,
 	})
 	if store.IsLockTimeout(err) {
 		return SubmitResult{}, ErrKeyInUse
@@ -96,10 +103,15 @@ func (s *Submitter) Submit(ctx context.Context, req SubmitRequest) (SubmitResult
 	}
 
 	if inserted == 0 {
-		return s.replay(ctx, q, req)
+		return s.replay(ctx, q, req.ClientID, req.IdempotencyKey, fingerprint)
 	}
 
-	body, err := s.create(ctx, q, req)
+	input, err := NewPaymentInput(req.Request, s.fees)
+	if err != nil {
+		return SubmitResult{}, err // rollback releases the key
+	}
+
+	body, err := s.create(ctx, q, req.ClientID, req.IdempotencyKey, input)
 	if err != nil {
 		return SubmitResult{}, err
 	}
@@ -115,23 +127,23 @@ func (s *Submitter) Submit(ctx context.Context, req SubmitRequest) (SubmitResult
 	return SubmitResult{Body: body, Replayed: false}, nil
 }
 
-func (s *Submitter) replay(ctx context.Context, q *db.Queries, req SubmitRequest) (SubmitResult, error) {
-	row, err := q.GetIdempotencyKey(ctx, db.GetIdempotencyKeyParams{ClientID: req.ClientID, Key: req.IdempotencyKey})
+func (s *Submitter) replay(ctx context.Context, q *db.Queries, clientID, key, fingerprint string) (SubmitResult, error) {
+	row, err := q.GetIdempotencyKey(ctx, db.GetIdempotencyKeyParams{ClientID: clientID, Key: key})
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("load idempotency key: %w", err)
 	}
-	if row.RequestFingerprint != req.Fingerprint {
+	if row.RequestFingerprint != fingerprint {
 		return SubmitResult{}, ErrKeyReuseMismatch
 	}
 	if row.ResponseBody == nil {
 		// The key row and its response are written in the same transaction,
 		// so a committed key without a response means an invariant was broken.
-		return SubmitResult{}, fmt.Errorf("idempotency key %q has no stored response", req.IdempotencyKey)
+		return SubmitResult{}, fmt.Errorf("idempotency key %q has no stored response", key)
 	}
 	return SubmitResult{Body: row.ResponseBody, Replayed: true}, nil
 }
 
-func (s *Submitter) create(ctx context.Context, q *db.Queries, req SubmitRequest) (json.RawMessage, error) {
+func (s *Submitter) create(ctx context.Context, q *db.Queries, clientID, key string, in PaymentInput) (json.RawMessage, error) {
 	workflowID, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("new workflow id: %w", err)
@@ -141,14 +153,14 @@ func (s *Submitter) create(ctx context.Context, q *db.Queries, req SubmitRequest
 		return nil, fmt.Errorf("new step id: %w", err)
 	}
 
-	input, err := json.Marshal(req.Input)
+	input, err := json.Marshal(in)
 	if err != nil {
 		return nil, fmt.Errorf("marshal input: %w", err)
 	}
 
 	createdAt, err := q.InsertWorkflow(ctx, db.InsertWorkflowParams{
 		ID:       workflowID,
-		ClientID: req.ClientID,
+		ClientID: clientID,
 		Type:     typePaymentPayout,
 		Status:   statusPending,
 		Input:    input,
@@ -172,9 +184,9 @@ func (s *Submitter) create(ctx context.Context, q *db.Queries, req SubmitRequest
 	body, err := json.Marshal(Created{
 		WorkflowID:  workflowID,
 		Status:      statusPending,
-		AmountCents: req.Input.AmountCents,
-		FeeCents:    req.Input.FeeCents,
-		Currency:    req.Input.Currency,
+		AmountCents: in.AmountCents,
+		FeeCents:    in.FeeCents,
+		Currency:    in.Currency,
 		CreatedAt:   createdAt.Time.UTC(),
 	})
 	if err != nil {
@@ -184,8 +196,8 @@ func (s *Submitter) create(ctx context.Context, q *db.Queries, req SubmitRequest
 	if err := q.SetIdempotencyKeyResponse(ctx, db.SetIdempotencyKeyResponseParams{
 		WorkflowID:   &workflowID,
 		ResponseBody: body,
-		ClientID:     req.ClientID,
-		Key:          req.IdempotencyKey,
+		ClientID:     clientID,
+		Key:          key,
 	}); err != nil {
 		return nil, fmt.Errorf("store response: %w", err)
 	}

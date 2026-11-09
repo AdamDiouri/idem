@@ -29,10 +29,11 @@ const (
 	validBody = `{"amount_cents":10000,"currency":"EUR","customer_id":"cus_1","merchant_id":"mer_1"}`
 )
 
+var defaultFees = workflow.FeeConfig{RateBps: 150, FixedCents: 25}
+
 func options() api.Options {
 	return api.Options{
 		Tokens: map[string]string{token: "client_a"},
-		Fees:   workflow.FeeConfig{RateBps: 150, FixedCents: 25},
 		Logger: slog.New(slog.DiscardHandler),
 	}
 }
@@ -108,8 +109,6 @@ func TestPostWorkflows_RejectedBeforeSubmit(t *testing.T) {
 		{"trailing data", validBody + `{"x":1}`, nil, 400, "invalid_json", ""},
 		{"fractional amount", `{"amount_cents":10.5,"currency":"EUR","customer_id":"c","merchant_id":"m"}`, nil, 400, "invalid_json", ""},
 		{"amount as string", `{"amount_cents":"100","currency":"EUR","customer_id":"c","merchant_id":"m"}`, nil, 400, "invalid_json", ""},
-		{"invalid currency", `{"amount_cents":10000,"currency":"USD","customer_id":"c","merchant_id":"m"}`, nil, 422, "validation_failed", "currency"},
-		{"amount below fee", `{"amount_cents":25,"currency":"EUR","customer_id":"c","merchant_id":"m"}`, nil, 422, "validation_failed", "amount_cents"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -149,20 +148,30 @@ func TestPostWorkflows_SubmitErrorsMapped(t *testing.T) {
 	}
 }
 
-func TestPostWorkflows_PassesValidatedRequestToSubmitter(t *testing.T) {
+func TestPostWorkflows_PassesDecodedRequestToSubmitter(t *testing.T) {
 	sub := &fakeSubmitter{res: workflow.SubmitResult{Body: json.RawMessage(`{"workflow_id":"x"}`)}}
 	h := api.NewServer(options(), sub, fakePinger{})
 	rec := post(t, h, validBody, nil)
 
 	require.Equal(t, http.StatusCreated, rec.Code)
 	require.Len(t, sub.calls, 1)
-	got := sub.calls[0]
-	require.Equal(t, "client_a", got.ClientID)
-	require.Equal(t, "key-1", got.IdempotencyKey)
-	require.Equal(t, workflow.Fingerprint(workflow.CreateWorkflowRequest{
-		AmountCents: 10000, Currency: "EUR", CustomerID: "cus_1", MerchantID: "mer_1",
-	}), got.Fingerprint)
-	require.Equal(t, int64(175), got.Input.FeeCents)
+	require.Equal(t, workflow.SubmitRequest{
+		ClientID:       "client_a",
+		IdempotencyKey: "key-1",
+		Request:        workflow.CreateWorkflowRequest{AmountCents: 10000, Currency: "EUR", CustomerID: "cus_1", MerchantID: "mer_1"},
+	}, sub.calls[0])
+}
+
+func TestPostWorkflows_ValidationErrorFromSubmitter(t *testing.T) {
+	sub := &fakeSubmitter{err: &workflow.ValidationError{Field: "amount_cents", Message: "amount does not cover fee"}}
+	h := api.NewServer(options(), sub, fakePinger{})
+	rec := post(t, h, validBody, nil)
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	e := decodeError(t, rec)
+	require.Equal(t, "validation_failed", e.Error.Code)
+	require.Equal(t, "amount_cents", e.Error.Field)
+	require.Equal(t, "amount does not cover fee", e.Error.Message)
 }
 
 func TestPostWorkflows_CreatedAndReplayed(t *testing.T) {
