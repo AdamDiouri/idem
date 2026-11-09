@@ -101,11 +101,21 @@ ORDER BY generation DESC
 LIMIT 1;
 
 -- name: FindStuckWorkflows :many
-SELECT id, status, (EXTRACT(EPOCH FROM (now() - updated_at)) * 1000)::bigint AS age_ms
-FROM workflows
-WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING')
-  AND updated_at < now() - (sqlc.arg(older_than_ms)::bigint * interval '1 millisecond')
-ORDER BY updated_at;
+-- Unsettled workflows without progress (a status change or a step attempt) for
+-- older_than_ms, longest idle first. Same definition as UnsettledIdleMs.
+SELECT id, status, idle_ms FROM (
+  SELECT w.id, w.status,
+         (EXTRACT(EPOCH FROM (now() - GREATEST(w.updated_at, a.last_attempt))) * 1000)::bigint AS idle_ms
+  FROM workflows w
+  LEFT JOIN LATERAL (
+    SELECT max(sa.started_at) AS last_attempt
+    FROM steps s JOIN step_attempts sa ON sa.step_id = s.id
+    WHERE s.workflow_id = w.id
+  ) a ON true
+  WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+) idle
+WHERE idle_ms > sqlc.arg(older_than_ms)::bigint
+ORDER BY idle_ms DESC;
 
 -- name: WorkflowStatusCounts :many
 SELECT status, count(*)::int AS n FROM workflows GROUP BY status;
@@ -113,9 +123,18 @@ SELECT status, count(*)::int AS n FROM workflows GROUP BY status;
 -- name: StepStatusCounts :many
 SELECT name, status, count(*)::int AS n FROM steps GROUP BY name, status;
 
--- name: OldestUnsettledAgeMs :one
-SELECT COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000, 0)::bigint AS age_ms
-FROM workflows WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING');
+-- name: UnsettledIdleMs :one
+-- The longest any unsettled workflow has gone without progress: a status
+-- change or a step attempt (0 if none). Age since creation would page as soon
+-- as an operator retried an old parked workflow.
+SELECT COALESCE(max(EXTRACT(EPOCH FROM (now() - GREATEST(w.updated_at, a.last_attempt))) * 1000), 0)::bigint AS idle_ms
+FROM workflows w
+LEFT JOIN LATERAL (
+  SELECT max(sa.started_at) AS last_attempt
+  FROM steps s JOIN step_attempts sa ON sa.step_id = s.id
+  WHERE s.workflow_id = w.id
+) a ON true
+WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING');
 
 -- name: StepsOverAttemptLimit :one
 -- Unfinished steps claimed more than once past their limit. (A crash or lost

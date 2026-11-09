@@ -25,12 +25,12 @@ groups:
           runbook: docs/runbooks/needs-attention.md#idemmoneymayhavemoved
 
       - alert: IdemWorkflowsStuck
-        expr: max(idem_oldest_unsettled_workflow_age_seconds{job="idem-sweeper"}) > 900
+        expr: max(idem_unsettled_workflow_max_idle_seconds{job="idem-sweeper"}) > 900
         for: 5m
         labels:
           severity: page
         annotations:
-          summary: "The oldest unsettled workflow is {{ $value | humanizeDuration }} old"
+          summary: "An unsettled workflow has made no progress for {{ $value | humanizeDuration }}"
           runbook: docs/runbooks/needs-attention.md#idemworkflowsstuck
 
       - alert: IdemStepsOverAttemptLimit

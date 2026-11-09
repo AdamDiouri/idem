@@ -18,11 +18,11 @@ func TestMetrics_HandlerExposesRegistered(t *testing.T) {
 	m.ObserveLookup("payout", true)
 	m.AddReclaimed(2)
 	m.SetSnapshot(metrics.Snapshot{
-		Workflows:          map[string]int{"RUNNING": 3},
-		Steps:              map[[2]string]int{{"charge", "PENDING"}: 1},
-		OldestUnsettledAge: time.Minute,
-		StepsOverLimit:     0,
-		Parked:             map[string]int{"permanent_after_in_doubt": 1},
+		Workflows:      map[string]int{"RUNNING": 3},
+		Steps:          map[[2]string]int{{"charge", "PENDING"}: 1},
+		UnsettledIdle:  time.Minute,
+		StepsOverLimit: 0,
+		Parked:         map[string]int{"permanent_after_in_doubt": 1},
 	})
 	m.ObserveSubmission("created")
 
@@ -31,7 +31,7 @@ func TestMetrics_HandlerExposesRegistered(t *testing.T) {
 	body, _ := io.ReadAll(rec.Body)
 	for _, name := range []string{
 		"idem_step_attempts_total", "idem_provider_request_duration_seconds", "idem_key_retention_lookups_total",
-		"idem_leases_reclaimed_total", "idem_workflows", "idem_steps", "idem_oldest_unsettled_workflow_age_seconds",
+		"idem_leases_reclaimed_total", "idem_workflows", "idem_steps", "idem_unsettled_workflow_max_idle_seconds",
 		"idem_steps_over_attempt_limit", "idem_parked_workflows", "idem_workflow_submissions_total", "go_goroutines",
 	} {
 		require.Contains(t, string(body), name)

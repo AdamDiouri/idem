@@ -252,8 +252,8 @@ func RunSweeper(ctx context.Context, pool *pgxpool.Pool, opts SweeperOptions) er
 		case err != nil && ctx.Err() == nil:
 			logger.Error("find stuck workflows", "error", err)
 		case len(stuck) > 0:
-			logger.Warn("stuck workflows", "count", len(stuck), "oldest", stuck[0].Age.Round(time.Second).String(),
-				"oldest_workflow_id", stuck[0].ID.String())
+			logger.Warn("stuck workflows", "count", len(stuck), "longest_idle", stuck[0].Idle.Round(time.Second).String(),
+				"longest_idle_workflow_id", stuck[0].ID.String())
 		}
 
 		if opts.Metrics != nil {
@@ -293,11 +293,11 @@ func snapshot(ctx context.Context, pool *pgxpool.Pool) (metrics.Snapshot, error)
 	for _, r := range steps {
 		s.Steps[[2]string{r.Name, r.Status}] = int(r.N)
 	}
-	age, err := q.OldestUnsettledAgeMs(ctx)
+	idle, err := q.UnsettledIdleMs(ctx)
 	if err != nil {
 		return s, err
 	}
-	s.OldestUnsettledAge = time.Duration(age) * time.Millisecond
+	s.UnsettledIdle = time.Duration(idle) * time.Millisecond
 	over, err := q.StepsOverAttemptLimit(ctx)
 	if err != nil {
 		return s, err

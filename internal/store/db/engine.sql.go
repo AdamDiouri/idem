@@ -149,19 +149,29 @@ func (q *Queries) CompleteStep(ctx context.Context, arg CompleteStepParams) (int
 }
 
 const findStuckWorkflows = `-- name: FindStuckWorkflows :many
-SELECT id, status, (EXTRACT(EPOCH FROM (now() - updated_at)) * 1000)::bigint AS age_ms
-FROM workflows
-WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING')
-  AND updated_at < now() - ($1::bigint * interval '1 millisecond')
-ORDER BY updated_at
+SELECT id, status, idle_ms FROM (
+  SELECT w.id, w.status,
+         (EXTRACT(EPOCH FROM (now() - GREATEST(w.updated_at, a.last_attempt))) * 1000)::bigint AS idle_ms
+  FROM workflows w
+  LEFT JOIN LATERAL (
+    SELECT max(sa.started_at) AS last_attempt
+    FROM steps s JOIN step_attempts sa ON sa.step_id = s.id
+    WHERE s.workflow_id = w.id
+  ) a ON true
+  WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+) idle
+WHERE idle_ms > $1::bigint
+ORDER BY idle_ms DESC
 `
 
 type FindStuckWorkflowsRow struct {
 	ID     uuid.UUID
 	Status string
-	AgeMs  int64
+	IdleMs int64
 }
 
+// Unsettled workflows without progress (a status change or a step attempt) for
+// older_than_ms, longest idle first. Same definition as UnsettledIdleMs.
 func (q *Queries) FindStuckWorkflows(ctx context.Context, olderThanMs int64) ([]FindStuckWorkflowsRow, error) {
 	rows, err := q.db.Query(ctx, findStuckWorkflows, olderThanMs)
 	if err != nil {
@@ -171,7 +181,7 @@ func (q *Queries) FindStuckWorkflows(ctx context.Context, olderThanMs int64) ([]
 	var items []FindStuckWorkflowsRow
 	for rows.Next() {
 		var i FindStuckWorkflowsRow
-		if err := rows.Scan(&i.ID, &i.Status, &i.AgeMs); err != nil {
+		if err := rows.Scan(&i.ID, &i.Status, &i.IdleMs); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -241,18 +251,6 @@ WHERE id = $1 AND status = 'PENDING'
 func (q *Queries) MarkWorkflowRunning(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, markWorkflowRunning, id)
 	return err
-}
-
-const oldestUnsettledAgeMs = `-- name: OldestUnsettledAgeMs :one
-SELECT COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000, 0)::bigint AS age_ms
-FROM workflows WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING')
-`
-
-func (q *Queries) OldestUnsettledAgeMs(ctx context.Context) (int64, error) {
-	row := q.db.QueryRow(ctx, oldestUnsettledAgeMs)
-	var age_ms int64
-	err := row.Scan(&age_ms)
-	return age_ms, err
 }
 
 const reclaimExpiredLeases = `-- name: ReclaimExpiredLeases :one
@@ -349,6 +347,27 @@ func (q *Queries) TransitionWorkflow(ctx context.Context, arg TransitionWorkflow
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const unsettledIdleMs = `-- name: UnsettledIdleMs :one
+SELECT COALESCE(max(EXTRACT(EPOCH FROM (now() - GREATEST(w.updated_at, a.last_attempt))) * 1000), 0)::bigint AS idle_ms
+FROM workflows w
+LEFT JOIN LATERAL (
+  SELECT max(sa.started_at) AS last_attempt
+  FROM steps s JOIN step_attempts sa ON sa.step_id = s.id
+  WHERE s.workflow_id = w.id
+) a ON true
+WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+`
+
+// The longest any unsettled workflow has gone without progress: a status
+// change or a step attempt (0 if none). Age since creation would page as soon
+// as an operator retried an old parked workflow.
+func (q *Queries) UnsettledIdleMs(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, unsettledIdleMs)
+	var idle_ms int64
+	err := row.Scan(&idle_ms)
+	return idle_ms, err
 }
 
 const workflowStatusCounts = `-- name: WorkflowStatusCounts :many

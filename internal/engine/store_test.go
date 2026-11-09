@@ -498,7 +498,7 @@ func TestFindStuckWorkflows(t *testing.T) {
 	require.Len(t, got, 1)
 	require.Equal(t, stuck, got[0].ID)
 	require.Equal(t, "RUNNING", got[0].Status)
-	require.GreaterOrEqual(t, got[0].Age, 2*time.Hour-time.Minute)
+	require.GreaterOrEqual(t, got[0].Idle, 2*time.Hour-time.Minute)
 }
 
 func insertRefundStep(t *testing.T, pool *pgxpool.Pool, wf uuid.UUID, ref *string) error {

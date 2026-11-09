@@ -24,7 +24,7 @@ type Metrics struct {
 	LeasesReclaimed  prometheus.Counter
 	Workflows        *prometheus.GaugeVec // status
 	Steps            *prometheus.GaugeVec // step, status
-	OldestUnsettled  prometheus.Gauge
+	UnsettledIdle    prometheus.Gauge
 	StepsOverLimit   prometheus.Gauge
 	Parked           *prometheus.GaugeVec   // reason
 	LastSnapshot     prometheus.Gauge       // unix time of the last successful sweeper snapshot
@@ -60,9 +60,9 @@ func New() *Metrics {
 		Steps: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "idem_steps", Help: "Steps by name and status.",
 		}, []string{"step", "status"}),
-		OldestUnsettled: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "idem_oldest_unsettled_workflow_age_seconds",
-			Help: "Age of the oldest workflow still PENDING, RUNNING or COMPENSATING (0 if none).",
+		UnsettledIdle: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "idem_unsettled_workflow_max_idle_seconds",
+			Help: "Longest time any PENDING, RUNNING or COMPENSATING workflow has gone without progress (a status change or a step attempt); 0 if none.",
 		}),
 		StepsOverLimit: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "idem_steps_over_attempt_limit",
@@ -83,7 +83,7 @@ func New() *Metrics {
 	}
 	for _, c := range []prometheus.Collector{
 		m.StepAttempts, m.ProviderDuration, m.KeyLookups, m.LeasesReclaimed, m.Workflows, m.Steps,
-		m.OldestUnsettled, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions,
+		m.UnsettledIdle, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	} {
 		f(c)
@@ -137,11 +137,11 @@ func (m *Metrics) AddReclaimed(n int64) {
 
 // Snapshot is the database state the sweeper exports as gauges.
 type Snapshot struct {
-	Workflows          map[string]int    // status → count
-	Steps              map[[2]string]int // {step, status} → count
-	OldestUnsettledAge time.Duration
-	StepsOverLimit     int
-	Parked             map[string]int // reason → count
+	Workflows      map[string]int    // status → count
+	Steps          map[[2]string]int // {step, status} → count
+	UnsettledIdle  time.Duration
+	StepsOverLimit int
+	Parked         map[string]int // reason → count
 }
 
 // SetSnapshot replaces every state gauge, so label values that disappeared
@@ -158,7 +158,7 @@ func (m *Metrics) SetSnapshot(s Snapshot) {
 	for k, n := range s.Steps {
 		m.Steps.WithLabelValues(k[0], k[1]).Set(float64(n))
 	}
-	m.OldestUnsettled.Set(s.OldestUnsettledAge.Seconds())
+	m.UnsettledIdle.Set(s.UnsettledIdle.Seconds())
 	m.StepsOverLimit.Set(float64(s.StepsOverLimit))
 	m.Parked.Reset()
 	for reason, n := range s.Parked {

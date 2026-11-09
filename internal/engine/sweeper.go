@@ -28,11 +28,12 @@ func ReclaimExpiredLeases(ctx context.Context, pool *pgxpool.Pool) (int64, error
 type StuckWorkflow struct {
 	ID     uuid.UUID
 	Status string
-	Age    time.Duration
+	Idle   time.Duration // since the last status change or step attempt
 }
 
-// FindStuckWorkflows returns PENDING, RUNNING or COMPENSATING workflows not
-// updated for olderThan (design §11.1). It changes nothing: stuck work must be
+// FindStuckWorkflows returns PENDING, RUNNING or COMPENSATING workflows that
+// made no progress (no status change, no step attempt) for olderThan, longest
+// idle first (design §11.1). It changes nothing: stuck work must be
 // made loud, not silently "fixed".
 func FindStuckWorkflows(ctx context.Context, pool *pgxpool.Pool, olderThan time.Duration) ([]StuckWorkflow, error) {
 	rows, err := db.New(pool).FindStuckWorkflows(ctx, olderThan.Milliseconds())
@@ -41,7 +42,7 @@ func FindStuckWorkflows(ctx context.Context, pool *pgxpool.Pool, olderThan time.
 	}
 	out := make([]StuckWorkflow, len(rows))
 	for i, r := range rows {
-		out[i] = StuckWorkflow{ID: r.ID, Status: r.Status, Age: time.Duration(r.AgeMs) * time.Millisecond}
+		out[i] = StuckWorkflow{ID: r.ID, Status: r.Status, Idle: time.Duration(r.IdleMs) * time.Millisecond}
 	}
 	return out, nil
 }

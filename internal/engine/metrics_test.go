@@ -13,6 +13,7 @@ import (
 
 	"github.com/AdamDiouri/idem/internal/engine"
 	"github.com/AdamDiouri/idem/internal/failpoint"
+	"github.com/AdamDiouri/idem/internal/fakeprovider"
 	"github.com/AdamDiouri/idem/internal/metrics"
 )
 
@@ -59,7 +60,7 @@ func TestSweeper_ExportsGauges(t *testing.T) {
 	parkPayoutAfterDoubt(t, h)
 	old := submitTo(t, h, "cus_2", "mer_2")
 	_, err := h.pool.Exec(context.Background(),
-		`UPDATE workflows SET status = 'RUNNING', created_at = now() - interval '1 hour' WHERE id = $1`, old)
+		`UPDATE workflows SET status = 'RUNNING', updated_at = now() - interval '1 hour' WHERE id = $1`, old)
 	require.NoError(t, err)
 
 	_, _ = runInBackground(t, func(ctx context.Context) error {
@@ -70,9 +71,53 @@ func TestSweeper_ExportsGauges(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return testutil.ToFloat64(m.Parked.WithLabelValues(engine.DeadPermanentAfterInDoubt)) == 1
 	}, 2*time.Second, 10*time.Millisecond)
-	require.GreaterOrEqual(t, testutil.ToFloat64(m.OldestUnsettled), 3500.0)
+	require.GreaterOrEqual(t, testutil.ToFloat64(m.UnsettledIdle), 3500.0)
 	require.Equal(t, 1.0, testutil.ToFloat64(m.Workflows.WithLabelValues("NEEDS_ATTENTION")))
 	require.Equal(t, 0.0, testutil.ToFloat64(m.StepsOverLimit))
+}
+
+// sweepOnce runs a sweeper until it has exported one snapshot.
+func sweepOnce(t *testing.T, h harness) *metrics.Metrics {
+	t.Helper()
+	m := metrics.New()
+	cancel, done := runInBackground(t, func(ctx context.Context) error {
+		return engine.RunSweeper(ctx, h.pool, engine.SweeperOptions{
+			Interval: 10 * time.Millisecond, StuckAfter: time.Hour, Logger: slog.New(slog.DiscardHandler), Metrics: m,
+		})
+	})
+	require.Eventually(t, func() bool { return testutil.ToFloat64(m.LastSnapshot) > 0 }, 2*time.Second, 10*time.Millisecond)
+	cancel()
+	<-done
+	return m
+}
+
+// Deferred minor 2: an operator retried a workflow parked hours ago. It is
+// progressing again, so it must not count as stuck (the gauge used to measure
+// age since creation, so IdemWorkflowsStuck paged at once).
+func TestSweeper_RetriedOldWorkflowIsNotIdle(t *testing.T) {
+	h := newHarness(t)
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	_, err := h.pool.Exec(context.Background(),
+		`UPDATE workflows SET status = 'RUNNING', created_at = now() - interval '3 hours' WHERE id = $1`, wf)
+	require.NoError(t, err)
+
+	require.Less(t, testutil.ToFloat64(sweepOnce(t, h).UnsettledIdle), 60.0)
+}
+
+// A step attempt is progress even when the workflow's status doesn't change
+// (a retrying charge): only a workflow nobody works on is idle.
+func TestSweeper_StepAttemptCountsAsProgress(t *testing.T) {
+	h := newHarness(t)
+	h.setFaults(charges(fakeprovider.ModeRateLimit, 1))
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	_, err := h.pool.Exec(context.Background(),
+		`UPDATE workflows SET status = 'RUNNING', updated_at = now() - interval '1 hour' WHERE id = $1`, wf)
+	require.NoError(t, err)
+	require.Greater(t, testutil.ToFloat64(sweepOnce(t, h).UnsettledIdle), 3500.0, "nobody worked on it for an hour")
+
+	require.True(t, h.runOnce(t, h.worker("w1")).Claimed)
+	require.Equal(t, "RUNNING", h.workflowStatus(t, wf), "the attempt did not change the workflow")
+	require.Less(t, testutil.ToFloat64(sweepOnce(t, h).UnsettledIdle), 60.0)
 }
 
 // Review focus: labels must stay bounded — no IDs, keys or error text.
