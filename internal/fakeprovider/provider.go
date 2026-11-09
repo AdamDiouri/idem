@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand/v2"
@@ -90,7 +91,11 @@ func (p *Provider) Handler() http.Handler {
 }
 
 // SetFaults replaces the fault configuration and resets rule counters.
+// It panics on an invalid configuration (a bug in the calling test).
 func (p *Provider) SetFaults(f Faults) {
+	if err := f.Validate(); err != nil {
+		panic(fmt.Sprintf("fakeprovider: invalid faults: %v", err))
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.setFaultsLocked(f)
@@ -260,6 +265,12 @@ func (p *Provider) putFaults(w http.ResponseWriter, r *http.Request) {
 	var f Faults
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes)).Decode(&f); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_faults")
+		return
+	}
+	if err := f.Validate(); err != nil {
+		writeRaw(w, http.StatusBadRequest, mustJSON(map[string]any{
+			"error": map[string]string{"code": "invalid_faults", "message": err.Error()},
+		}))
 		return
 	}
 	p.SetFaults(f)

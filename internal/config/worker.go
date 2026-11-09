@@ -8,6 +8,7 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
+	"github.com/AdamDiouri/idem/internal/engine"
 	"github.com/AdamDiouri/idem/internal/failpoint"
 )
 
@@ -63,7 +64,7 @@ func (c WorkerConfig) validate() error {
 	if c.RetryDelay < 0 {
 		return fmt.Errorf("IDEM_RETRY_DELAY must not be negative")
 	}
-	if err := failpoint.ValidateSpec(c.Failpoints); err != nil {
+	if err := failpoint.ValidateSpec(c.Failpoints, engine.FailpointNames...); err != nil {
 		return fmt.Errorf("IDEM_FAILPOINTS: %w", err)
 	}
 	if _, err := c.SlogLevel(); err != nil {

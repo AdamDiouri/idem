@@ -1,5 +1,7 @@
 package fakeprovider
 
+import "fmt"
+
 // Fault modes. "before" modes never move money; "after" modes move money and
 // store the success response, then fail the current request anyway — the
 // ambiguity that makes idempotency keys necessary.
@@ -24,6 +26,32 @@ type Rule struct {
 	Mode        string  `json:"mode"`
 	Probability float64 `json:"probability"`
 	Times       int     `json:"times"`
+}
+
+var validModes = map[string]bool{
+	ModeTimeoutBeforeEffect: true,
+	ModeTimeoutAfterEffect:  true,
+	ModeErrorBeforeEffect:   true,
+	ModeErrorAfterEffect:    true,
+	ModeDecline:             true,
+}
+
+// Validate rejects rules that would otherwise be silently ignored, so a typo
+// can never make a fault-injection run pass without injecting anything.
+func (f Faults) Validate() error {
+	for i, r := range f.Rules {
+		switch {
+		case r.Endpoint != "charges":
+			return fmt.Errorf("rule %d: unknown endpoint %q (want \"charges\")", i, r.Endpoint)
+		case !validModes[r.Mode]:
+			return fmt.Errorf("rule %d: unknown mode %q", i, r.Mode)
+		case r.Probability < 0 || r.Probability > 1:
+			return fmt.Errorf("rule %d: probability %v outside [0,1]", i, r.Probability)
+		case r.Times < 0:
+			return fmt.Errorf("rule %d: times must not be negative", i)
+		}
+	}
+	return nil
 }
 
 // pickFault returns the mode to apply to one request, or "" for none.

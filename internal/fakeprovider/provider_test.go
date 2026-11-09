@@ -248,6 +248,29 @@ func TestLookupByKey(t *testing.T) {
 	require.Equal(t, created.body, found.body)
 }
 
+// Review finding: a typo in a fault rule must fail loudly, never turn into a
+// silent no-op that lets a fault-injection run "pass" without injecting anything.
+func TestControlAPI_RejectsInvalidFaults(t *testing.T) {
+	p, srv := newServer(t)
+	ctx := context.Background()
+	for _, r := range []fakeprovider.Rule{
+		{Endpoint: "charges", Mode: "timeout_after_efect"},
+		{Endpoint: "charges", Mode: "rate_limit"},
+		{Endpoint: "payouts", Mode: fakeprovider.ModeErrorBeforeEffect},
+		{Endpoint: "charges", Mode: fakeprovider.ModeErrorBeforeEffect, Probability: 1.5},
+		{Endpoint: "charges", Mode: fakeprovider.ModeErrorBeforeEffect, Probability: -0.1},
+		{Endpoint: "charges", Mode: fakeprovider.ModeErrorBeforeEffect, Times: -1},
+	} {
+		err := fakeprovider.PutFaults(ctx, srv.URL, faults(r))
+		require.Error(t, err, "%+v", r)
+		require.Contains(t, err.Error(), "400")
+	}
+	// Nothing was installed: charges behave normally.
+	require.Equal(t, http.StatusCreated, mustCharge(t, srv.URL, "k1", body("cus_1", 10000)).status)
+
+	require.Panics(t, func() { p.SetFaults(faults(fakeprovider.Rule{Endpoint: "charges", Mode: "nope"})) })
+}
+
 func TestControlAPI(t *testing.T) {
 	p, srv := newServer(t)
 	ctx := context.Background()

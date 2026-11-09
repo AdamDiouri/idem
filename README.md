@@ -75,8 +75,6 @@ make generate        # regenerate sqlc code after editing internal/store/queries
 make build-release   # binary with failpoints compiled out
 ```
 
-If you created the compose volume before slice 1.2, reset it with `docker compose down -v`.
-
 ## Configuration
 
 | Variable | Default | Notes |

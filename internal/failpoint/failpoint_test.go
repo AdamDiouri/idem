@@ -106,6 +106,17 @@ func TestEnableFromEnv(t *testing.T) {
 	require.Equal(t, 137, code)
 }
 
+// Review finding: a misspelt failpoint name must be rejected, not silently never fire.
+func TestValidateSpec_KnownNames(t *testing.T) {
+	known := []string{"after_provider_call", "before_commit"}
+	require.NoError(t, ValidateSpec("after_provider_call=exit,before_commit=panic@0.5", known...))
+	err := ValidateSpec("after_provider_cal=exit", known...)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "after_provider_cal")
+	require.NoError(t, ValidateSpec("anything=exit"), "no known names: names are not checked")
+	require.Error(t, ValidateSpec("a=fly"))
+}
+
 func TestEnableFromEnv_Errors(t *testing.T) {
 	t.Cleanup(Reset)
 	for _, spec := range []string{"noequals", "a=fly", "a=sleep:abc", "a=panic@1.5", "a=panic@x", "=panic"} {

@@ -50,6 +50,7 @@ func TestLoadWorker_Invalid(t *testing.T) {
 		{"zero sweep interval", "IDEM_SWEEP_INTERVAL", "0s", "IDEM_SWEEP_INTERVAL"},
 		{"negative retry delay", "IDEM_RETRY_DELAY", "-1s", "IDEM_RETRY_DELAY"},
 		{"bad failpoints", "IDEM_FAILPOINTS", "x=fly", "IDEM_FAILPOINTS"},
+		{"unknown failpoint name", "IDEM_FAILPOINTS", "after_provider_cal=exit", "IDEM_FAILPOINTS"},
 		{"unknown log level", "IDEM_LOG_LEVEL", "loud", "IDEM_LOG_LEVEL"},
 	}
 	for _, c := range cases {

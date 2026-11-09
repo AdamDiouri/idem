@@ -3,6 +3,7 @@ package failpoint
 import (
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -35,15 +36,22 @@ func EnableFromEnv(spec string) error {
 	return nil
 }
 
-// ValidateSpec reports whether spec is valid for EnableFromEnv, without enabling anything.
-func ValidateSpec(spec string) error {
+// ValidateSpec reports whether spec is valid for EnableFromEnv, without
+// enabling anything. When known names are given, any other name is rejected,
+// so a misspelt failpoint cannot silently never fire.
+func ValidateSpec(spec string, known ...string) error {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
 		return nil
 	}
 	for entry := range strings.SplitSeq(spec, ",") {
-		if _, _, err := parseEntry(strings.TrimSpace(entry)); err != nil {
+		name, _, err := parseEntry(strings.TrimSpace(entry))
+		if err != nil {
 			return fmt.Errorf("failpoint spec entry %q: %w", entry, err)
+		}
+		if len(known) > 0 && !slices.Contains(known, name) {
+			return fmt.Errorf("failpoint spec entry %q: unknown failpoint %q (known: %s)",
+				entry, name, strings.Join(known, ", "))
 		}
 	}
 	return nil
