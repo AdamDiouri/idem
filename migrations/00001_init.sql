@@ -40,7 +40,8 @@ CREATE TABLE api_idempotency_keys (
   key                 text        NOT NULL,
   request_fingerprint text        NOT NULL,
   workflow_id         uuid        REFERENCES workflows(id),
-  response_body       jsonb,
+  -- bytea, not jsonb: replays must be byte-identical and jsonb normalises key order and whitespace.
+  response_body       bytea,
   created_at          timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (client_id, key)
 );
