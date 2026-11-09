@@ -39,11 +39,11 @@ func Complete(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, r Result, 
 
 	switch r.Kind {
 	case ResultSucceeded:
-		if err := step.OnSuccess(ctx, q, s, r.ProviderRef); err != nil {
+		if err := runHook(func() error { return step.OnSuccess(ctx, q, s, r.ProviderRef) }); err != nil {
 			return fmt.Errorf("%s on success: %w", s.Name, err)
 		}
 	case ResultFailedPermanent:
-		if err := step.OnPermanentFailure(ctx, q, s); err != nil {
+		if err := runHook(func() error { return step.OnPermanentFailure(ctx, q, s) }); err != nil {
 			return fmt.Errorf("%s on permanent failure: %w", s.Name, err)
 		}
 	case ResultInDoubt:
@@ -73,6 +73,21 @@ func Complete(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, r Result, 
 	}
 	failpoint.Hit(FPAfterCommit)
 	return nil
+}
+
+// runHook turns a panic in step hook code into an error, so the completion
+// transaction rolls back and the step takes the lease-expiry path instead of
+// killing the worker (design §6, F25). Simulated crashes are re-panicked.
+func runHook(f func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if failpoint.IsCrash(r) {
+				panic(r)
+			}
+			err = fmt.Errorf("hook panic: %v", r)
+		}
+	}()
+	return f()
 }
 
 func optional(s string) *string {

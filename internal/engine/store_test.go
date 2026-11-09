@@ -34,6 +34,7 @@ type stubStep struct {
 	failureCalls  int
 	successErr    error
 	successErrFor int // return successErr for the first N OnSuccess calls
+	panicFor      int // panic in the first N OnSuccess calls
 	execute       func(context.Context, engine.ClaimedStep) provider.Outcome
 }
 
@@ -50,6 +51,9 @@ func (s *stubStep) OnSuccess(context.Context, *db.Queries, engine.ClaimedStep, s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.successCalls++
+	if s.successCalls <= s.panicFor {
+		panic("bug in hook")
+	}
 	if s.successErr != nil && s.successCalls <= s.successErrFor {
 		return s.successErr
 	}

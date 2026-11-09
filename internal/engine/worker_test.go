@@ -331,6 +331,26 @@ func TestWorker_RunSurvivesStepErrors(t *testing.T) {
 	require.Equal(t, 2, step.successes())
 }
 
+// Review finding: a panic in a completion hook must not kill the worker
+// (spec §6, F25). It rolls back like a hook error and takes the lease path.
+func TestWorker_HookPanicIsRecovered(t *testing.T) {
+	h := newHarness(t)
+	wf := submit(t, h.pool, "cus_1")
+	step := &stubStep{panicFor: 1}
+
+	var res engine.RunResult
+	var err error
+	require.NotPanics(t, func() { res, err = h.worker("w1", step).RunOnce(context.Background()) })
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "panic")
+	require.True(t, res.Claimed)
+	require.Equal(t, "RUNNING", h.chargeStatus(t, wf), "rolled back; recovered via lease expiry")
+
+	time.Sleep(pastLease)
+	require.Equal(t, int64(1), h.reclaim(t))
+	require.Equal(t, "succeeded", h.runOnce(t, h.worker("w2", step)).Outcome)
+}
+
 func TestWorker_RunFinishesInFlightStepOnCancel(t *testing.T) {
 	h := newHarness(t)
 	wf := submit(t, h.pool, "cus_1")
