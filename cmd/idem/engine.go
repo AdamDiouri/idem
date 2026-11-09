@@ -75,7 +75,7 @@ func workerCmd() *cobra.Command {
 				Steps:        []engine.Step{engine.NewChargeStep(client)},
 				LeaseTTL:     e.cfg.LeaseTTL,
 				PollInterval: e.cfg.PollInterval,
-				RetryDelay:   e.cfg.RetryDelay,
+				Backoff:      engine.Backoff{Base: e.cfg.RetryDelay, Cap: e.cfg.RetryDelay}, // replaced in task 6
 				Logger:       e.logger,
 			}).Run(e.ctx)
 		},

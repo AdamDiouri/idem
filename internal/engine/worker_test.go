@@ -42,17 +42,41 @@ func newHarness(t *testing.T) harness {
 }
 
 func (h harness) worker(id string, steps ...engine.Step) *engine.Worker {
+	return h.workerWith(id, nil, steps...)
+}
+
+// workerWith builds a worker whose retries are immediate unless tweak changes them.
+func (h harness) workerWith(id string, tweak func(*engine.WorkerOptions), steps ...engine.Step) *engine.Worker {
 	if len(steps) == 0 {
 		steps = []engine.Step{engine.NewChargeStep(h.client)}
 	}
-	return engine.NewWorker(h.pool, engine.WorkerOptions{
-		ID:           id,
-		Steps:        steps,
-		LeaseTTL:     leaseTTL,
-		PollInterval: 10 * time.Millisecond,
-		RetryDelay:   0,
-		Logger:       slog.New(slog.DiscardHandler),
-	})
+	opts := engine.WorkerOptions{
+		ID:            id,
+		Steps:         steps,
+		LeaseTTL:      leaseTTL,
+		PollInterval:  10 * time.Millisecond,
+		Backoff:       engine.Backoff{}, // zero base: retry immediately
+		ShutdownGrace: 5 * time.Second,
+		Logger:        slog.New(slog.DiscardHandler),
+	}
+	if tweak != nil {
+		tweak(&opts)
+	}
+	return engine.NewWorker(h.pool, opts)
+}
+
+func (h harness) setFaults(rules ...fakeprovider.Rule) {
+	h.fake.SetFaults(fakeprovider.Faults{Rules: rules})
+}
+
+func (h harness) setMaxAttempts(t *testing.T, wf uuid.UUID, n int) {
+	t.Helper()
+	_, err := h.pool.Exec(context.Background(), `UPDATE steps SET max_attempts = $2 WHERE workflow_id = $1 AND name = 'charge'`, wf, n)
+	require.NoError(t, err)
+}
+
+func charges(mode string, times int) fakeprovider.Rule {
+	return fakeprovider.Rule{Endpoint: "charges", Mode: mode, Times: times}
 }
 
 func (h harness) runOnce(t *testing.T, w *engine.Worker) engine.RunResult {
@@ -236,7 +260,11 @@ func TestWorker_CrashRecovery_F4_F5_F6(t *testing.T) {
 // reclaims, and has worker B finish the step. It returns A's eventual result.
 func pausedWorker(t *testing.T, h harness, fp string) (engine.RunResult, uuid.UUID) {
 	t.Helper()
-	wf := submit(t, h.pool, "cus_1")
+	return pausedWorkerOutcome(t, h, submit(t, h.pool, "cus_1"), fp, "succeeded")
+}
+
+func pausedWorkerOutcome(t *testing.T, h harness, wf uuid.UUID, fp, wantB string) (engine.RunResult, uuid.UUID) {
+	t.Helper()
 	action, entered, release := failpoint.BlockOnce()
 	failpoint.Enable(fp, action)
 	defer release()
@@ -253,7 +281,7 @@ func pausedWorker(t *testing.T, h harness, fp string) (engine.RunResult, uuid.UU
 	<-entered
 	time.Sleep(pastLease)
 	require.Equal(t, int64(1), h.reclaim(t))
-	require.Equal(t, "succeeded", h.runOnce(t, h.worker("wB")).Outcome)
+	require.Equal(t, wantB, h.runOnce(t, h.worker("wB")).Outcome)
 
 	release()
 	wg.Wait()
@@ -349,6 +377,115 @@ func TestWorker_HookPanicIsRecovered(t *testing.T) {
 	time.Sleep(pastLease)
 	require.Equal(t, int64(1), h.reclaim(t))
 	require.Equal(t, "succeeded", h.runOnce(t, h.worker("w2", step)).Outcome)
+}
+
+func TestWorker_RateLimitRetriesWithoutDoubt_F11(t *testing.T) {
+	h := newHarness(t)
+	h.setFaults(charges(fakeprovider.ModeRateLimit, 1))
+	wf := submit(t, h.pool, "cus_1")
+	w := h.workerWith("w1", func(o *engine.WorkerOptions) { o.Backoff.Cap = 0 }) // ignore Retry-After: 1s
+
+	require.Equal(t, "retry_no_effect", h.runOnce(t, w).Outcome)
+	require.Equal(t, "PENDING", h.chargeStatus(t, wf), "a 429 proves no money moved")
+	require.Equal(t, "succeeded", h.runOnce(t, w).Outcome)
+	h.assertChargedOnce(t, wf)
+}
+
+func TestWorker_NoEffectAfterInDoubtStaysInDoubt(t *testing.T) {
+	h := newHarness(t)
+	// Attempt 1 times out (ambiguous); the next new request is rate limited (429).
+	h.setFaults(charges(fakeprovider.ModeTimeoutBeforeEffect, 1), charges(fakeprovider.ModeRateLimit, 1))
+	wf := submit(t, h.pool, "cus_1")
+	w := h.workerWith("w1", func(o *engine.WorkerOptions) { o.Backoff.Cap = 0 })
+
+	require.Equal(t, "in_doubt", h.runOnce(t, w).Outcome)
+	// Until the provider notices the timed-out client, the key is in flight (409 → in_doubt).
+	require.Eventually(t, func() bool { return h.runOnce(t, w).Outcome == "retry_no_effect" },
+		3*time.Second, 20*time.Millisecond)
+	require.Equal(t, "IN_DOUBT", h.chargeStatus(t, wf), "the first attempt may have moved money: doubt is sticky")
+
+	require.Equal(t, "succeeded", h.runOnce(t, w).Outcome)
+	h.assertChargedOnce(t, wf)
+}
+
+func TestWorker_DeadReasons_F22(t *testing.T) {
+	cases := []struct {
+		mode, first, reason string
+	}{
+		{fakeprovider.ModeErrorBeforeEffect, "in_doubt", engine.DeadAttemptsExhaustedInDoubt}, // 5xx is ambiguous
+		{fakeprovider.ModeRateLimit, "retry_no_effect", engine.DeadAttemptsExhaustedNoEffect},
+	}
+	for _, c := range cases {
+		t.Run(c.mode, func(t *testing.T) {
+			h := newHarness(t)
+			h.setFaults(charges(c.mode, 0))
+			wf := submit(t, h.pool, "cus_1")
+			h.setMaxAttempts(t, wf, 2)
+			w := h.workerWith("w1", func(o *engine.WorkerOptions) { o.Backoff.Cap = 0 })
+
+			require.Equal(t, c.first, h.runOnce(t, w).Outcome)
+			require.Equal(t, "dead", h.runOnce(t, w).Outcome)
+
+			require.Equal(t, "DEAD", h.chargeStatus(t, wf))
+			require.Equal(t, c.reason, scalar[string](t, h.pool, `SELECT dead_reason FROM steps WHERE workflow_id = $1`, wf))
+			require.Equal(t, "NEEDS_ATTENTION", scalar[string](t, h.pool, `SELECT status FROM workflows WHERE id = $1`, wf))
+			require.Equal(t, 0, h.count(t, `SELECT count(*) FROM ledger_transactions`))
+			require.False(t, h.runOnce(t, w).Claimed, "a dead step is never retried")
+			require.Empty(t, h.fake.Effects())
+			h.assertNoViolations(t)
+		})
+	}
+}
+
+func TestWorker_DeadIsFenced(t *testing.T) {
+	h := newHarness(t)
+	h.setFaults(charges(fakeprovider.ModeErrorBeforeEffect, 0))
+	wf := submit(t, h.pool, "cus_1")
+	h.setMaxAttempts(t, wf, 1)
+
+	res, _ := pausedWorkerOutcome(t, h, wf, engine.FPAfterProviderCall, "dead")
+	require.Equal(t, "fenced", res.Outcome)
+	require.Equal(t, 1, h.count(t, `SELECT count(*) FROM step_attempts WHERE outcome = 'DEAD'`))
+	require.Equal(t, "DEAD", h.chargeStatus(t, wf))
+}
+
+func TestWorker_InFlightConflictRetriesSoon(t *testing.T) {
+	h := newHarness(t)
+	wf := submit(t, h.pool, "cus_1")
+	step := &stubStep{execute: func(context.Context, engine.ClaimedStep) provider.Outcome {
+		return provider.Outcome{Class: provider.Ambiguous, InFlight: true, HTTPStatus: 409}
+	}}
+	w := h.workerWith("w1", func(o *engine.WorkerOptions) {
+		o.Backoff = engine.Backoff{Base: time.Hour, Cap: time.Hour}
+		o.InFlightDelay = time.Second
+	}, step)
+
+	require.Equal(t, "in_doubt", h.runOnce(t, w).Outcome)
+	require.True(t, scalar[bool](t, h.pool,
+		`SELECT run_after BETWEEN now() + interval '500 milliseconds' AND now() + interval '2 seconds' FROM steps WHERE workflow_id = $1`, wf))
+}
+
+func TestWorker_ShutdownGraceCancelsStuckStep(t *testing.T) {
+	h := newHarness(t)
+	wf := submit(t, h.pool, "cus_1")
+	started := make(chan struct{})
+	step := &stubStep{execute: func(ctx context.Context, _ engine.ClaimedStep) provider.Outcome {
+		close(started)
+		<-ctx.Done()
+		return provider.Outcome{Class: provider.Ambiguous, Err: ctx.Err()}
+	}}
+	w := h.workerWith("w1", func(o *engine.WorkerOptions) { o.ShutdownGrace = 100 * time.Millisecond }, step)
+
+	cancel, done := runInBackground(t, w.Run)
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after the shutdown grace")
+	}
+	require.Equal(t, "IN_DOUBT", h.chargeStatus(t, wf), "the outcome is recorded even though the call was cut short")
 }
 
 func TestWorker_RunFinishesInFlightStepOnCancel(t *testing.T) {

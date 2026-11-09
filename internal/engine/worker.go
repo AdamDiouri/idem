@@ -14,21 +14,44 @@ import (
 	"github.com/AdamDiouri/idem/internal/provider"
 )
 
+// completeTimeout bounds recording a step's result. It is separate from the
+// step's own context so that an outcome is still recorded after a shutdown
+// cancelled the provider call (durable before acknowledged).
+const completeTimeout = 10 * time.Second
+
 // WorkerOptions configures a Worker.
 type WorkerOptions struct {
 	ID           string
 	Steps        []Step
 	LeaseTTL     time.Duration
 	PollInterval time.Duration
-	RetryDelay   time.Duration // delay before an IN_DOUBT step is retried
-	Logger       *slog.Logger
+	Backoff      Backoff
+	// InFlightDelay is the retry delay after a 409 (the provider is still
+	// processing the same key). Zero means Backoff.Base.
+	InFlightDelay time.Duration
+	// KeyRetention is how long the provider remembers idempotency keys;
+	// KeyRetentionMargin is the safety margin before it. Zero disables lookups.
+	KeyRetention       time.Duration
+	KeyRetentionMargin time.Duration
+	// ShutdownGrace is how long the in-flight step may keep running after Run's
+	// context is cancelled.
+	ShutdownGrace time.Duration
+	Logger        *slog.Logger
 }
 
 // RunResult describes one RunOnce call.
 type RunResult struct {
 	Claimed bool
 	StepID  uuid.UUID
-	Outcome string // succeeded | failed_permanent | in_doubt | fenced
+	Outcome string // succeeded | failed_permanent | in_doubt | retry_no_effect | dead | fenced
+}
+
+var outcomeNames = map[ResultKind]string{
+	ResultSucceeded:       "succeeded",
+	ResultFailedPermanent: "failed_permanent",
+	ResultInDoubt:         "in_doubt",
+	ResultRetryNoEffect:   "retry_no_effect",
+	ResultDead:            "dead",
 }
 
 // Worker claims and executes steps.
@@ -42,6 +65,9 @@ type Worker struct {
 
 // NewWorker returns a worker that handles opts.Steps.
 func NewWorker(pool *pgxpool.Pool, opts WorkerOptions) *Worker {
+	if opts.InFlightDelay == 0 {
+		opts.InFlightDelay = opts.Backoff.Base
+	}
 	w := &Worker{pool: pool, opts: opts, steps: map[string]Step{}, logger: opts.Logger}
 	if w.logger == nil {
 		w.logger = slog.Default()
@@ -71,38 +97,32 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 	out := w.execute(ctx, step, s)
 	failpoint.Hit(FPAfterProviderCall)
 
-	r := Result{Kind: ResultInDoubt, ProviderRef: out.ProviderRef, HTTPStatus: out.HTTPStatus, RetryDelay: w.opts.RetryDelay}
-	switch out.Class {
-	case provider.Success:
-		r.Kind = ResultSucceeded
-	case provider.Permanent:
-		r.Kind = ResultFailedPermanent
-	case provider.Ambiguous:
-		// Default: we may have caused an effect, so never call it a failure (D5).
-	}
-	if out.Err != nil {
-		r.Error = out.Err.Error()
-	}
+	r := decide(s, out, w.opts.Backoff, w.opts.InFlightDelay)
 
-	err = Complete(ctx, w.pool, s, r, step)
+	completeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), completeTimeout)
+	defer cancel()
+	err = Complete(completeCtx, w.pool, s, r, step)
 	if errors.Is(err, ErrFenced) {
 		log.Warn("lease lost before completion; result discarded", "provider_class", out.Class.String())
 		return RunResult{Claimed: true, StepID: s.ID, Outcome: "fenced"}, nil
 	}
 	if err != nil {
+		log.Error("complete step; it will be recovered when its lease expires", "error", err)
 		return RunResult{Claimed: true, StepID: s.ID}, err
 	}
 
-	outcome := map[ResultKind]string{
-		ResultSucceeded:       "succeeded",
-		ResultFailedPermanent: "failed_permanent",
-		ResultInDoubt:         "in_doubt",
-	}[r.Kind]
-	level := slog.LevelInfo
-	if r.Kind == ResultInDoubt {
-		level = slog.LevelWarn
+	outcome := outcomeNames[r.Kind]
+	switch r.Kind {
+	case ResultDead:
+		log.Error("step is DEAD; workflow needs attention",
+			"dead_reason", r.DeadReason, "money_may_have_moved", MoneyMayHaveMoved(r.DeadReason),
+			"http_status", r.HTTPStatus, "error", r.Error)
+	case ResultInDoubt, ResultRetryNoEffect:
+		log.Warn("step will be retried", "outcome", outcome, "retry_in", r.RetryDelay.String(),
+			"http_status", r.HTTPStatus, "error", r.Error)
+	default:
+		log.Info("step completed", "outcome", outcome, "http_status", r.HTTPStatus, "error", r.Error)
 	}
-	log.Log(ctx, level, "step completed", "outcome", outcome, "http_status", r.HTTPStatus, "error", r.Error)
 	return RunResult{Claimed: true, StepID: s.ID, Outcome: outcome}, nil
 }
 
@@ -120,15 +140,21 @@ func (w *Worker) execute(ctx context.Context, step Step, s ClaimedStep) (out pro
 	return step.Execute(ctx, s)
 }
 
-// Run processes steps until ctx is cancelled. Cancellation stops new claims but
-// lets the in-flight step finish (design §11.2); its duration is bounded by the
-// provider timeout. Errors are logged and the loop continues.
+// Run processes steps until ctx is cancelled. Cancellation stops new claims;
+// the in-flight step keeps running for up to ShutdownGrace (design §11.2), and
+// its outcome is still recorded. Errors are logged and the loop continues.
 func (w *Worker) Run(ctx context.Context) error {
 	w.logger.Info("worker started", "worker_id", w.opts.ID, "steps", w.names)
+
+	stepCtx, cancelSteps := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelSteps()
+	stop := context.AfterFunc(ctx, func() { time.AfterFunc(w.opts.ShutdownGrace, cancelSteps) })
+	defer stop()
+
 	for ctx.Err() == nil {
-		res, err := w.RunOnce(context.WithoutCancel(ctx))
-		if err != nil {
-			w.logger.Error("run step", "worker_id", w.opts.ID, "step_id", res.StepID, "error", err)
+		res, err := w.RunOnce(stepCtx)
+		if err != nil && !res.Claimed {
+			w.logger.Error("claim step", "worker_id", w.opts.ID, "error", err)
 		}
 		if err != nil || !res.Claimed {
 			select {
