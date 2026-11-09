@@ -64,6 +64,8 @@ func TestLoad_Invalid(t *testing.T) {
 		{"fee rate too high", "IDEM_FEE_RATE_BPS", "10001", "IDEM_FEE_RATE_BPS"},
 		{"negative fee rate", "IDEM_FEE_RATE_BPS", "-1", "IDEM_FEE_RATE_BPS"},
 		{"negative fixed fee", "IDEM_FEE_FIXED_CENTS", "-1", "IDEM_FEE_FIXED_CENTS"},
+		{"fixed fee above max amount", "IDEM_FEE_FIXED_CENTS", "100000001", "IDEM_FEE_FIXED_CENTS"},
+		{"fixed fee near int64 max", "IDEM_FEE_FIXED_CENTS", "9223372036854775807", "IDEM_FEE_FIXED_CENTS"},
 		{"unknown log level", "IDEM_LOG_LEVEL", "loud", "IDEM_LOG_LEVEL"},
 	}
 	for _, c := range cases {

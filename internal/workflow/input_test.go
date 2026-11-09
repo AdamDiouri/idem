@@ -3,6 +3,7 @@ package workflow_test
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -86,6 +87,22 @@ func TestNewPaymentInput_MaxLengthIDsAccepted(t *testing.T) {
 	req.MerchantID = "mer_A-9"
 	_, err := workflow.NewPaymentInput(req, defaultFees)
 	require.NoError(t, err)
+}
+
+// Review I2: a misconfigured fee must never produce a negative or overflowed
+// fee that slips past the "amount covers fee" check. It is a server fault, not
+// a client validation error.
+func TestNewPaymentInput_RejectsInvalidFeeConfig(t *testing.T) {
+	for _, fees := range []workflow.FeeConfig{
+		{RateBps: 0, FixedCents: -5},
+		{RateBps: 150, FixedCents: math.MaxInt64},
+		{RateBps: -150, FixedCents: 0},
+	} {
+		_, err := workflow.NewPaymentInput(validReq(), fees)
+		require.Error(t, err, "fees %+v", fees)
+		var ve *workflow.ValidationError
+		require.False(t, errors.As(err, &ve), "fees %+v must not be reported as a client error", fees)
+	}
 }
 
 func TestFingerprint_IgnoresFormatting(t *testing.T) {

@@ -15,6 +15,8 @@ import (
 const (
 	// MaxAmountCents caps a single workflow at €1,000,000.
 	MaxAmountCents = 100_000_000
+	// MaxFeeRateBps is 100%.
+	MaxFeeRateBps = 10_000
 	// Currency is the only currency accepted in milestone 1 (design D10).
 	Currency = "EUR"
 )
@@ -71,6 +73,11 @@ func NewPaymentInput(req CreateWorkflowRequest, fees FeeConfig) (PaymentInput, e
 		return PaymentInput{}, &ValidationError{"merchant_id", "must be 1-64 characters of A-Z, a-z, 0-9, '_' or '-'"}
 	}
 
+	// Bounds keep money.Fee free of overflow and the fee non-negative. A bad
+	// config is a server fault, so it is not reported as a ValidationError.
+	if fees.RateBps < 0 || fees.RateBps > MaxFeeRateBps || fees.FixedCents < 0 || fees.FixedCents > MaxAmountCents {
+		return PaymentInput{}, fmt.Errorf("invalid fee config %+v", fees)
+	}
 	fee := money.Fee(req.AmountCents, fees.RateBps, fees.FixedCents)
 	if req.AmountCents-fee < 1 {
 		return PaymentInput{}, &ValidationError{"amount_cents", "amount does not cover fee"}

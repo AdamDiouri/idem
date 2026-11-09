@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+
+	"github.com/AdamDiouri/idem/internal/workflow"
 )
 
 const minTokenLength = 16
@@ -60,11 +62,11 @@ func (c Config) validate() error {
 			c.IdempotencyLockTimeout, c.HTTPWriteTimeout)
 	}
 
-	if c.FeeRateBps < 0 || c.FeeRateBps > 10_000 {
-		return fmt.Errorf("IDEM_FEE_RATE_BPS must be between 0 and 10000")
+	if c.FeeRateBps < 0 || c.FeeRateBps > workflow.MaxFeeRateBps {
+		return fmt.Errorf("IDEM_FEE_RATE_BPS must be between 0 and %d", workflow.MaxFeeRateBps)
 	}
-	if c.FeeFixedCents < 0 {
-		return fmt.Errorf("IDEM_FEE_FIXED_CENTS must not be negative")
+	if c.FeeFixedCents < 0 || c.FeeFixedCents > workflow.MaxAmountCents {
+		return fmt.Errorf("IDEM_FEE_FIXED_CENTS must be between 0 and %d", workflow.MaxAmountCents)
 	}
 
 	if _, err := c.SlogLevel(); err != nil {
