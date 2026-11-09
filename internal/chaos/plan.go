@@ -34,7 +34,7 @@ type Event struct {
 	Kind     EventKind           `json:"kind"`
 	Target   int                 `json:"target,omitempty"`   // worker index
 	Duration time.Duration       `json:"duration,omitempty"` // pauses
-	Faults   fakeprovider.Faults `json:"faults,omitempty"`
+	Faults   fakeprovider.Faults `json:"faults,omitzero"`
 }
 
 // PlanConfig parameterises NewPlan.
