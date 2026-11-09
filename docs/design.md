@@ -510,6 +510,12 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 ### Later milestones (outline only)
 - **M2** — **Async payouts + webhooks first** (inbox, HMAC signatures, `AWAITING_CALLBACK`, deadline polling; F15–F19); then generalise workflow definitions; outbox relay; key retention/expiry; admin tooling polish; settlement reconciliation job.
 - **M3** — Prove it at scale: long chaos campaigns, toxiproxy network faults, load tests, tracing, SLOs + alerts, a published chaos report.
+  - **Traffic generator (`cmd/loadgen`)** — simulates 100–500 external clients against the public API only (no database or internal shortcuts while generating load):
+    - **Realistic misbehaviour, not just happy paths:** clients that time out and retry with the same key; double submissions; impatient retries with a *new* key (a real client bug the system must survive); declined customers; malformed payloads.
+    - **Open workload model:** requests arrive at a target rate whether or not earlier ones finished (avoids coordinated omission hiding latency).
+    - **Runs with provider faults enabled**, and ends with a correctness verdict: every submitted workflow reached a terminal or attention state, and `idem check` reports zero invariant violations.
+    - **Reports** request rate, latency percentiles and error classes; pairs with M3 metrics/tracing to locate bottlenecks (claim contention, pool exhaustion, sweeper cost, hot keys).
+    - Runs against docker compose first; packaged as its own Helm release in M4 for minikube. Numbers on a laptop are relative ("this change made claims 3x slower"), not capacity claims.
 - **M4** — Kubernetes operator (kubebuilder, developed on minikube): `WorkflowDefinition`, `SchedulerCluster` (workers, migrations, scaling on queue depth, safe upgrades), `DeadLetterPolicy`. Workflow *instances* stay in Postgres, never in etcd.
 - **M5 (stretch)** — etcd-backed lease implementation behind the same interface, compared under partitions; deterministic simulation testing; sharding.
 
