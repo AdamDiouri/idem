@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -189,6 +191,30 @@ func TestPostWorkflows_CreatedAndReplayed(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code)
 	require.Equal(t, body, rec.Body.String())
 	require.Equal(t, "true", rec.Header().Get("Idempotent-Replayed"))
+}
+
+type blockingSubmitter struct{}
+
+func (blockingSubmitter) Submit(ctx context.Context, _ workflow.SubmitRequest) (workflow.SubmitResult, error) {
+	<-ctx.Done()
+	return workflow.SubmitResult{}, fmt.Errorf("acquire connection: %w", ctx.Err())
+}
+
+// Review I1: database work must stop at the request deadline and answer with a
+// status, instead of running past the server's write timeout.
+func TestPostWorkflows_RequestTimeout(t *testing.T) {
+	opts := options()
+	opts.RequestTimeout = 50 * time.Millisecond
+	h := api.NewServer(opts, blockingSubmitter{}, fakePinger{})
+
+	start := time.Now()
+	rec := post(t, h, validBody, nil)
+
+	require.Less(t, time.Since(start), 2*time.Second)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	e := decodeError(t, rec)
+	require.Equal(t, "request_timeout", e.Error.Code)
+	require.Contains(t, e.Error.Message, "same Idempotency-Key")
 }
 
 func TestHealthz(t *testing.T) {

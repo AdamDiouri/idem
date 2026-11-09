@@ -87,8 +87,9 @@ func apiCmd() *cobra.Command {
 
 			fees := workflow.FeeConfig{RateBps: cfg.FeeRateBps, FixedCents: cfg.FeeFixedCents}
 			handler := api.NewServer(api.Options{
-				Tokens: cfg.TokenToClient(),
-				Logger: logger,
+				Tokens:         cfg.TokenToClient(),
+				Logger:         logger,
+				RequestTimeout: cfg.RequestTimeout,
 			}, workflow.NewSubmitter(pool, cfg.IdempotencyLockTimeout, fees), pool)
 
 			srv := &http.Server{

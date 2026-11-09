@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +19,10 @@ const (
 )
 
 func (s *server) postWorkflows(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), s.opts.RequestTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+
 	clientID := clientIDFrom(r.Context())
 	key := r.Header.Get(idempotencyKeyName)
 	log := s.logger.With("client_id", clientID, "idempotency_key", key)
@@ -69,6 +74,13 @@ func (s *server) handlePost(w http.ResponseWriter, r *http.Request, clientID, ke
 		writeError(w, http.StatusUnprocessableEntity, "idempotency_key_reused",
 			"this Idempotency-Key was already used with a different request body", "")
 		return http.StatusUnprocessableEntity, false, ""
+	case errors.Is(err, context.DeadlineExceeded):
+		// The transaction may or may not have committed; a retry with the same
+		// key either replays the workflow or creates it, never both.
+		log.Warn("submit workflow timed out", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "request_timeout",
+			"request timed out; retry with the same Idempotency-Key", "")
+		return http.StatusServiceUnavailable, false, ""
 	case errors.Is(err, workflow.ErrKeyInUse):
 		writeError(w, http.StatusConflict, "idempotency_key_in_use",
 			"a request with this Idempotency-Key is still in progress; retry later", "")

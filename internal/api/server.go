@@ -26,7 +26,13 @@ type Pinger interface {
 type Options struct {
 	Tokens map[string]string // bearer token → client ID
 	Logger *slog.Logger
+	// RequestTimeout bounds all work for one POST /workflows, including waiting
+	// for a database connection. It must be below the server's WriteTimeout so
+	// the client always gets a status. Zero means defaultRequestTimeout.
+	RequestTimeout time.Duration
 }
+
+const defaultRequestTimeout = 10 * time.Second
 
 type server struct {
 	opts   Options
@@ -40,6 +46,9 @@ func NewServer(opts Options, sub Submitter, db Pinger) http.Handler {
 	s := &server{opts: opts, sub: sub, db: db, logger: opts.Logger}
 	if s.logger == nil {
 		s.logger = slog.Default()
+	}
+	if s.opts.RequestTimeout <= 0 {
+		s.opts.RequestTimeout = defaultRequestTimeout
 	}
 
 	mux := http.NewServeMux()

@@ -19,6 +19,7 @@ type Config struct {
 	HTTPAddr               string            `env:"IDEM_HTTP_ADDR" envDefault:":8080"`
 	APITokens              map[string]string `env:"IDEM_API_TOKENS,required,notEmpty" envKeyValSeparator:"="` // client=token,...
 	IdempotencyLockTimeout time.Duration     `env:"IDEM_IDEMPOTENCY_LOCK_TIMEOUT" envDefault:"5s"`
+	RequestTimeout         time.Duration     `env:"IDEM_REQUEST_TIMEOUT" envDefault:"10s"`
 	HTTPWriteTimeout       time.Duration     `env:"IDEM_HTTP_WRITE_TIMEOUT" envDefault:"15s"`
 	FeeRateBps             int64             `env:"IDEM_FEE_RATE_BPS" envDefault:"150"`
 	FeeFixedCents          int64             `env:"IDEM_FEE_FIXED_CENTS" envDefault:"25"`
@@ -55,11 +56,15 @@ func (c Config) validate() error {
 	if c.IdempotencyLockTimeout <= 0 {
 		return fmt.Errorf("IDEM_IDEMPOTENCY_LOCK_TIMEOUT must be positive")
 	}
-	// A request blocked on a concurrent duplicate must give up before the
-	// server's write deadline, or the client sees a dropped connection instead of 409.
-	if c.IdempotencyLockTimeout >= c.HTTPWriteTimeout {
-		return fmt.Errorf("IDEM_IDEMPOTENCY_LOCK_TIMEOUT (%s) must be less than IDEM_HTTP_WRITE_TIMEOUT (%s)",
-			c.IdempotencyLockTimeout, c.HTTPWriteTimeout)
+	// lock wait < whole-request deadline < server write deadline, so a client
+	// always gets a status (409 or 503) instead of a dropped connection.
+	if c.IdempotencyLockTimeout >= c.RequestTimeout {
+		return fmt.Errorf("IDEM_IDEMPOTENCY_LOCK_TIMEOUT (%s) must be less than IDEM_REQUEST_TIMEOUT (%s)",
+			c.IdempotencyLockTimeout, c.RequestTimeout)
+	}
+	if c.RequestTimeout >= c.HTTPWriteTimeout {
+		return fmt.Errorf("IDEM_REQUEST_TIMEOUT (%s) must be less than IDEM_HTTP_WRITE_TIMEOUT (%s)",
+			c.RequestTimeout, c.HTTPWriteTimeout)
 	}
 
 	if c.FeeRateBps < 0 || c.FeeRateBps > workflow.MaxFeeRateBps {

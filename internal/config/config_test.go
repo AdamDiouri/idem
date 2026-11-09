@@ -21,7 +21,7 @@ func setRequired(t *testing.T) {
 	t.Setenv("IDEM_DATABASE_URL", "postgres://idem:idem@localhost:5432/idem")
 	t.Setenv("IDEM_API_TOKENS", "a="+tokA)
 	for _, k := range []string{
-		"IDEM_HTTP_ADDR", "IDEM_IDEMPOTENCY_LOCK_TIMEOUT", "IDEM_HTTP_WRITE_TIMEOUT",
+		"IDEM_HTTP_ADDR", "IDEM_IDEMPOTENCY_LOCK_TIMEOUT", "IDEM_REQUEST_TIMEOUT", "IDEM_HTTP_WRITE_TIMEOUT",
 		"IDEM_FEE_RATE_BPS", "IDEM_FEE_FIXED_CENTS", "IDEM_LOG_LEVEL",
 	} {
 		t.Setenv(k, "")
@@ -35,6 +35,7 @@ func TestLoad_Defaults(t *testing.T) {
 	require.Equal(t, ":8080", cfg.HTTPAddr)
 	require.Equal(t, 5*time.Second, cfg.IdempotencyLockTimeout)
 	require.Equal(t, 15*time.Second, cfg.HTTPWriteTimeout)
+	require.Equal(t, 10*time.Second, cfg.RequestTimeout)
 	require.Equal(t, int64(150), cfg.FeeRateBps)
 	require.Equal(t, int64(25), cfg.FeeFixedCents)
 	require.Equal(t, "info", cfg.LogLevel)
@@ -61,6 +62,8 @@ func TestLoad_Invalid(t *testing.T) {
 		{"duplicate token", "IDEM_API_TOKENS", "a=" + tokA + ",b=" + tokA, "IDEM_API_TOKENS"},
 		{"lock timeout not below write timeout", "IDEM_IDEMPOTENCY_LOCK_TIMEOUT", "20s", "IDEM_IDEMPOTENCY_LOCK_TIMEOUT"},
 		{"zero lock timeout", "IDEM_IDEMPOTENCY_LOCK_TIMEOUT", "0s", "IDEM_IDEMPOTENCY_LOCK_TIMEOUT"},
+		{"lock timeout not below request timeout", "IDEM_IDEMPOTENCY_LOCK_TIMEOUT", "10s", "IDEM_IDEMPOTENCY_LOCK_TIMEOUT"},
+		{"request timeout not below write timeout", "IDEM_REQUEST_TIMEOUT", "15s", "IDEM_REQUEST_TIMEOUT"},
 		{"fee rate too high", "IDEM_FEE_RATE_BPS", "10001", "IDEM_FEE_RATE_BPS"},
 		{"negative fee rate", "IDEM_FEE_RATE_BPS", "-1", "IDEM_FEE_RATE_BPS"},
 		{"negative fixed fee", "IDEM_FEE_FIXED_CENTS", "-1", "IDEM_FEE_FIXED_CENTS"},

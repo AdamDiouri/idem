@@ -53,7 +53,8 @@ make generate   # regenerate sqlc code after editing internal/store/queries/*.sq
 | `IDEM_DATABASE_URL` | (required) | Postgres connection URL |
 | `IDEM_API_TOKENS` | (required for `api`) | `client=token,...`; tokens at least 16 characters, unique |
 | `IDEM_HTTP_ADDR` | `:8080` | |
-| `IDEM_IDEMPOTENCY_LOCK_TIMEOUT` | `5s` | Max wait on a concurrent duplicate request before `409`; must be below the write timeout |
+| `IDEM_IDEMPOTENCY_LOCK_TIMEOUT` | `5s` | Max wait on a concurrent duplicate request before `409`; must be below the request timeout |
+| `IDEM_REQUEST_TIMEOUT` | `10s` | Deadline for all work in one request before `503 request_timeout`; must be below the write timeout |
 | `IDEM_HTTP_WRITE_TIMEOUT` | `15s` | |
 | `IDEM_FEE_RATE_BPS` | `150` | Fee rate in basis points (0 to 10000) |
 | `IDEM_FEE_FIXED_CENTS` | `25` | Fixed fee in cents |
