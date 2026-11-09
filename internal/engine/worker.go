@@ -1,0 +1,162 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/AdamDiouri/idem/internal/failpoint"
+	"github.com/AdamDiouri/idem/internal/provider"
+)
+
+// WorkerOptions configures a Worker.
+type WorkerOptions struct {
+	ID           string
+	Steps        []Step
+	LeaseTTL     time.Duration
+	PollInterval time.Duration
+	RetryDelay   time.Duration // delay before an IN_DOUBT step is retried
+	Logger       *slog.Logger
+}
+
+// RunResult describes one RunOnce call.
+type RunResult struct {
+	Claimed bool
+	StepID  uuid.UUID
+	Outcome string // succeeded | failed_permanent | in_doubt | fenced
+}
+
+// Worker claims and executes steps.
+type Worker struct {
+	pool   *pgxpool.Pool
+	opts   WorkerOptions
+	steps  map[string]Step
+	names  []string
+	logger *slog.Logger
+}
+
+// NewWorker returns a worker that handles opts.Steps.
+func NewWorker(pool *pgxpool.Pool, opts WorkerOptions) *Worker {
+	w := &Worker{pool: pool, opts: opts, steps: map[string]Step{}, logger: opts.Logger}
+	if w.logger == nil {
+		w.logger = slog.Default()
+	}
+	for _, s := range opts.Steps {
+		w.steps[s.Name()] = s
+		w.names = append(w.names, s.Name())
+	}
+	return w
+}
+
+// RunOnce claims one step, executes it and records the result. A lost lease is
+// not an error: the result is discarded and Outcome is "fenced".
+func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
+	s, ok, err := Claim(ctx, w.pool, w.opts.ID, w.names, w.opts.LeaseTTL)
+	if err != nil || !ok {
+		return RunResult{}, err
+	}
+	log := w.logger.With(
+		"workflow_id", s.WorkflowID, "step_id", s.ID, "step", s.Name,
+		"attempt", s.Attempt, "lease_epoch", s.LeaseEpoch, "worker_id", w.opts.ID)
+	log.Debug("step claimed", "prior_status", s.PriorStatus)
+	failpoint.Hit(FPAfterClaim)
+
+	step := w.steps[s.Name]
+	failpoint.Hit(FPBeforeProviderCall)
+	out := w.execute(ctx, step, s)
+	failpoint.Hit(FPAfterProviderCall)
+
+	r := Result{Kind: ResultInDoubt, ProviderRef: out.ProviderRef, HTTPStatus: out.HTTPStatus, RetryDelay: w.opts.RetryDelay}
+	switch out.Class {
+	case provider.Success:
+		r.Kind = ResultSucceeded
+	case provider.Permanent:
+		r.Kind = ResultFailedPermanent
+	case provider.Ambiguous:
+		// Default: we may have caused an effect, so never call it a failure (D5).
+	}
+	if out.Err != nil {
+		r.Error = out.Err.Error()
+	}
+
+	err = Complete(ctx, w.pool, s, r, step)
+	if errors.Is(err, ErrFenced) {
+		log.Warn("lease lost before completion; result discarded", "provider_class", out.Class.String())
+		return RunResult{Claimed: true, StepID: s.ID, Outcome: "fenced"}, nil
+	}
+	if err != nil {
+		return RunResult{Claimed: true, StepID: s.ID}, err
+	}
+
+	outcome := map[ResultKind]string{
+		ResultSucceeded:       "succeeded",
+		ResultFailedPermanent: "failed_permanent",
+		ResultInDoubt:         "in_doubt",
+	}[r.Kind]
+	level := slog.LevelInfo
+	if r.Kind == ResultInDoubt {
+		level = slog.LevelWarn
+	}
+	log.Log(ctx, level, "step completed", "outcome", outcome, "http_status", r.HTTPStatus, "error", r.Error)
+	return RunResult{Claimed: true, StepID: s.ID, Outcome: outcome}, nil
+}
+
+// execute runs the step, turning an unexpected panic into an ambiguous outcome:
+// we cannot know how far the step got. Simulated crashes are re-panicked.
+func (w *Worker) execute(ctx context.Context, step Step, s ClaimedStep) (out provider.Outcome) {
+	defer func() {
+		if r := recover(); r != nil {
+			if failpoint.IsCrash(r) {
+				panic(r)
+			}
+			out = provider.Outcome{Class: provider.Ambiguous, Err: fmt.Errorf("panic: %v", r)}
+		}
+	}()
+	return step.Execute(ctx, s)
+}
+
+// Run processes steps until ctx is cancelled. Cancellation stops new claims but
+// lets the in-flight step finish (design §11.2); its duration is bounded by the
+// provider timeout. Errors are logged and the loop continues.
+func (w *Worker) Run(ctx context.Context) error {
+	w.logger.Info("worker started", "worker_id", w.opts.ID, "steps", w.names)
+	for ctx.Err() == nil {
+		res, err := w.RunOnce(context.WithoutCancel(ctx))
+		if err != nil {
+			w.logger.Error("run step", "worker_id", w.opts.ID, "step_id", res.StepID, "error", err)
+		}
+		if err != nil || !res.Claimed {
+			select {
+			case <-ctx.Done():
+			case <-time.After(w.opts.PollInterval):
+			}
+		}
+	}
+	w.logger.Info("worker stopped", "worker_id", w.opts.ID)
+	return nil
+}
+
+// RunSweeper reclaims expired leases every interval until ctx is cancelled.
+func RunSweeper(ctx context.Context, pool *pgxpool.Pool, interval time.Duration, logger *slog.Logger) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		n, err := ReclaimExpiredLeases(ctx, pool)
+		switch {
+		case err != nil && ctx.Err() == nil:
+			logger.Error("sweep", "error", err)
+		case n > 0:
+			logger.Warn("reclaimed expired leases; steps are now IN_DOUBT", "count", n)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}

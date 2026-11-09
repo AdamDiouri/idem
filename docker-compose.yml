@@ -37,5 +37,29 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  fakeprovider:
+    build: .
+    entrypoint: ["/fakeprovider"]
+    ports:
+      - "9090:9090"
+
+  worker:
+    build: .
+    command: ["worker"]
+    environment: &worker-env
+      IDEM_DATABASE_URL: postgres://idem:idem@postgres:5432/idem?sslmode=disable
+      IDEM_PROVIDER_URL: http://fakeprovider:9090
+    depends_on: &worker-deps
+      migrate:
+        condition: service_completed_successfully
+      fakeprovider:
+        condition: service_started
+
+  sweeper:
+    build: .
+    command: ["sweeper"]
+    environment: *worker-env
+    depends_on: *worker-deps
+
 volumes:
   pgdata:

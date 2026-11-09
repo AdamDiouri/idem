@@ -91,7 +91,11 @@ func (c Config) TokenToClient() map[string]string {
 
 // SlogLevel converts LogLevel to a slog.Level.
 func (c Config) SlogLevel() (slog.Level, error) {
-	switch c.LogLevel {
+	return parseLevel(c.LogLevel)
+}
+
+func parseLevel(level string) (slog.Level, error) {
+	switch level {
 	case "debug":
 		return slog.LevelDebug, nil
 	case "info":
