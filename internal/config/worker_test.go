@@ -41,7 +41,7 @@ func TestLoadWorker_Defaults(t *testing.T) {
 	require.Equal(t, "", cfg.WorkerID)
 	require.Equal(t, "", cfg.Failpoints)
 	require.Equal(t, "info", cfg.LogLevel)
-	require.Equal(t, ":9100", cfg.MetricsAddr)
+	require.Equal(t, ":8090", cfg.MetricsAddr, "outside 9100-9999, the exporter range (node_exporter is 9100)")
 }
 
 func TestLoadWorker_MetricsCanBeDisabled(t *testing.T) {

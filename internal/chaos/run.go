@@ -68,6 +68,7 @@ func workerEnv(dsn, providerURL string) []string {
 		"IDEM_SWEEP_INTERVAL=500ms",
 		"IDEM_POLL_INTERVAL=50ms",
 		"IDEM_STUCK_AFTER=30s",
+		"IDEM_METRICS_ADDR=off", // several processes per host; nothing scrapes them
 	}
 }
 

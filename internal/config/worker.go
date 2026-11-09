@@ -37,8 +37,10 @@ type WorkerConfig struct {
 	WorkerID             string        `env:"IDEM_WORKER_ID"`  // empty → hostname-pid
 	Failpoints           string        `env:"IDEM_FAILPOINTS"` // see failpoint.EnableFromEnv
 	LogLevel             string        `env:"IDEM_LOG_LEVEL" envDefault:"info"`
-	// MetricsAddr is where worker and sweeper serve /metrics ("off" disables).
-	MetricsAddr string `env:"IDEM_METRICS_ADDR" envDefault:":9100"`
+	// MetricsAddr is where worker and sweeper serve /metrics ("off" disables). The
+	// default stays outside 9100-9999, which Prometheus allocates to exporters
+	// (node_exporter is 9100 and runs on most monitored hosts).
+	MetricsAddr string `env:"IDEM_METRICS_ADDR" envDefault:":8090"`
 }
 
 // LoadWorker parses and validates the worker environment. It does not need API tokens.

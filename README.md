@@ -120,7 +120,7 @@ Every change needs `--reason`, refuses anything that isn't parked, and is record
 - failing a charge that happened loses the customer's money
 
 **Metrics:**
-- `/metrics` on the API (`:8080`) and on workers and sweepers (`IDEM_METRICS_ADDR`, default `:9100`).
+- `/metrics` on the API (`:8080`) and on workers and sweepers (`IDEM_METRICS_ADDR`, default `:8090`).
 - Prometheus in compose: <http://localhost:9091>.
 - Alert rules: [`deploy/prometheus/alerts.yml`](deploy/prometheus/alerts.yml):
   - `IdemWorkflowsNeedAttention`
@@ -220,5 +220,5 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_STUCK_AFTER` | `15m` | Sweeper logs non-terminal workflows unchanged for this long |
 | `IDEM_SWEEP_INTERVAL` | `5s` | How often the sweeper reclaims expired leases |
 | `IDEM_WORKER_ID` | `hostname-pid` | |
-| `IDEM_METRICS_ADDR` | `:9100` | Where worker/sweeper serve `/metrics`; `off` disables |
+| `IDEM_METRICS_ADDR` | `:8090` | Where worker/sweeper serve `/metrics`; `off` disables |
 | `IDEM_FAILPOINTS` | (none) | `name=exit\|panic\|sleep:<d>[@probability],...` |

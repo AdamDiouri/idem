@@ -12,7 +12,7 @@ scrape_configs:
       - targets: ["api:8080"]
   - job_name: idem-worker
     static_configs:
-      - targets: ["worker:9100"]
+      - targets: ["worker:8090"]
   - job_name: idem-sweeper
     static_configs:
-      - targets: ["sweeper:9100"]
+      - targets: ["sweeper:8090"]
