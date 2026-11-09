@@ -8,9 +8,11 @@ tool (
 )
 
 require (
+	github.com/caarlos0/env/v11 v11.4.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/pressly/goose/v3 v3.26.0
+	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
@@ -97,8 +99,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.6 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	github.com/spf13/cobra v1.9.1 // indirect
-	github.com/spf13/pflag v1.0.7 // indirect
+	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/sqlc-dev/sqlc v1.30.0 // indirect
 	github.com/stoewer/go-strcase v1.2.0 // indirect
 	github.com/tetratelabs/wazero v1.9.0 // indirect

@@ -53,8 +53,9 @@ func MigrateDown(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 func withProvider(pool *pgxpool.Pool, fn func(*goose.Provider) error) error {
+	// Closing this *sql.DB wrapper does not close the underlying pool.
 	db := stdlib.OpenDBFromPool(pool)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	p, err := goose.NewProvider(goose.DialectPostgres, db, migrations.FS)
 	if err != nil {

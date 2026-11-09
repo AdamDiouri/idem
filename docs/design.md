@@ -312,7 +312,8 @@ COMMIT;
 **Inbound (client → engine API)**
 - Client sends `Idempotency-Key` on `POST /workflows`, scoped per client.
 - Engine stores `(client_id, key, request_fingerprint, response)` where `request_fingerprint = sha256(canonical JSON body)`.
-- Same key + same fingerprint → return the stored response (same workflow ID), `200`.
+- Same key + same fingerprint → replay the stored response byte-for-byte with its original status (`201`) and header `Idempotent-Replayed: true`. The response is stored as `bytea`, not `jsonb`, because `jsonb` normalises key order and whitespace.
+- Only successful creations are stored; requests rejected by validation never reserve the key.
 - Same key + different fingerprint → `422 Unprocessable Entity`. (A client bug — don't guess which request they meant.)
 - Two concurrent requests with the same key → primary-key conflict; the loser waits briefly and returns the winner's stored response, or `409` if the winner hasn't committed yet.
 - The key row, the workflow row, and the first step row are inserted **in one transaction**.

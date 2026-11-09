@@ -16,5 +16,26 @@ services:
       timeout: 2s
       retries: 30
 
+  migrate:
+    build: .
+    command: ["migrate"]
+    environment:
+      IDEM_DATABASE_URL: postgres://idem:idem@postgres:5432/idem?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: ["api"]
+    environment:
+      IDEM_DATABASE_URL: postgres://idem:idem@postgres:5432/idem?sslmode=disable
+      IDEM_API_TOKENS: demo=demo-token-0123456789
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   pgdata:
