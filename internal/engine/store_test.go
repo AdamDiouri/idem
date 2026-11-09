@@ -372,3 +372,126 @@ func TestReclaim_ConcurrentSweepersBumpOnce(t *testing.T) {
 	require.Equal(t, int64(1), total)
 	require.Equal(t, int64(2), readStep(t, pool, s.ID).epoch)
 }
+
+// claimFromInDoubt returns a claim whose PriorStatus is IN_DOUBT (claimed,
+// lease expired, reclaimed, claimed again).
+func claimFromInDoubt(t *testing.T, pool *pgxpool.Pool) engine.ClaimedStep {
+	t.Helper()
+	mustClaim(t, pool, "w1", 50*time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+	n, err := engine.ReclaimExpiredLeases(context.Background(), pool)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n)
+	s := mustClaim(t, pool, "w2", time.Minute)
+	require.Equal(t, "IN_DOUBT", s.PriorStatus)
+	return s
+}
+
+func TestClaim_ReturnsMaxAttemptsAndKeyAge(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	submit(t, pool, "cus_1")
+	first := mustClaim(t, pool, "w1", 50*time.Millisecond)
+	require.Equal(t, int32(8), first.MaxAttempts)
+	require.Less(t, first.KeyAge, 100*time.Millisecond)
+
+	time.Sleep(250 * time.Millisecond)
+	_, err := engine.ReclaimExpiredLeases(context.Background(), pool)
+	require.NoError(t, err)
+	second := mustClaim(t, pool, "w2", time.Minute)
+	require.GreaterOrEqual(t, second.KeyAge, 200*time.Millisecond, "key age counts from the first attempt")
+}
+
+func TestComplete_RetryNoEffectFromPendingIsPending(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	submit(t, pool, "cus_1")
+	s := mustClaim(t, pool, "w1", time.Minute)
+	step := &stubStep{}
+
+	require.NoError(t, engine.Complete(context.Background(), pool, s,
+		engine.Result{Kind: engine.ResultRetryNoEffect, HTTPStatus: 429, Error: "rate limited", RetryDelay: time.Hour}, step))
+
+	require.Equal(t, "PENDING", readStep(t, pool, s.ID).status)
+	require.True(t, scalar[bool](t, pool, `SELECT run_after > now() + interval '59 minutes' FROM steps WHERE id = $1`, s.ID))
+	require.Equal(t, "RETRY_NO_EFFECT", *attemptOutcome(t, pool, s.ID, 1))
+	require.Equal(t, 0, step.successCalls+step.failureCalls)
+}
+
+func TestComplete_RetryNoEffectFromInDoubtStaysInDoubt(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	submit(t, pool, "cus_1")
+	s := claimFromInDoubt(t, pool)
+
+	require.NoError(t, engine.Complete(context.Background(), pool, s,
+		engine.Result{Kind: engine.ResultRetryNoEffect, HTTPStatus: 429}, &stubStep{}))
+	require.Equal(t, "IN_DOUBT", readStep(t, pool, s.ID).status, "ambiguity is sticky")
+}
+
+func TestComplete_DeadSetsNeedsAttention(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	wf := submit(t, pool, "cus_1")
+	s := mustClaim(t, pool, "w1", time.Minute)
+	step := &stubStep{}
+
+	require.NoError(t, engine.Complete(context.Background(), pool, s,
+		engine.Result{Kind: engine.ResultDead, DeadReason: "attempts_exhausted_in_doubt", Error: "timeout"}, step))
+
+	require.Equal(t, "DEAD", readStep(t, pool, s.ID).status)
+	require.Equal(t, "attempts_exhausted_in_doubt", scalar[string](t, pool, `SELECT dead_reason FROM steps WHERE id = $1`, s.ID))
+	require.Equal(t, "NEEDS_ATTENTION", scalar[string](t, pool, `SELECT status FROM workflows WHERE id = $1`, wf))
+	require.Equal(t, "DEAD", *attemptOutcome(t, pool, s.ID, 1))
+	require.Equal(t, 0, step.successCalls+step.failureCalls)
+
+	_, ok, err := engine.Claim(context.Background(), pool, "w2", charge, time.Minute)
+	require.NoError(t, err)
+	require.False(t, ok, "a DEAD step is never claimed again")
+}
+
+func TestComplete_DeadIsFenced(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	wf := submit(t, pool, "cus_1")
+	s := mustClaim(t, pool, "w1", time.Minute)
+	stale := s
+	stale.LeaseEpoch--
+
+	err := engine.Complete(context.Background(), pool, stale,
+		engine.Result{Kind: engine.ResultDead, DeadReason: "attempts_exhausted_in_doubt"}, &stubStep{})
+	require.ErrorIs(t, err, engine.ErrFenced)
+	require.Equal(t, "RUNNING", readStep(t, pool, s.ID).status)
+	require.Equal(t, "RUNNING", scalar[string](t, pool, `SELECT status FROM workflows WHERE id = $1`, wf))
+}
+
+func TestSchema_DeadRequiresReason(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	submit(t, pool, "cus_1")
+	_, err := pool.Exec(context.Background(), `UPDATE steps SET status = 'DEAD'`)
+	require.Error(t, err)
+	var code string
+	require.True(t, func() bool {
+		var pgErr interface{ SQLState() string }
+		if errors.As(err, &pgErr) {
+			code = pgErr.SQLState()
+			return true
+		}
+		return false
+	}())
+	require.Equal(t, "23514", code)
+}
+
+func TestFindStuckWorkflows(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.NewPool(t, dsn)
+	stuck := submit(t, pool, "cus_1")
+	oldDone := submit(t, pool, "cus_2")
+	submit(t, pool, "cus_3") // fresh
+	_, err := pool.Exec(ctx, `UPDATE workflows SET status = 'RUNNING', updated_at = now() - interval '2 hours' WHERE id = $1`, stuck)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `UPDATE workflows SET status = 'SUCCEEDED', updated_at = now() - interval '2 hours' WHERE id = $1`, oldDone)
+	require.NoError(t, err)
+
+	got, err := engine.FindStuckWorkflows(ctx, pool, time.Hour)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, stuck, got[0].ID)
+	require.Equal(t, "RUNNING", got[0].Status)
+	require.GreaterOrEqual(t, got[0].Age, 2*time.Hour-time.Minute)
+}

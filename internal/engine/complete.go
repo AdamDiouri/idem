@@ -23,9 +23,10 @@ func Complete(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, r Result, 
 	q := db.New(tx)
 
 	rows, err := q.CompleteStep(ctx, db.CompleteStepParams{
-		Status:      string(r.Kind),
+		Status:      stepStatus(s, r.Kind),
 		ProviderRef: optional(r.ProviderRef),
 		LastError:   optional(r.Error),
+		DeadReason:  optional(r.DeadReason),
 		RetryMs:     r.RetryDelay.Milliseconds(),
 		ID:          s.ID,
 		LeaseEpoch:  s.LeaseEpoch,
@@ -46,8 +47,12 @@ func Complete(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, r Result, 
 		if err := runHook(func() error { return step.OnPermanentFailure(ctx, q, s) }); err != nil {
 			return fmt.Errorf("%s on permanent failure: %w", s.Name, err)
 		}
-	case ResultInDoubt:
-		// No hook: we do not know what happened, so nothing else may change.
+	case ResultInDoubt, ResultRetryNoEffect:
+		// No hook: nothing is known to have happened, so nothing else may change.
+	case ResultDead:
+		if err := q.SetWorkflowStatus(ctx, db.SetWorkflowStatusParams{Status: "NEEDS_ATTENTION", ID: s.WorkflowID}); err != nil {
+			return fmt.Errorf("mark workflow needs attention: %w", err)
+		}
 	default:
 		return fmt.Errorf("unknown result kind %q", r.Kind)
 	}
@@ -73,6 +78,19 @@ func Complete(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, r Result, 
 	}
 	failpoint.Hit(FPAfterCommit)
 	return nil
+}
+
+// stepStatus maps a result to the step's next status. A definite no-effect
+// answer only clears doubt that this attempt created: a step that was already
+// IN_DOUBT stays IN_DOUBT, because an earlier attempt may have moved money.
+func stepStatus(s ClaimedStep, kind ResultKind) string {
+	if kind != ResultRetryNoEffect {
+		return string(kind)
+	}
+	if s.PriorStatus == string(ResultInDoubt) {
+		return string(ResultInDoubt)
+	}
+	return "PENDING"
 }
 
 // runHook turns a panic in step hook code into an error, so the completion

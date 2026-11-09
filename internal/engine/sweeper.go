@@ -3,6 +3,9 @@ package engine
 import (
 	"context"
 	"fmt"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -19,4 +22,26 @@ func ReclaimExpiredLeases(ctx context.Context, pool *pgxpool.Pool) (int64, error
 		return 0, fmt.Errorf("reclaim expired leases: %w", err)
 	}
 	return n, nil
+}
+
+// StuckWorkflow is a non-terminal workflow that has not changed for too long.
+type StuckWorkflow struct {
+	ID     uuid.UUID
+	Status string
+	Age    time.Duration
+}
+
+// FindStuckWorkflows returns PENDING, RUNNING or COMPENSATING workflows not
+// updated for olderThan (design §11.1). It changes nothing: stuck work must be
+// made loud, not silently "fixed".
+func FindStuckWorkflows(ctx context.Context, pool *pgxpool.Pool, olderThan time.Duration) ([]StuckWorkflow, error) {
+	rows, err := db.New(pool).FindStuckWorkflows(ctx, olderThan.Milliseconds())
+	if err != nil {
+		return nil, fmt.Errorf("find stuck workflows: %w", err)
+	}
+	out := make([]StuckWorkflow, len(rows))
+	for i, r := range rows {
+		out[i] = StuckWorkflow{ID: r.ID, Status: r.Status, Age: time.Duration(r.AgeMs) * time.Millisecond}
+	}
+	return out, nil
 }

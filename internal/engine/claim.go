@@ -43,6 +43,8 @@ func Claim(ctx context.Context, pool *pgxpool.Pool, workerID string, names []str
 		IdempotencyKey: row.IdempotencyKey,
 		LeaseEpoch:     row.LeaseEpoch,
 		Attempt:        row.AttemptCount,
+		MaxAttempts:    row.MaxAttempts,
+		KeyAge:         time.Duration(row.KeyAgeMs) * time.Millisecond,
 	}
 	if row.PriorStatus != nil {
 		s.PriorStatus = *row.PriorStatus
