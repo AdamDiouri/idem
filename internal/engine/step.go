@@ -67,6 +67,9 @@ const (
 	DeadAttemptsExhaustedNoEffect = "attempts_exhausted_no_effect"
 	DeadAttemptsExhaustedInDoubt  = "attempts_exhausted_in_doubt"
 	DeadKeyExpiredUnknown         = "key_expired_unknown"
+	// DeadPermanentAfterInDoubt: a pivot step was refused after an earlier
+	// attempt was ambiguous; that earlier attempt may have moved the money.
+	DeadPermanentAfterInDoubt = "permanent_after_in_doubt"
 )
 
 // MoneyMayHaveMoved reports whether a dead reason leaves the external effect unknown.
@@ -90,6 +93,10 @@ type Result struct {
 // state change or not at all.
 type Step interface {
 	Name() string
+	// Pivot reports whether this step is the saga's point of no return (the
+	// payout). A pivot that is refused after an ambiguous attempt is parked for a
+	// human instead of failing, so no compensation runs on a guess.
+	Pivot() bool
 	Execute(ctx context.Context, s ClaimedStep) provider.Outcome
 	// Lookup asks the provider what happened to the request sent with
 	// s.IdempotencyKey, without sending it again. found is false when the

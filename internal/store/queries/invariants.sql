@@ -23,3 +23,19 @@ SELECT id, status FROM workflows WHERE status IN ('SUCCEEDED', 'FAILED', 'COMPEN
 
 -- name: NeedsAttentionWorkflows :many
 SELECT id FROM workflows WHERE status = 'NEEDS_ATTENTION' ORDER BY updated_at;
+
+-- name: NonTerminalWorkflows :many
+SELECT id, status, updated_at FROM workflows
+WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING') ORDER BY updated_at;
+
+-- name: KeysWithoutWorkflow :many
+SELECT client_id, key FROM api_idempotency_keys
+WHERE workflow_id IS NULL OR response_body IS NULL;
+
+-- name: WorkflowsWithoutKey :many
+SELECT w.id FROM workflows w
+WHERE NOT EXISTS (SELECT 1 FROM api_idempotency_keys k WHERE k.workflow_id = w.id);
+
+-- name: UnsettledSteps :many
+SELECT workflow_id, name, status FROM steps
+WHERE status IN ('RUNNING', 'IN_DOUBT', 'AWAITING_CALLBACK') ORDER BY created_at;

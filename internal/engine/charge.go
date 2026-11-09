@@ -25,6 +25,8 @@ func NewChargeStep(client *provider.Client) Step {
 
 func (c *chargeStep) Name() string { return stepCharge }
 
+func (c *chargeStep) Pivot() bool { return false }
+
 func (c *chargeStep) Execute(ctx context.Context, s ClaimedStep) provider.Outcome {
 	return c.client.CreateCharge(ctx, s.IdempotencyKey, chargeRequest(s))
 }

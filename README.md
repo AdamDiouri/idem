@@ -98,6 +98,54 @@ Failpoints crash or pause a worker at a named point (`after_claim`, `before_prov
 make down
 ```
 
+## Run a chaos campaign
+
+The chaos harness runs the real binaries as separate processes and does its best to break them:
+- **Infrastructure:** a throwaway Postgres container, the fake provider, the API, 4 workers and 2 sweepers.
+- **Traffic:** about 300 workflows from misbehaving clients (impatient retries, double-clicks, reformatted retries, malformed bodies).
+- **Disruptions:** a seeded plan of `kill -9`, `SIGSTOP` beyond the lease, API and database restarts, and provider faults. Workers also carry crash failpoints that make them `exit` mid-step, and a supervisor restarts them like Kubernetes would.
+
+Afterwards it clears every fault, lets the system settle, and checks every invariant.
+
+```bash
+make chaos CHAOS_ARGS="--seed 1 --duration 90s"   # needs Docker
+```
+
+Example result (seed 1, 90s, 1000 workflows):
+
+```
+chaos run seed 1: PASSED
+events executed: 33 (failed to apply: 0, skipped: 1); effective = met work in flight
+  kill_worker 16 (effective 16)   pause_worker 4 (4)   restart_api 1 (1)
+  restart_postgres 5 (5)          set_provider_faults 6 (6)   clear_provider_faults 1 (1)
+provider fault hits: 59 across charges/payouts/refunds
+failpoint exits: 99
+clients: submitted 1000, accepted 884, malformed rejected 116, retried attempts 178
+outcomes: COMPENSATED=74 FAILED=66 NEEDS_ATTENTION=5 SUCCEEDED=739
+settled in: 3.619s
+violations: 0
+```
+
+**How to read the result:**
+- **`PASSED` requires all of:**
+  - zero invariant violations (I1–I7)
+  - every workflow terminal or parked, with no step left `RUNNING`/`IN_DOUBT`
+  - no idempotency key that ever returned two different workflows
+  - every workflow a client was told about exists in the database under the same ID
+  - no event that failed to apply
+  - parking only for expected reasons
+- **A pass must be earned, not vacuous:**
+  - every kind of disruption must have met work in flight (an *effective* event)
+  - provider faults must actually have hit requests
+  - armed failpoints must actually have fired
+  - a binary built with `-tags nofailpoint` refuses `IDEM_FAILPOINTS` instead of running silently
+- **Skipped events:** a kill or pause aimed at a worker that was already restarting is *skipped*. That is harmless, and it is neither counted nor treated as a failure.
+- **`NEEDS_ATTENTION`** entries list the step and reason. In a healthy run they are all `payout permanent_after_in_doubt`: payouts refused after an ambiguous attempt, parked for a human by the pivot safety rule instead of being refunded on a guess.
+- **Exit codes:** `0` passed, `1` failed, `2` could not run or was interrupted.
+- **Artifacts:** `chaos-runs/<time>-seed<N>/` holds `report.txt`, `report.json` (every event with its in-flight count) and every process's log.
+- **Reproducing a run:** `bin/chaos --seed N …` (printed in the report) replays the same fault plan. OS scheduling still differs between runs.
+- **Cleanup:** Ctrl-C stops a campaign at any point and still removes its container, its data volume and its processes. Container names are unique per run, so concurrent campaigns don't collide.
+
 ## Develop
 
 ```bash
@@ -105,6 +153,7 @@ make test       # go test -race ./... (starts Postgres containers)
 make lint
 make generate        # regenerate sqlc code after editing internal/store/queries/*.sql
 make build-release   # binary with failpoints compiled out
+go test -tags chaos ./internal/chaos/   # 30s chaos campaign as a test (after make build)
 ```
 
 ## Configuration

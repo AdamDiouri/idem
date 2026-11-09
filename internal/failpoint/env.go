@@ -21,6 +21,9 @@ func EnableFromEnv(spec string) error {
 	if spec == "" {
 		return nil
 	}
+	if !compiledIn {
+		return fmt.Errorf("failpoints requested (%q) but this binary was built with -tags nofailpoint", spec)
+	}
 
 	parsed := map[string]Action{}
 	for entry := range strings.SplitSeq(spec, ",") {

@@ -7,6 +7,9 @@ import (
 	"sync/atomic"
 )
 
+// compiledIn is true in builds that include failpoints.
+const compiledIn = true
+
 var (
 	mu      sync.RWMutex
 	actions = map[string]Action{}

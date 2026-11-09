@@ -139,6 +139,7 @@ type Provider struct {
 	keys     map[string]*keyState // "<resource>:<key>"
 	effects  []Effect
 	calls    map[string]int
+	hits     map[string]int // "<endpoint>/<mode>" → faults fired
 	faults   Faults
 	ruleUses []int
 	rng      *rand.Rand
@@ -163,6 +164,7 @@ func (p *Provider) Handler() http.Handler {
 	}
 	mux.HandleFunc("PUT /_faults", p.putFaults)
 	mux.HandleFunc("GET /_effects", p.getEffects)
+	mux.HandleFunc("GET /_fault_hits", p.getFaultHits)
 	mux.HandleFunc("POST /_reset", p.postReset)
 	return mux
 }
@@ -209,13 +211,22 @@ func (p *Provider) count(endpoint string) {
 	p.calls[endpoint]++
 }
 
-// Reset forgets all keys, effects, call counts and faults.
+// FaultHits returns how many times each fault fired, keyed "<endpoint>/<mode>".
+// Counts survive fault changes; only Reset clears them.
+func (p *Provider) FaultHits() map[string]int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return maps.Clone(p.hits)
+}
+
+// Reset forgets all keys, effects, call counts, fault hits and faults.
 func (p *Provider) Reset() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.keys = map[string]*keyState{}
 	p.effects = nil
 	p.calls = map[string]int{}
+	p.hits = map[string]int{}
 	p.setFaultsLocked(Faults{})
 }
 
@@ -420,6 +431,10 @@ func (p *Provider) getEffects(w http.ResponseWriter, _ *http.Request) {
 		effects = []Effect{}
 	}
 	writeRaw(w, http.StatusOK, mustJSON(effects))
+}
+
+func (p *Provider) getFaultHits(w http.ResponseWriter, _ *http.Request) {
+	writeRaw(w, http.StatusOK, mustJSON(p.FaultHits()))
 }
 
 func (p *Provider) postReset(w http.ResponseWriter, _ *http.Request) {

@@ -472,3 +472,23 @@ func TestFaultValidate_PayoutFailOnlyOnPayouts(t *testing.T) {
 	require.NoError(t, fakeprovider.PutFaults(ctx, srv.URL, faults(fakeprovider.Rule{Endpoint: "refunds", Mode: fakeprovider.ModeErrorBeforeEffect})))
 	require.NoError(t, fakeprovider.PutFaults(ctx, srv.URL, faults(fakeprovider.Rule{Endpoint: "payouts", Mode: fakeprovider.ModePayoutFail})))
 }
+
+// Review finding C1: the harness must be able to prove a configured fault
+// actually fired, not just that it was configured.
+func TestFaultHits(t *testing.T) {
+	p, srv := newServer(t)
+	p.SetFaults(faults(fakeprovider.Rule{Endpoint: "charges", Mode: fakeprovider.ModeErrorBeforeEffect, Times: 2}))
+	mustCharge(t, srv.URL, "k1", body("cus_1", 10000))
+	mustCharge(t, srv.URL, "k1", body("cus_1", 10000))
+	mustCharge(t, srv.URL, "k1", body("cus_1", 10000)) // rule exhausted: no hit
+	require.Equal(t, map[string]int{"charges/error_before_effect": 2}, p.FaultHits())
+
+	hits, err := fakeprovider.FetchFaultHits(context.Background(), srv.URL)
+	require.NoError(t, err)
+	require.Equal(t, p.FaultHits(), hits)
+
+	p.SetFaults(fakeprovider.Faults{})
+	require.Equal(t, 2, p.FaultHits()["charges/error_before_effect"], "hits survive a fault change")
+	p.Reset()
+	require.Empty(t, p.FaultHits())
+}

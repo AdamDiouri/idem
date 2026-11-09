@@ -2,6 +2,9 @@
 
 package failpoint
 
+// compiledIn is false in release builds: EnableFromEnv refuses a non-empty spec.
+const compiledIn = false
+
 // Hit does nothing in release builds.
 func Hit(string) {}
 

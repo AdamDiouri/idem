@@ -111,7 +111,7 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 	failpoint.Hit(FPAfterProviderCall)
 
 	if r.Kind == "" {
-		r = decide(s, out, w.opts.Backoff, w.opts.InFlightDelay)
+		r = decide(s, out, w.opts.Backoff, w.opts.InFlightDelay, step.Pivot())
 	}
 
 	completeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), completeTimeout)

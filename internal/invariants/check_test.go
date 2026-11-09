@@ -269,3 +269,62 @@ func TestCheck_I3_RefundOfAnotherWorkflowsCharge(t *testing.T) {
 
 	requireViolation(t, e.check(t), "I3", wfB, "another workflow")
 }
+
+func TestCheckLiveness_ReportsStuck(t *testing.T) {
+	ctx := context.Background()
+	e := setup(t)
+	wf, _ := newWorkflow(t, e.pool) // PENDING
+
+	v, err := invariants.CheckLiveness(ctx, e.pool)
+	require.NoError(t, err)
+	require.Len(t, v, 1)
+	require.Equal(t, "I4", v[0].Invariant)
+	require.Equal(t, wf.String(), v[0].WorkflowID)
+	require.Contains(t, v[0].Detail, "PENDING")
+
+	e.setStatus(t, wf, "SUCCEEDED")
+	v, err = invariants.CheckLiveness(ctx, e.pool)
+	require.NoError(t, err)
+	require.Empty(t, v)
+}
+
+func TestCheck_I6_KeyWithoutWorkflow(t *testing.T) {
+	e := setup(t)
+	_, err := e.pool.Exec(context.Background(),
+		`INSERT INTO api_idempotency_keys (client_id, key, request_fingerprint) VALUES ('c', 'orphan-key', 'f')`)
+	require.NoError(t, err)
+	v := only(e.check(t), "I6")
+	require.Len(t, v, 1)
+	require.Contains(t, v[0].Detail, "orphan-key")
+}
+
+func TestCheck_I6_WorkflowWithoutKey(t *testing.T) {
+	e := setup(t)
+	id := uuid.New()
+	_, err := e.pool.Exec(context.Background(),
+		`INSERT INTO workflows (id, client_id, type, status, input) VALUES ($1, 'c', 'payment_payout', 'PENDING', '{}')`, id)
+	require.NoError(t, err)
+	requireViolation(t, e.check(t), "I6", id, "no idempotency key")
+}
+
+func TestCheck_I6_SubmittedWorkflowsClean(t *testing.T) {
+	e := setup(t)
+	newWorkflow(t, e.pool)
+	newWorkflow(t, e.pool)
+	require.Empty(t, only(e.check(t), "I6"))
+}
+
+// Review finding I7: liveness also covers steps — a finished or parked
+// workflow must not leave a step RUNNING or IN_DOUBT behind.
+func TestCheckLiveness_ReportsLeftoverSteps(t *testing.T) {
+	ctx := context.Background()
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	e.setStatus(t, wf, "NEEDS_ATTENTION")
+	_, err := e.pool.Exec(ctx, `UPDATE steps SET status = 'IN_DOUBT' WHERE id = $1`, step)
+	require.NoError(t, err)
+
+	v, err := invariants.CheckLiveness(ctx, e.pool)
+	require.NoError(t, err)
+	requireViolation(t, v, "I4", wf, "IN_DOUBT")
+}

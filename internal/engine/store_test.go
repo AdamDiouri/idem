@@ -39,6 +39,7 @@ type stubStep struct {
 }
 
 func (s *stubStep) Name() string { return "charge" }
+func (s *stubStep) Pivot() bool  { return false }
 
 func (s *stubStep) Execute(ctx context.Context, c engine.ClaimedStep) provider.Outcome {
 	if s.execute != nil {
