@@ -17,7 +17,7 @@ import (
 
 // Violation is one broken invariant.
 type Violation struct {
-	Invariant  string // "I1", "I2", "I3", "I5", "I7"
+	Invariant  string // "I1"–"I7"
 	WorkflowID string // empty for global violations
 	Detail     string
 }
@@ -45,6 +45,9 @@ func (v Violation) String() string {
 //   - I5: no payout without a charge.
 //   - I7: terminal workflows match what moved: SUCCEEDED = charge + payout,
 //     COMPENSATED = charge + refund and no payout, FAILED = nothing.
+//   - I6: every inbound idempotency key maps to exactly one workflow.
+//
+// I4 (liveness) is CheckLiveness: it only holds after quiescence.
 func Check(ctx context.Context, pool *pgxpool.Pool, effects []fakeprovider.Effect) ([]Violation, error) {
 	violations := checkDuplicateEffects(effects)
 	violations = append(violations, checkPayoutHasCharge(effects)...)
@@ -66,6 +69,12 @@ func Check(ctx context.Context, pool *pgxpool.Pool, effects []fakeprovider.Effec
 		return nil, fmt.Errorf("query terminal workflows: %w", err)
 	}
 	violations = append(violations, checkTerminalStates(effects, terminal)...)
+
+	keyViolations, err := checkKeys(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	violations = append(violations, keyViolations...)
 
 	unbalanced, err := q.UnbalancedLedgerTransactions(ctx)
 	if err != nil {

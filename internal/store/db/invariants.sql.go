@@ -9,7 +9,38 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const keysWithoutWorkflow = `-- name: KeysWithoutWorkflow :many
+SELECT client_id, key FROM api_idempotency_keys
+WHERE workflow_id IS NULL OR response_body IS NULL
+`
+
+type KeysWithoutWorkflowRow struct {
+	ClientID string
+	Key      string
+}
+
+func (q *Queries) KeysWithoutWorkflow(ctx context.Context) ([]KeysWithoutWorkflowRow, error) {
+	rows, err := q.db.Query(ctx, keysWithoutWorkflow)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []KeysWithoutWorkflowRow
+	for rows.Next() {
+		var i KeysWithoutWorkflowRow
+		if err := rows.Scan(&i.ClientID, &i.Key); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
 
 const ledgerGlobalSum = `-- name: LedgerGlobalSum :one
 SELECT COALESCE(sum(amount_cents), 0)::bigint AS total FROM ledger_entries
@@ -83,6 +114,37 @@ func (q *Queries) NeedsAttentionWorkflows(ctx context.Context) ([]uuid.UUID, err
 	return items, nil
 }
 
+const nonTerminalWorkflows = `-- name: NonTerminalWorkflows :many
+SELECT id, status, updated_at FROM workflows
+WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING') ORDER BY updated_at
+`
+
+type NonTerminalWorkflowsRow struct {
+	ID        uuid.UUID
+	Status    string
+	UpdatedAt pgtype.Timestamptz
+}
+
+func (q *Queries) NonTerminalWorkflows(ctx context.Context) ([]NonTerminalWorkflowsRow, error) {
+	rows, err := q.db.Query(ctx, nonTerminalWorkflows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []NonTerminalWorkflowsRow
+	for rows.Next() {
+		var i NonTerminalWorkflowsRow
+		if err := rows.Scan(&i.ID, &i.Status, &i.UpdatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const terminalWorkflows = `-- name: TerminalWorkflows :many
 SELECT id, status FROM workflows WHERE status IN ('SUCCEEDED', 'FAILED', 'COMPENSATED')
 `
@@ -139,6 +201,31 @@ func (q *Queries) UnbalancedLedgerTransactions(ctx context.Context) ([]Unbalance
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const workflowsWithoutKey = `-- name: WorkflowsWithoutKey :many
+SELECT w.id FROM workflows w
+WHERE NOT EXISTS (SELECT 1 FROM api_idempotency_keys k WHERE k.workflow_id = w.id)
+`
+
+func (q *Queries) WorkflowsWithoutKey(ctx context.Context) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, workflowsWithoutKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
