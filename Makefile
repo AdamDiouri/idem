@@ -3,13 +3,17 @@ export GOTOOLCHAIN := local
 
 GOLANGCI_LINT ?= $(shell command -v golangci-lint 2>/dev/null || echo $(shell go env GOPATH)/bin/golangci-lint)
 
-.PHONY: generate build test lint up down
+.PHONY: generate build build-release test lint up down
 
 generate:
 	go tool sqlc generate
 
 build:
 	go build -o bin/idem ./cmd/idem
+
+# Release build: failpoints compiled out.
+build-release:
+	go build -tags nofailpoint -o bin/idem ./cmd/idem
 
 test:
 	go test -race -count=1 ./...
