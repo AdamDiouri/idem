@@ -18,7 +18,7 @@ func FetchEffects(ctx context.Context, baseURL string) ([]Effect, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetch effects: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch effects: status %d", resp.StatusCode)
 	}
@@ -43,7 +43,7 @@ func PutFaults(ctx context.Context, baseURL string, f Faults) error {
 	if err != nil {
 		return fmt.Errorf("put faults: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("put faults: status %d", resp.StatusCode)
 	}

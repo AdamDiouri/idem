@@ -89,7 +89,7 @@ func (c *Client) CreateCharge(ctx context.Context, idempotencyKey string, req Ch
 		// Timeouts, resets and cancellations: the request may have been processed.
 		return Outcome{Class: Ambiguous, Err: fmt.Errorf("charge request: %w", err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {

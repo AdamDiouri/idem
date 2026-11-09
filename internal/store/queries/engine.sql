@@ -75,3 +75,9 @@ WITH reclaimed AS (
   RETURNING a.step_id
 )
 SELECT count(*)::bigint AS reclaimed FROM reclaimed;
+
+-- name: BumpWorkflowVersion :exec
+UPDATE workflows SET version = version + 1, updated_at = now() WHERE id = sqlc.arg(id);
+
+-- name: SetWorkflowStatus :exec
+UPDATE workflows SET status = sqlc.arg(status)::text, version = version + 1, updated_at = now() WHERE id = sqlc.arg(id);

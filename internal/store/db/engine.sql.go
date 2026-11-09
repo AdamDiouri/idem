@@ -11,6 +11,15 @@ import (
 	"github.com/google/uuid"
 )
 
+const bumpWorkflowVersion = `-- name: BumpWorkflowVersion :exec
+UPDATE workflows SET version = version + 1, updated_at = now() WHERE id = $1
+`
+
+func (q *Queries) BumpWorkflowVersion(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, bumpWorkflowVersion, id)
+	return err
+}
+
 const claimStep = `-- name: ClaimStep :one
 WITH next AS (
   SELECT id FROM steps
@@ -198,4 +207,18 @@ func (q *Queries) ReclaimExpiredLeases(ctx context.Context) (int64, error) {
 	var reclaimed int64
 	err := row.Scan(&reclaimed)
 	return reclaimed, err
+}
+
+const setWorkflowStatus = `-- name: SetWorkflowStatus :exec
+UPDATE workflows SET status = $1::text, version = version + 1, updated_at = now() WHERE id = $2
+`
+
+type SetWorkflowStatusParams struct {
+	Status string
+	ID     uuid.UUID
+}
+
+func (q *Queries) SetWorkflowStatus(ctx context.Context, arg SetWorkflowStatusParams) error {
+	_, err := q.db.Exec(ctx, setWorkflowStatus, arg.Status, arg.ID)
+	return err
 }

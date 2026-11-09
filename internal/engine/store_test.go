@@ -56,6 +56,12 @@ func (s *stubStep) OnSuccess(context.Context, *db.Queries, engine.ClaimedStep, s
 	return nil
 }
 
+func (s *stubStep) successes() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.successCalls
+}
+
 func (s *stubStep) OnPermanentFailure(context.Context, *db.Queries, engine.ClaimedStep) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
