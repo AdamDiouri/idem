@@ -93,11 +93,26 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 	failpoint.Hit(FPAfterClaim)
 
 	step := w.steps[s.Name]
+	var r Result
+	var out provider.Outcome
 	failpoint.Hit(FPBeforeProviderCall)
-	out := w.execute(ctx, step, s)
+	if w.nearKeyRetention(s) {
+		// Re-sending could reach a provider that has forgotten the key and
+		// charge twice. Ask what happened instead (design §9.4).
+		log.Warn("idempotency key near provider retention; resolving by lookup", "key_age", s.KeyAge.String())
+		var found bool
+		out, found = w.lookup(ctx, step, s)
+		if !found && out.Class == provider.Permanent {
+			r = Result{Kind: ResultDead, DeadReason: DeadKeyExpiredUnknown, HTTPStatus: out.HTTPStatus, Error: errString(out.Err)}
+		}
+	} else {
+		out = w.execute(ctx, step, s)
+	}
 	failpoint.Hit(FPAfterProviderCall)
 
-	r := decide(s, out, w.opts.Backoff, w.opts.InFlightDelay)
+	if r.Kind == "" {
+		r = decide(s, out, w.opts.Backoff, w.opts.InFlightDelay)
+	}
 
 	completeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), completeTimeout)
 	defer cancel()
@@ -138,6 +153,34 @@ func (w *Worker) execute(ctx context.Context, step Step, s ClaimedStep) (out pro
 		}
 	}()
 	return step.Execute(ctx, s)
+}
+
+// nearKeyRetention reports whether an in-doubt step's key is old enough that
+// the provider may soon forget it (or already has).
+func (w *Worker) nearKeyRetention(s ClaimedStep) bool {
+	return w.opts.KeyRetention > 0 &&
+		s.PriorStatus == string(ResultInDoubt) &&
+		s.KeyAge >= w.opts.KeyRetention-w.opts.KeyRetentionMargin
+}
+
+// lookup is execute's counterpart for Step.Lookup.
+func (w *Worker) lookup(ctx context.Context, step Step, s ClaimedStep) (out provider.Outcome, found bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			if failpoint.IsCrash(r) {
+				panic(r)
+			}
+			out, found = provider.Outcome{Class: provider.Ambiguous, Err: fmt.Errorf("panic: %v", r)}, false
+		}
+	}()
+	return step.Lookup(ctx, s)
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // Run processes steps until ctx is cancelled. Cancellation stops new claims;

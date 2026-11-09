@@ -310,6 +310,18 @@ func TestControlAPI_RejectsInvalidFaults(t *testing.T) {
 	require.Panics(t, func() { p.SetFaults(faults(fakeprovider.Rule{Endpoint: "charges", Mode: "nope"})) })
 }
 
+func TestCalls(t *testing.T) {
+	p, srv := newServer(t)
+	mustCharge(t, srv.URL, "k1", body("cus_1", 10000))
+	mustCharge(t, srv.URL, "k1", body("cus_1", 10000))
+	r, err := http.Get(srv.URL + "/charges?idempotency_key=k1")
+	require.NoError(t, err)
+	r.Body.Close()
+	require.Equal(t, map[string]int{"POST /charges": 2, "GET /charges": 1}, p.Calls())
+	p.Reset()
+	require.Empty(t, p.Calls())
+}
+
 func TestControlAPI(t *testing.T) {
 	p, srv := newServer(t)
 	ctx := context.Background()

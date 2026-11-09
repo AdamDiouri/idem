@@ -34,8 +34,13 @@ type harness struct {
 
 func newHarness(t *testing.T) harness {
 	t.Helper()
+	return newHarnessWith(t, fakeprovider.Options{Hang: 5 * time.Second})
+}
+
+func newHarnessWith(t *testing.T, opts fakeprovider.Options) harness {
+	t.Helper()
 	t.Cleanup(failpoint.Reset)
-	fake := fakeprovider.New(fakeprovider.Options{Hang: 5 * time.Second})
+	fake := fakeprovider.New(opts)
 	srv := httptest.NewServer(fake.Handler())
 	t.Cleanup(srv.Close)
 	return harness{pool: testutil_NewPool(t), fake: fake, client: provider.NewClient(srv.URL, callTimeout)}
@@ -486,6 +491,58 @@ func TestWorker_ShutdownGraceCancelsStuckStep(t *testing.T) {
 		t.Fatal("Run did not return after the shutdown grace")
 	}
 	require.Equal(t, "IN_DOUBT", h.chargeStatus(t, wf), "the outcome is recorded even though the call was cut short")
+}
+
+func retention(keep, margin time.Duration) func(*engine.WorkerOptions) {
+	return func(o *engine.WorkerOptions) {
+		o.KeyRetention, o.KeyRetentionMargin = keep, margin
+	}
+}
+
+func TestWorker_KeyNearRetentionResolvedByLookup(t *testing.T) {
+	h := newHarnessWith(t, fakeprovider.Options{Hang: 5 * time.Second, KeyRetention: 2 * time.Second})
+	h.setFaults(charges(fakeprovider.ModeTimeoutAfterEffect, 1))
+	wf := submit(t, h.pool, "cus_1")
+	w := h.workerWith("w1", retention(2*time.Second, 1500*time.Millisecond)) // look up once the key is 500ms old
+
+	require.Equal(t, "in_doubt", h.runOnce(t, w).Outcome)
+	time.Sleep(400 * time.Millisecond)
+	require.Equal(t, "succeeded", h.runOnce(t, w).Outcome)
+
+	require.Equal(t, 1, h.fake.Calls()["POST /charges"], "the retry must not re-send the charge")
+	require.Equal(t, 1, h.fake.Calls()["GET /charges"])
+	require.Equal(t, h.fake.Effects()[0].ID,
+		scalar[string](t, h.pool, `SELECT provider_ref FROM steps WHERE workflow_id = $1 AND name = 'charge'`, wf))
+	h.assertChargedOnce(t, wf)
+}
+
+func TestWorker_KeyPastRetentionUnknownIsDead_F23(t *testing.T) {
+	h := newHarnessWith(t, fakeprovider.Options{Hang: 5 * time.Second, KeyRetention: 300 * time.Millisecond})
+	h.setFaults(charges(fakeprovider.ModeTimeoutBeforeEffect, 1))
+	wf := submit(t, h.pool, "cus_1")
+	w := h.workerWith("w1", retention(300*time.Millisecond, 100*time.Millisecond))
+
+	require.Equal(t, "in_doubt", h.runOnce(t, w).Outcome)
+	time.Sleep(400 * time.Millisecond)
+	require.Equal(t, "dead", h.runOnce(t, w).Outcome)
+
+	require.Equal(t, engine.DeadKeyExpiredUnknown, scalar[string](t, h.pool, `SELECT dead_reason FROM steps WHERE workflow_id = $1`, wf))
+	require.Equal(t, "NEEDS_ATTENTION", scalar[string](t, h.pool, `SELECT status FROM workflows WHERE id = $1`, wf))
+	require.Equal(t, 1, h.fake.Calls()["POST /charges"], "never charge again with a key the provider may have forgotten")
+	require.Empty(t, h.fake.Effects())
+	h.assertNoViolations(t)
+}
+
+func TestWorker_FreshInDoubtStillRetriesWithSameKey(t *testing.T) {
+	h := newHarness(t)
+	h.setFaults(charges(fakeprovider.ModeTimeoutAfterEffect, 1))
+	wf := submit(t, h.pool, "cus_1")
+	w := h.workerWith("w1", retention(time.Hour, time.Minute))
+
+	require.Equal(t, "in_doubt", h.runOnce(t, w).Outcome)
+	require.Equal(t, "succeeded", h.runOnce(t, w).Outcome)
+	require.Equal(t, 0, h.fake.Calls()["GET /charges"])
+	h.assertChargedOnce(t, wf)
 }
 
 func TestWorker_RunFinishesInFlightStepOnCancel(t *testing.T) {

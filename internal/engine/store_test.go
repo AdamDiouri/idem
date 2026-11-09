@@ -47,6 +47,10 @@ func (s *stubStep) Execute(ctx context.Context, c engine.ClaimedStep) provider.O
 	return provider.Outcome{Class: provider.Success, ProviderRef: "ch_stub", HTTPStatus: 201}
 }
 
+func (s *stubStep) Lookup(context.Context, engine.ClaimedStep) (provider.Outcome, bool) {
+	return provider.Outcome{Class: provider.Ambiguous}, false
+}
+
 func (s *stubStep) OnSuccess(context.Context, *db.Queries, engine.ClaimedStep, string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

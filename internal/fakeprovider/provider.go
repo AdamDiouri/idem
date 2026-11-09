@@ -69,6 +69,7 @@ type Provider struct {
 	mu       sync.Mutex
 	keys     map[string]*keyState
 	effects  []Effect
+	calls    map[string]int
 	faults   Faults
 	ruleUses []int
 	rng      *rand.Rand
@@ -123,16 +124,36 @@ func (p *Provider) Effects() []Effect {
 	return append([]Effect(nil), p.effects...)
 }
 
-// Reset forgets all keys, effects and faults.
+// Calls returns how many requests each API endpoint received ("POST /charges",
+// "GET /charges"), so tests can prove which path a client took.
+func (p *Provider) Calls() map[string]int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]int, len(p.calls))
+	for k, v := range p.calls {
+		out[k] = v
+	}
+	return out
+}
+
+func (p *Provider) count(endpoint string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls[endpoint]++
+}
+
+// Reset forgets all keys, effects, call counts and faults.
 func (p *Provider) Reset() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.keys = map[string]*keyState{}
 	p.effects = nil
+	p.calls = map[string]int{}
 	p.setFaultsLocked(Faults{})
 }
 
 func (p *Provider) postCharge(w http.ResponseWriter, r *http.Request) {
+	p.count("POST /charges")
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
 		writeError(w, http.StatusBadRequest, "idempotency_key_required")
@@ -260,6 +281,7 @@ func (p *Provider) hang(ctx context.Context) {
 }
 
 func (p *Provider) getCharge(w http.ResponseWriter, r *http.Request) {
+	p.count("GET /charges")
 	key := r.URL.Query().Get("idempotency_key")
 	p.mu.Lock()
 	p.expireLocked(key)

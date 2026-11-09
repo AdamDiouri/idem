@@ -90,6 +90,10 @@ type Result struct {
 type Step interface {
 	Name() string
 	Execute(ctx context.Context, s ClaimedStep) provider.Outcome
+	// Lookup asks the provider what happened to the request sent with
+	// s.IdempotencyKey, without sending it again. found is false when the
+	// provider has no record (Class Permanent) or the lookup failed (Ambiguous).
+	Lookup(ctx context.Context, s ClaimedStep) (out provider.Outcome, found bool)
 	OnSuccess(ctx context.Context, q *db.Queries, s ClaimedStep, providerRef string) error
 	OnPermanentFailure(ctx context.Context, q *db.Queries, s ClaimedStep) error
 }
