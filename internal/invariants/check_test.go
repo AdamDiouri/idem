@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,7 +96,7 @@ func TestCheck_I1_DuplicateEffect_F27(t *testing.T) {
 	e.charge(t, wf, "key-1")
 	e.charge(t, wf, "key-2")
 
-	v := e.check(t)
+	v := only(e.check(t), "I1") // no postings either, so I3 also fires
 	require.Len(t, v, 1)
 	require.Equal(t, "I1", v[0].Invariant)
 	require.Equal(t, wf.String(), v[0].WorkflowID)
@@ -109,7 +110,7 @@ func TestCheck_I1_DifferentWorkflowsOK(t *testing.T) {
 	wf2, _ := newWorkflow(t, e.pool)
 	e.charge(t, wf1, "key-1")
 	e.charge(t, wf2, "key-2")
-	require.Empty(t, e.check(t))
+	require.Empty(t, only(e.check(t), "I1"))
 }
 
 func TestCheck_I2_Unbalanced(t *testing.T) {
@@ -131,11 +132,125 @@ func TestCheck_I2_Unbalanced(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, tx.Commit(ctx))
 
-	v := e.check(t)
+	v := only(e.check(t), "I2") // a posting without an effect also breaks I3
 	require.Len(t, v, 2)
 	require.Equal(t, "I2", v[0].Invariant)
 	require.Equal(t, "", v[0].WorkflowID, "global imbalance sorts first")
 	require.Equal(t, "I2", v[1].Invariant)
 	require.Equal(t, wf.String(), v[1].WorkflowID)
 	require.Contains(t, v[1].Detail, txnID.String())
+}
+
+func only(vs []invariants.Violation, invariant string) []invariants.Violation {
+	var out []invariants.Violation
+	for _, v := range vs {
+		if v.Invariant == invariant {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func (e env) payout(t *testing.T, wf uuid.UUID, key string) {
+	t.Helper()
+	out := e.client.CreatePayout(context.Background(), key,
+		provider.PayoutRequest{AmountCents: 9825, Currency: "EUR", MerchantID: "mer_1", WorkflowID: wf})
+	require.Equal(t, provider.Success, out.Class, "err: %v", out.Err)
+}
+
+func (e env) postKind(t *testing.T, wf, step uuid.UUID, kind string, entries []ledger.Entry) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := e.pool.Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+	require.NoError(t, ledger.Post(ctx, db.New(tx), ledger.Txn{WorkflowID: wf, StepID: step, Kind: kind, Entries: entries}))
+	require.NoError(t, tx.Commit(ctx))
+}
+
+func (e env) setStatus(t *testing.T, wf uuid.UUID, status string) {
+	t.Helper()
+	_, err := e.pool.Exec(context.Background(), `UPDATE workflows SET status = $2 WHERE id = $1`, wf, status)
+	require.NoError(t, err)
+}
+
+func requireViolation(t *testing.T, vs []invariants.Violation, invariant string, wf uuid.UUID, detail string) {
+	t.Helper()
+	for _, v := range vs {
+		if v.Invariant == invariant && v.WorkflowID == wf.String() && strings.Contains(v.Detail, detail) {
+			return
+		}
+	}
+	t.Fatalf("no %s violation for %s mentioning %q in %v", invariant, wf, detail, vs)
+}
+
+func TestCheck_I3_EffectWithoutPosting(t *testing.T) {
+	e := setup(t)
+	wf, _ := newWorkflow(t, e.pool)
+	e.charge(t, wf, "key-1")
+	requireViolation(t, e.check(t), "I3", wf, "charge")
+}
+
+func TestCheck_I3_PostingWithoutEffect(t *testing.T) {
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	e.post(t, wf, step)
+	requireViolation(t, e.check(t), "I3", wf, "charge")
+}
+
+func TestCheck_I3_AmountMismatch(t *testing.T) {
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	e.charge(t, wf, "key-1") // 10000 at the provider
+	e.postKind(t, wf, step, "charge", ledger.ChargeEntries(9999, 175))
+	requireViolation(t, e.check(t), "I3", wf, "9999")
+}
+
+func TestCheck_I5_PayoutWithoutCharge(t *testing.T) {
+	e := setup(t)
+	wf, _ := newWorkflow(t, e.pool)
+	e.payout(t, wf, "po-1")
+	requireViolation(t, e.check(t), "I5", wf, "payout")
+}
+
+func TestCheck_I7_SucceededWithoutPayout(t *testing.T) {
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	e.charge(t, wf, "key-1")
+	e.post(t, wf, step)
+	e.setStatus(t, wf, "SUCCEEDED")
+	v := e.check(t)
+	requireViolation(t, v, "I7", wf, "SUCCEEDED")
+	require.Len(t, v, 1)
+}
+
+func TestCheck_I7_FailedWithEffect(t *testing.T) {
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	e.charge(t, wf, "key-1")
+	e.post(t, wf, step)
+	e.setStatus(t, wf, "FAILED")
+	requireViolation(t, e.check(t), "I7", wf, "FAILED")
+}
+
+func TestCheck_I7_CompensatedWithPayout(t *testing.T) {
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	e.charge(t, wf, "key-1")
+	e.post(t, wf, step)
+	e.payout(t, wf, "po-1")
+	e.postKind(t, wf, step, "payout", ledger.PayoutEntries(10000, 175))
+	e.setStatus(t, wf, "COMPENSATED")
+	requireViolation(t, e.check(t), "I7", wf, "COMPENSATED")
+}
+
+func TestCheck_AllInvariantsCleanFlow(t *testing.T) {
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	e.charge(t, wf, "key-1")
+	e.post(t, wf, step)
+	e.payout(t, wf, "po-1")
+	e.postKind(t, wf, step, "payout", ledger.PayoutEntries(10000, 175))
+	e.setStatus(t, wf, "SUCCEEDED")
+	require.Empty(t, e.check(t))
 }

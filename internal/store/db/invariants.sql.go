@@ -22,6 +22,72 @@ func (q *Queries) LedgerGlobalSum(ctx context.Context) (int64, error) {
 	return total, err
 }
 
+const ledgerTransactionsSummary = `-- name: LedgerTransactionsSummary :many
+SELECT t.workflow_id, t.kind,
+       COALESCE(sum(e.amount_cents) FILTER (WHERE e.amount_cents > 0), 0)::bigint AS debits
+FROM ledger_transactions t
+LEFT JOIN ledger_entries e ON e.transaction_id = t.id
+GROUP BY t.id, t.workflow_id, t.kind
+`
+
+type LedgerTransactionsSummaryRow struct {
+	WorkflowID uuid.UUID
+	Kind       string
+	Debits     int64
+}
+
+// One row per ledger transaction with the sum of its debits, which equals the
+// amount of money that moved at the provider for every kind:
+// charge +amount; payout +(amount-fee); refund (amount-fee)+fee.
+func (q *Queries) LedgerTransactionsSummary(ctx context.Context) ([]LedgerTransactionsSummaryRow, error) {
+	rows, err := q.db.Query(ctx, ledgerTransactionsSummary)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LedgerTransactionsSummaryRow
+	for rows.Next() {
+		var i LedgerTransactionsSummaryRow
+		if err := rows.Scan(&i.WorkflowID, &i.Kind, &i.Debits); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const terminalWorkflows = `-- name: TerminalWorkflows :many
+SELECT id, status FROM workflows WHERE status IN ('SUCCEEDED', 'FAILED', 'COMPENSATED')
+`
+
+type TerminalWorkflowsRow struct {
+	ID     uuid.UUID
+	Status string
+}
+
+func (q *Queries) TerminalWorkflows(ctx context.Context) ([]TerminalWorkflowsRow, error) {
+	rows, err := q.db.Query(ctx, terminalWorkflows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TerminalWorkflowsRow
+	for rows.Next() {
+		var i TerminalWorkflowsRow
+		if err := rows.Scan(&i.ID, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const unbalancedLedgerTransactions = `-- name: UnbalancedLedgerTransactions :many
 SELECT t.id, t.workflow_id, COALESCE(sum(e.amount_cents), 0)::bigint AS total
 FROM ledger_transactions t
