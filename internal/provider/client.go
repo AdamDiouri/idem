@@ -12,8 +12,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -136,10 +138,18 @@ func (c *Client) LookupCharge(ctx context.Context, idempotencyKey string, want C
 // do sends req. ok is false when no response was received; out then holds the
 // classified transport failure.
 func (c *Client) do(req *http.Request, what string) (int, http.Header, []byte, Outcome, bool) {
+	// The transport may silently resend this request on a new connection (it
+	// treats requests with an Idempotency-Key as replayable). Then the final
+	// error describes only the last try, so record whether ANY try wrote the
+	// request to a connection: if one did, the provider may have processed it.
+	var wrote atomic.Bool
+	trace := &httptrace.ClientTrace{WroteHeaders: func() { wrote.Store(true) }}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+
 	resp, err := c.http.Do(req)
 	if err != nil {
 		class := Ambiguous // timeouts, resets, cancellations: may have been processed
-		if notSent(err) {
+		if !wrote.Load() && notSent(err) {
 			class = NoEffect
 		}
 		return 0, nil, nil, Outcome{Class: class, Err: fmt.Errorf("%s: %w", what, err)}, false
@@ -153,8 +163,9 @@ func (c *Client) do(req *http.Request, what string) (int, http.Header, []byte, O
 	return resp.StatusCode, resp.Header, body, Outcome{}, true
 }
 
-// notSent reports whether err proves the request never reached the provider:
-// the connection could not be established or the host could not be resolved.
+// notSent reports whether err is a connection-establishment failure (refused
+// dial, DNS). On its own this is not proof: callers must also know that no
+// earlier try wrote the request (see do).
 func notSent(err error) bool {
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {

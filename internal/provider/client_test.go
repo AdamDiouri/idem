@@ -2,6 +2,8 @@ package provider_test
 
 import (
 	"context"
+	"io"
+	"sync/atomic"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -73,6 +75,38 @@ func TestCreateCharge_ServerGoneIsNoEffect(t *testing.T) {
 	out := provider.NewClient(url, time.Second).CreateCharge(context.Background(), "key-1", chargeReq("cus_1"))
 	require.Equal(t, provider.NoEffect, out.Class)
 	require.Error(t, out.Err)
+}
+
+// Review finding (critical): Go's transport silently retries a POST carrying an
+// Idempotency-Key on a new connection when a reused connection drops. If the
+// provider read the first send and then died, the caller only sees the retry's
+// "connection refused" — but the charge may have happened. Must be Ambiguous.
+func TestCreateCharge_RequestSentThenProviderDiesIsAmbiguous(t *testing.T) {
+	var requests atomic.Int32
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"ch_1","status":"succeeded","amount_cents":10000,"currency":"EUR"}`))
+			return
+		}
+		// Second request: read in full, then the provider dies before answering.
+		_ = srv.Listener.Close()
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c := provider.NewClient(srv.URL, 2*time.Second)
+	first := c.CreateCharge(context.Background(), "key-1", chargeReq("cus_1"))
+	require.Equal(t, provider.Success, first.Class, "err: %v", first.Err)
+
+	second := c.CreateCharge(context.Background(), "key-2", chargeReq("cus_1")) // reuses the keep-alive connection
+	require.GreaterOrEqual(t, requests.Load(), int32(2), "the provider received the second charge")
+	require.Equal(t, provider.Ambiguous, second.Class, "err: %v", second.Err)
 }
 
 func TestCreateCharge_CancelledContextIsAmbiguous(t *testing.T) {
