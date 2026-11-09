@@ -31,6 +31,10 @@ type Options struct {
 	// Hang is how long timeout faults hang before giving up (default 30s).
 	// A hang also ends when the client goes away.
 	Hang time.Duration
+	// KeyRetention is how long completed idempotency keys are remembered
+	// (0 = forever). Like a real provider, an expired key is unknown: lookups
+	// return 404 and a new request with it performs a NEW charge.
+	KeyRetention time.Duration
 }
 
 // Effect is one real movement of money performed by the provider.
@@ -51,6 +55,7 @@ type chargeRequest struct {
 }
 
 type keyState struct {
+	createdAt   time.Time
 	inFlight    bool
 	fingerprint string
 	status      int
@@ -64,6 +69,7 @@ type Provider struct {
 	mu       sync.Mutex
 	keys     map[string]*keyState
 	effects  []Effect
+	calls    map[string]int
 	faults   Faults
 	ruleUses []int
 	rng      *rand.Rand
@@ -118,16 +124,36 @@ func (p *Provider) Effects() []Effect {
 	return append([]Effect(nil), p.effects...)
 }
 
-// Reset forgets all keys, effects and faults.
+// Calls returns how many requests each API endpoint received ("POST /charges",
+// "GET /charges"), so tests can prove which path a client took.
+func (p *Provider) Calls() map[string]int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]int, len(p.calls))
+	for k, v := range p.calls {
+		out[k] = v
+	}
+	return out
+}
+
+func (p *Provider) count(endpoint string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls[endpoint]++
+}
+
+// Reset forgets all keys, effects, call counts and faults.
 func (p *Provider) Reset() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.keys = map[string]*keyState{}
 	p.effects = nil
+	p.calls = map[string]int{}
 	p.setFaultsLocked(Faults{})
 }
 
 func (p *Provider) postCharge(w http.ResponseWriter, r *http.Request) {
+	p.count("POST /charges")
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
 		writeError(w, http.StatusBadRequest, "idempotency_key_required")
@@ -141,6 +167,7 @@ func (p *Provider) postCharge(w http.ResponseWriter, r *http.Request) {
 	fp := fingerprint(req)
 
 	p.mu.Lock()
+	p.expireLocked(key)
 	if ks, exists := p.keys[key]; exists {
 		p.mu.Unlock()
 		switch {
@@ -153,7 +180,7 @@ func (p *Provider) postCharge(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	p.keys[key] = &keyState{inFlight: true, fingerprint: fp}
+	p.keys[key] = &keyState{createdAt: time.Now(), inFlight: true, fingerprint: fp}
 	mode := p.pickFault("charges")
 	p.mu.Unlock()
 
@@ -165,6 +192,10 @@ func (p *Provider) postCharge(w http.ResponseWriter, r *http.Request) {
 	case ModeErrorBeforeEffect:
 		p.release(key)
 		writeError(w, http.StatusInternalServerError, "internal_error")
+	case ModeRateLimit:
+		p.release(key)
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate_limited")
 	case ModeTimeoutAfterEffect:
 		status, b := p.perform(key, req)
 		p.hang(r.Context())
@@ -233,6 +264,15 @@ func (p *Provider) release(key string) {
 	}
 }
 
+// expireLocked forgets key if it completed longer than KeyRetention ago.
+// Callers must hold p.mu.
+func (p *Provider) expireLocked(key string) {
+	ks, ok := p.keys[key]
+	if ok && !ks.inFlight && p.opts.KeyRetention > 0 && time.Since(ks.createdAt) > p.opts.KeyRetention {
+		delete(p.keys, key)
+	}
+}
+
 func (p *Provider) hang(ctx context.Context) {
 	select {
 	case <-ctx.Done():
@@ -241,8 +281,10 @@ func (p *Provider) hang(ctx context.Context) {
 }
 
 func (p *Provider) getCharge(w http.ResponseWriter, r *http.Request) {
+	p.count("GET /charges")
 	key := r.URL.Query().Get("idempotency_key")
 	p.mu.Lock()
+	p.expireLocked(key)
 	ks, ok := p.keys[key]
 	var status int
 	var b []byte

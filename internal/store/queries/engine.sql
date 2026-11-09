@@ -21,7 +21,10 @@ SET status             = 'RUNNING',
     first_attempted_at = COALESCE(s.first_attempted_at, now())
 FROM next, workflows w
 WHERE s.id = next.id AND w.id = s.workflow_id
-RETURNING s.id, s.workflow_id, s.name, s.idempotency_key, s.lease_epoch, s.attempt_count, s.prior_status, w.input;
+RETURNING s.id, s.workflow_id, s.name, s.idempotency_key, s.lease_epoch, s.attempt_count, s.prior_status,
+          s.max_attempts,
+          (EXTRACT(EPOCH FROM (now() - s.first_attempted_at)) * 1000)::bigint AS key_age_ms,
+          w.input;
 
 -- name: InsertStepAttempt :exec
 INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id)
@@ -40,7 +43,8 @@ SET status           = sqlc.arg(status)::text,
     lease_expires_at = NULL,
     provider_ref     = COALESCE(sqlc.narg(provider_ref)::text, provider_ref),
     last_error       = sqlc.narg(last_error)::text,
-    run_after        = CASE WHEN sqlc.arg(status)::text = 'IN_DOUBT'
+    dead_reason      = sqlc.narg(dead_reason)::text,
+    run_after        = CASE WHEN sqlc.arg(status)::text IN ('IN_DOUBT', 'PENDING')
                             THEN now() + (sqlc.arg(retry_ms)::bigint * interval '1 millisecond')
                             ELSE run_after END
 WHERE id = sqlc.arg(id) AND lease_epoch = sqlc.arg(lease_epoch) AND status = 'RUNNING';
@@ -81,3 +85,10 @@ UPDATE workflows SET version = version + 1, updated_at = now() WHERE id = sqlc.a
 
 -- name: SetWorkflowStatus :exec
 UPDATE workflows SET status = sqlc.arg(status)::text, version = version + 1, updated_at = now() WHERE id = sqlc.arg(id);
+
+-- name: FindStuckWorkflows :many
+SELECT id, status, (EXTRACT(EPOCH FROM (now() - updated_at)) * 1000)::bigint AS age_ms
+FROM workflows
+WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+  AND updated_at < now() - (sqlc.arg(older_than_ms)::bigint * interval '1 millisecond')
+ORDER BY updated_at;

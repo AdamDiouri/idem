@@ -2,6 +2,8 @@ package provider_test
 
 import (
 	"context"
+	"io"
+	"sync/atomic"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -64,14 +66,47 @@ func TestCreateCharge_TimeoutIsAmbiguous(t *testing.T) {
 	require.Len(t, p.Effects(), 1, "money moved even though the outcome is ambiguous")
 }
 
-func TestCreateCharge_ServerGoneIsAmbiguous(t *testing.T) {
+// A refused connection means the request never left this machine: no effect.
+func TestCreateCharge_ServerGoneIsNoEffect(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	url := srv.URL
 	srv.Close()
 
 	out := provider.NewClient(url, time.Second).CreateCharge(context.Background(), "key-1", chargeReq("cus_1"))
-	require.Equal(t, provider.Ambiguous, out.Class)
+	require.Equal(t, provider.NoEffect, out.Class)
 	require.Error(t, out.Err)
+}
+
+// Review finding (critical): Go's transport silently retries a POST carrying an
+// Idempotency-Key on a new connection when a reused connection drops. If the
+// provider read the first send and then died, the caller only sees the retry's
+// "connection refused" — but the charge may have happened. Must be Ambiguous.
+func TestCreateCharge_RequestSentThenProviderDiesIsAmbiguous(t *testing.T) {
+	var requests atomic.Int32
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"ch_1","status":"succeeded","amount_cents":10000,"currency":"EUR"}`))
+			return
+		}
+		// Second request: read in full, then the provider dies before answering.
+		_ = srv.Listener.Close()
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c := provider.NewClient(srv.URL, 2*time.Second)
+	first := c.CreateCharge(context.Background(), "key-1", chargeReq("cus_1"))
+	require.Equal(t, provider.Success, first.Class, "err: %v", first.Err)
+
+	second := c.CreateCharge(context.Background(), "key-2", chargeReq("cus_1")) // reuses the keep-alive connection
+	require.GreaterOrEqual(t, requests.Load(), int32(2), "the provider received the second charge")
+	require.Equal(t, provider.Ambiguous, second.Class, "err: %v", second.Err)
 }
 
 func TestCreateCharge_CancelledContextIsAmbiguous(t *testing.T) {
@@ -88,24 +123,26 @@ func TestClassify(t *testing.T) {
 		name   string
 		status int
 		body   string
-		want   provider.Class
+		want     provider.Class
+		inFlight bool
 	}{
-		{"201 valid", 201, valid, provider.Success},
-		{"200 valid", 200, valid, provider.Success},
-		{"unparseable 2xx", 201, `not json`, provider.Ambiguous},
-		{"amount mismatch", 201, `{"id":"ch_1","status":"succeeded","amount_cents":9999}`, provider.Ambiguous},
-		{"pending status", 201, `{"id":"ch_1","status":"pending","amount_cents":10000}`, provider.Ambiguous},
-		{"missing id", 201, `{"status":"succeeded","amount_cents":10000}`, provider.Ambiguous},
-		{"400", 400, `{"error":{"code":"invalid_request"}}`, provider.Permanent},
-		{"402", 402, `{"error":{"code":"card_declined"}}`, provider.Permanent},
-		{"422 key reused", 422, `{"error":{"code":"idempotency_key_reused"}}`, provider.Ambiguous},
-		{"422 other", 422, `{"error":{"code":"invalid_amount"}}`, provider.Permanent},
-		{"409", 409, `{"error":{"code":"idempotency_key_in_flight"}}`, provider.Ambiguous},
-		{"429", 429, ``, provider.Ambiguous},
-		{"500", 500, ``, provider.Ambiguous},
-		{"502", 502, ``, provider.Ambiguous},
-		{"503", 503, ``, provider.Ambiguous},
-		{"301", 301, ``, provider.Ambiguous},
+		{"201 valid", 201, valid, provider.Success, false},
+		{"200 valid", 200, valid, provider.Success, false},
+		{"unparseable 2xx", 201, `not json`, provider.Ambiguous, false},
+		{"amount mismatch", 201, `{"id":"ch_1","status":"succeeded","amount_cents":9999}`, provider.Ambiguous, false},
+		{"pending status", 201, `{"id":"ch_1","status":"pending","amount_cents":10000}`, provider.Ambiguous, false},
+		{"missing id", 201, `{"status":"succeeded","amount_cents":10000}`, provider.Ambiguous, false},
+		{"400", 400, `{"error":{"code":"invalid_request"}}`, provider.Permanent, false},
+		{"402", 402, `{"error":{"code":"card_declined"}}`, provider.Permanent, false},
+		{"422 key reused", 422, `{"error":{"code":"idempotency_key_reused"}}`, provider.Ambiguous, false},
+		{"422 other", 422, `{"error":{"code":"invalid_amount"}}`, provider.Permanent, false},
+		{"409", 409, `{"error":{"code":"idempotency_key_in_flight"}}`, provider.Ambiguous, true},
+		{"429", 429, ``, provider.NoEffect, false},
+		{"currency mismatch", 201, `{"id":"ch_1","status":"succeeded","amount_cents":10000,"currency":"USD"}`, provider.Ambiguous, false},
+		{"500", 500, ``, provider.Ambiguous, false},
+		{"502", 502, ``, provider.Ambiguous, false},
+		{"503", 503, ``, provider.Ambiguous, false},
+		{"301", 301, ``, provider.Ambiguous, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -119,6 +156,7 @@ func TestClassify(t *testing.T) {
 
 			out := provider.NewClient(srv.URL, time.Second).CreateCharge(context.Background(), "key-1", chargeReq("cus_1"))
 			require.Equal(t, c.want, out.Class, "err: %v", out.Err)
+			require.Equal(t, c.inFlight, out.InFlight)
 			require.Equal(t, c.status, out.HTTPStatus)
 			require.Equal(t, "key-1", gotKey)
 			if c.want != provider.Success {
@@ -128,7 +166,65 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestRetryAfter(t *testing.T) {
+	cases := []struct {
+		header string
+		want   time.Duration
+	}{
+		{"1", time.Second},
+		{"", 0},
+		{"abc", 0},
+		{"-5", 0},
+		{"99999999999", time.Hour},
+		{"Wed, 21 Oct 2015 07:28:00 GMT", 0}, // HTTP-date form is not supported
+	}
+	for _, c := range cases {
+		t.Run(c.header, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if c.header != "" {
+					w.Header().Set("Retry-After", c.header)
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+			}))
+			defer srv.Close()
+			out := provider.NewClient(srv.URL, time.Second).CreateCharge(context.Background(), "key-1", chargeReq("cus_1"))
+			require.Equal(t, provider.NoEffect, out.Class)
+			require.Equal(t, c.want, out.RetryAfter)
+		})
+	}
+}
+
+func TestLookupCharge(t *testing.T) {
+	ctx := context.Background()
+	_, url := fake(t)
+	c := provider.NewClient(url, time.Second)
+
+	out, found := c.LookupCharge(ctx, "key-1", chargeReq("cus_1"))
+	require.False(t, found)
+	require.Equal(t, provider.Permanent, out.Class)
+	require.Error(t, out.Err)
+
+	created := c.CreateCharge(ctx, "key-1", chargeReq("cus_1"))
+	out, found = c.LookupCharge(ctx, "key-1", chargeReq("cus_1"))
+	require.True(t, found)
+	require.Equal(t, provider.Success, out.Class)
+	require.Equal(t, created.ProviderRef, out.ProviderRef)
+
+	c.CreateCharge(ctx, "key-2", chargeReq("cus_decline_1"))
+	out, found = c.LookupCharge(ctx, "key-2", chargeReq("cus_decline_1"))
+	require.True(t, found)
+	require.Equal(t, provider.Permanent, out.Class)
+
+	srv := httptest.NewServer(http.NotFoundHandler())
+	gone := srv.URL
+	srv.Close()
+	out, found = provider.NewClient(gone, time.Second).LookupCharge(ctx, "key-1", chargeReq("cus_1"))
+	require.False(t, found)
+	require.Equal(t, provider.Ambiguous, out.Class)
+}
+
 func TestClassString(t *testing.T) {
+	require.Equal(t, "no_effect", provider.NoEffect.String())
 	require.Equal(t, "success", provider.Success.String())
 	require.Equal(t, "permanent", provider.Permanent.String())
 	require.Equal(t, "ambiguous", provider.Ambiguous.String())

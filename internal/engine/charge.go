@@ -31,12 +31,20 @@ func NewChargeStep(client *provider.Client) Step {
 func (c *chargeStep) Name() string { return stepCharge }
 
 func (c *chargeStep) Execute(ctx context.Context, s ClaimedStep) provider.Outcome {
-	return c.client.CreateCharge(ctx, s.IdempotencyKey, provider.ChargeRequest{
+	return c.client.CreateCharge(ctx, s.IdempotencyKey, chargeRequest(s))
+}
+
+func (c *chargeStep) Lookup(ctx context.Context, s ClaimedStep) (provider.Outcome, bool) {
+	return c.client.LookupCharge(ctx, s.IdempotencyKey, chargeRequest(s))
+}
+
+func chargeRequest(s ClaimedStep) provider.ChargeRequest {
+	return provider.ChargeRequest{
 		AmountCents: s.Input.AmountCents,
 		Currency:    s.Input.Currency,
 		CustomerID:  s.Input.CustomerID,
 		WorkflowID:  s.WorkflowID,
-	})
+	}
 }
 
 // OnSuccess posts the charge to the ledger and creates the payout step, in the

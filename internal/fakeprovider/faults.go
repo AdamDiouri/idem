@@ -11,6 +11,7 @@ const (
 	ModeErrorBeforeEffect   = "error_before_effect"
 	ModeErrorAfterEffect    = "error_after_effect"
 	ModeDecline             = "decline"
+	ModeRateLimit           = "rate_limit" // 429 + Retry-After: 1, no effect
 )
 
 // Faults configures fault injection. The first matching rule wins.
@@ -34,6 +35,7 @@ var validModes = map[string]bool{
 	ModeErrorBeforeEffect:   true,
 	ModeErrorAfterEffect:    true,
 	ModeDecline:             true,
+	ModeRateLimit:           true,
 }
 
 // Validate rejects rules that would otherwise be silently ignored, so a typo

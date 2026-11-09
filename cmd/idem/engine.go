@@ -71,12 +71,15 @@ func workerCmd() *cobra.Command {
 			}
 			client := provider.NewClient(e.cfg.ProviderURL, e.cfg.ProviderTimeout)
 			return engine.NewWorker(e.pool, engine.WorkerOptions{
-				ID:           id,
-				Steps:        []engine.Step{engine.NewChargeStep(client)},
-				LeaseTTL:     e.cfg.LeaseTTL,
-				PollInterval: e.cfg.PollInterval,
-				RetryDelay:   e.cfg.RetryDelay,
-				Logger:       e.logger,
+				ID:                 id,
+				Steps:              []engine.Step{engine.NewChargeStep(client)},
+				LeaseTTL:           e.cfg.LeaseTTL,
+				PollInterval:       e.cfg.PollInterval,
+				Backoff:            engine.Backoff{Base: e.cfg.RetryBase, Cap: e.cfg.RetryCap},
+				KeyRetention:       e.cfg.ProviderKeyRetention,
+				KeyRetentionMargin: e.cfg.KeyRetentionMargin,
+				ShutdownGrace:      e.cfg.ShutdownGrace,
+				Logger:             e.logger,
 			}).Run(e.ctx)
 		},
 	}
@@ -93,7 +96,7 @@ func sweeperCmd() *cobra.Command {
 			}
 			defer cleanup()
 			e.logger.Info("sweeper started", "interval", e.cfg.SweepInterval.String())
-			return engine.RunSweeper(e.ctx, e.pool, e.cfg.SweepInterval, e.logger)
+			return engine.RunSweeper(e.ctx, e.pool, e.cfg.SweepInterval, e.cfg.StuckAfter, e.logger)
 		},
 	}
 }

@@ -58,6 +58,7 @@ type Step struct {
 	LastError        *string
 	FirstAttemptedAt pgtype.Timestamptz
 	CreatedAt        pgtype.Timestamptz
+	DeadReason       *string
 }
 
 type StepAttempt struct {

@@ -470,9 +470,9 @@ The heart of the design. Every row should eventually map to at least one automat
 - In-memory state; restarts are out of the fault model.
 
 ### 14.2 Failpoints
-`failpoint.Hit("after_provider_call")` calls compiled into the engine. Configured via env (`FAILPOINTS=after_provider_call=exit:0.05`) with actions `exit`, `panic`, `sleep:<d>`. Compiled out with a build tag in release builds (`make build-release`, tag `nofailpoint`). Dev/compose images keep them compiled in but inactive unless `IDEM_FAILPOINTS` is set, so chaos runs can use them.
+`failpoint.Hit("after_provider_call")` calls compiled into the engine. Configured via env (`IDEM_FAILPOINTS=after_provider_call=exit@0.05`) with actions `exit`, `panic`, `sleep:<d>` and an optional `@probability`; unknown names are rejected at startup. Compiled out with a build tag in release builds (`make build-release`, tag `nofailpoint`). Dev/compose images keep them compiled in but inactive unless `IDEM_FAILPOINTS` is set, so chaos runs can use them.
 
-Initial set: `after_claim`, `before_provider_call`, `after_provider_call`, `before_commit`, `after_commit`, `sweeper_after_select`. (M2 adds `webhook_after_insert`.)
+Initial set: `after_claim`, `before_provider_call`, `after_provider_call`, `before_commit`, `after_commit`. (`sweeper_after_select` is not needed: lease reclaim is a single atomic statement with no window between select and update. M2 adds `webhook_after_insert`.)
 
 ### 14.3 Test layers
 1. **Unit** — table-driven state-machine transitions, outcome classification, backoff, key derivation, signature verification.
@@ -497,7 +497,7 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 |---|---|---|
 | **1.1** Skeleton | Repo, migrations, `docker compose` (Postgres), `POST /workflows` with inbound idempotency | F1–F3 tests |
 | **1.2** One step, end to end | Claim/lease/fencing, `charge` against fake provider, ledger posting, fake provider + oracle, failpoint package, invariant checker v0 (I1, I2), **lease-expiry reclaim (pulled forward from 1.3)** | F4–F6, F7–F9 (fixed-delay retry), F10, F12, F13, F27 |
-| **1.3** Ambiguity | Outcome classification, retries with jitter, `IN_DOUBT`, sweeper, `DEAD`/`NEEDS_ATTENTION` | F7–F9, F11, F22–F25 |
+| **1.3** Ambiguity | Outcome classification (incl. no-effect 429 / refused connections, `Retry-After`, 409 in-flight), retries with full-jitter backoff, sticky `IN_DOUBT`, `DEAD`/`NEEDS_ATTENTION` with `dead_reason`, lookup near key retention, stuck-workflow reporting, bounded shutdown | F7–F9, F11, F22, F23, F25 |
 | **1.4** Full flow | `payout` (synchronous), `refund` compensation, fees, I3, I5, I7 | F20, F21 |
 | **1.5** Chaos harness | `cmd/chaos`, process kill/pause/DB restart, report | F13, F14, F26; full invariant suite |
 | **1.6** Operability | Metrics, structured logs, admin CLI, runbook for `NEEDS_ATTENTION` | — |
@@ -510,6 +510,12 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 ### Later milestones (outline only)
 - **M2** — **Async payouts + webhooks first** (inbox, HMAC signatures, `AWAITING_CALLBACK`, deadline polling; F15–F19); then generalise workflow definitions; outbox relay; key retention/expiry; admin tooling polish; settlement reconciliation job.
 - **M3** — Prove it at scale: long chaos campaigns, toxiproxy network faults, load tests, tracing, SLOs + alerts, a published chaos report.
+  - **Traffic generator (`cmd/loadgen`)** — simulates 100–500 external clients against the public API only (no database or internal shortcuts while generating load):
+    - **Realistic misbehaviour, not just happy paths:** clients that time out and retry with the same key; double submissions; impatient retries with a *new* key (a real client bug the system must survive); declined customers; malformed payloads.
+    - **Open workload model:** requests arrive at a target rate whether or not earlier ones finished (avoids coordinated omission hiding latency).
+    - **Runs with provider faults enabled**, and ends with a correctness verdict: every submitted workflow reached a terminal or attention state, and `idem check` reports zero invariant violations.
+    - **Reports** request rate, latency percentiles and error classes; pairs with M3 metrics/tracing to locate bottlenecks (claim contention, pool exhaustion, sweeper cost, hot keys).
+    - Runs against docker compose first; packaged as its own Helm release in M4 for minikube. Numbers on a laptop are relative ("this change made claims 3x slower"), not capacity claims.
 - **M4** — Kubernetes operator (kubebuilder, developed on minikube): `WorkflowDefinition`, `SchedulerCluster` (workers, migrations, scaling on queue depth, safe upgrades), `DeadLetterPolicy`. Workflow *instances* stay in Postgres, never in etcd.
 - **M5 (stretch)** — etcd-backed lease implementation behind the same interface, compared under partitions; deterministic simulation testing; sharding.
 

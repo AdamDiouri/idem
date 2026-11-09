@@ -41,6 +41,8 @@ type ClaimedStep struct {
 	LeaseEpoch     int64  // fencing token
 	Attempt        int32
 	PriorStatus    string // PENDING or IN_DOUBT
+	MaxAttempts    int32
+	KeyAge         time.Duration // since the first attempt, by the DB clock
 	Input          workflow.PaymentInput
 }
 
@@ -52,7 +54,24 @@ const (
 	ResultSucceeded       ResultKind = "SUCCEEDED"
 	ResultFailedPermanent ResultKind = "FAILED_PERMANENT"
 	ResultInDoubt         ResultKind = "IN_DOUBT"
+	// ResultRetryNoEffect: this attempt provably had no effect; retry later.
+	// The step returns to PENDING, or stays IN_DOUBT if it ever was (sticky).
+	ResultRetryNoEffect ResultKind = "RETRY_NO_EFFECT"
+	// ResultDead: give up; the workflow needs a human (dead-letter state).
+	ResultDead ResultKind = "DEAD"
 )
+
+// Dead reasons, stored in steps.dead_reason.
+const (
+	DeadAttemptsExhaustedNoEffect = "attempts_exhausted_no_effect"
+	DeadAttemptsExhaustedInDoubt  = "attempts_exhausted_in_doubt"
+	DeadKeyExpiredUnknown         = "key_expired_unknown"
+)
+
+// MoneyMayHaveMoved reports whether a dead reason leaves the external effect unknown.
+func MoneyMayHaveMoved(deadReason string) bool {
+	return deadReason != DeadAttemptsExhaustedNoEffect
+}
 
 // Result is what a worker learned from executing a step.
 type Result struct {
@@ -60,7 +79,8 @@ type Result struct {
 	ProviderRef string
 	HTTPStatus  int
 	Error       string
-	RetryDelay  time.Duration // IN_DOUBT only
+	RetryDelay  time.Duration // IN_DOUBT and RETRY_NO_EFFECT
+	DeadReason  string        // DEAD only
 }
 
 // Step is one kind of workflow step. Execute runs with no transaction open; the
@@ -70,6 +90,10 @@ type Result struct {
 type Step interface {
 	Name() string
 	Execute(ctx context.Context, s ClaimedStep) provider.Outcome
+	// Lookup asks the provider what happened to the request sent with
+	// s.IdempotencyKey, without sending it again. found is false when the
+	// provider has no record (Class Permanent) or the lookup failed (Ambiguous).
+	Lookup(ctx context.Context, s ClaimedStep) (out provider.Outcome, found bool)
 	OnSuccess(ctx context.Context, q *db.Queries, s ClaimedStep, providerRef string) error
 	OnPermanentFailure(ctx context.Context, q *db.Queries, s ClaimedStep) error
 }

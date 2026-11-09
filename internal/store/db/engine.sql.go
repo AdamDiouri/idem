@@ -40,7 +40,10 @@ SET status             = 'RUNNING',
     first_attempted_at = COALESCE(s.first_attempted_at, now())
 FROM next, workflows w
 WHERE s.id = next.id AND w.id = s.workflow_id
-RETURNING s.id, s.workflow_id, s.name, s.idempotency_key, s.lease_epoch, s.attempt_count, s.prior_status, w.input
+RETURNING s.id, s.workflow_id, s.name, s.idempotency_key, s.lease_epoch, s.attempt_count, s.prior_status,
+          s.max_attempts,
+          (EXTRACT(EPOCH FROM (now() - s.first_attempted_at)) * 1000)::bigint AS key_age_ms,
+          w.input
 `
 
 type ClaimStepParams struct {
@@ -57,6 +60,8 @@ type ClaimStepRow struct {
 	LeaseEpoch     int64
 	AttemptCount   int32
 	PriorStatus    *string
+	MaxAttempts    int32
+	KeyAgeMs       int64
 	Input          []byte
 }
 
@@ -74,6 +79,8 @@ func (q *Queries) ClaimStep(ctx context.Context, arg ClaimStepParams) (ClaimStep
 		&i.LeaseEpoch,
 		&i.AttemptCount,
 		&i.PriorStatus,
+		&i.MaxAttempts,
+		&i.KeyAgeMs,
 		&i.Input,
 	)
 	return i, err
@@ -86,16 +93,18 @@ SET status           = $1::text,
     lease_expires_at = NULL,
     provider_ref     = COALESCE($2::text, provider_ref),
     last_error       = $3::text,
-    run_after        = CASE WHEN $1::text = 'IN_DOUBT'
-                            THEN now() + ($4::bigint * interval '1 millisecond')
+    dead_reason      = $4::text,
+    run_after        = CASE WHEN $1::text IN ('IN_DOUBT', 'PENDING')
+                            THEN now() + ($5::bigint * interval '1 millisecond')
                             ELSE run_after END
-WHERE id = $5 AND lease_epoch = $6 AND status = 'RUNNING'
+WHERE id = $6 AND lease_epoch = $7 AND status = 'RUNNING'
 `
 
 type CompleteStepParams struct {
 	Status      string
 	ProviderRef *string
 	LastError   *string
+	DeadReason  *string
 	RetryMs     int64
 	ID          uuid.UUID
 	LeaseEpoch  int64
@@ -107,6 +116,7 @@ func (q *Queries) CompleteStep(ctx context.Context, arg CompleteStepParams) (int
 		arg.Status,
 		arg.ProviderRef,
 		arg.LastError,
+		arg.DeadReason,
 		arg.RetryMs,
 		arg.ID,
 		arg.LeaseEpoch,
@@ -115,6 +125,40 @@ func (q *Queries) CompleteStep(ctx context.Context, arg CompleteStepParams) (int
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const findStuckWorkflows = `-- name: FindStuckWorkflows :many
+SELECT id, status, (EXTRACT(EPOCH FROM (now() - updated_at)) * 1000)::bigint AS age_ms
+FROM workflows
+WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+  AND updated_at < now() - ($1::bigint * interval '1 millisecond')
+ORDER BY updated_at
+`
+
+type FindStuckWorkflowsRow struct {
+	ID     uuid.UUID
+	Status string
+	AgeMs  int64
+}
+
+func (q *Queries) FindStuckWorkflows(ctx context.Context, olderThanMs int64) ([]FindStuckWorkflowsRow, error) {
+	rows, err := q.db.Query(ctx, findStuckWorkflows, olderThanMs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FindStuckWorkflowsRow
+	for rows.Next() {
+		var i FindStuckWorkflowsRow
+		if err := rows.Scan(&i.ID, &i.Status, &i.AgeMs); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const finishStepAttempt = `-- name: FinishStepAttempt :exec
