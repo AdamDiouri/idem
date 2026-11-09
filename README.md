@@ -105,7 +105,8 @@ When idem cannot finish a workflow without guessing about money, it parks it in 
 
 ```bash
 export IDEM_DATABASE_URL=postgres://idem:idem@localhost:5432/idem?sslmode=disable
-idem admin list                                              # what is parked, and why
+idem admin list                       # what is parked, why, and its VERSION
+# every action below also takes --expect-version <VERSION from list>
 idem admin retry-step <step-id> --reason "provider recovered"  # same key: always safe
 idem admin confirm-step <step-id> --provider-ref po_… --reason "provider shows the payout"
 idem admin compensate <workflow-id> --reason "merchant not paid; refund customer" [--confirm-no-effect]
@@ -115,7 +116,7 @@ idem admin new-generation <step-id> --reason … --confirm-no-effect   # new key
 
 (With compose: `docker compose run --rm --entrypoint /idem worker admin list`.)
 
-Every change needs `--reason`, refuses anything that isn't parked, and is recorded in `admin_actions`. `compensate` and `fail` also need `--confirm-no-effect` when money may have moved. That's because:
+Every change needs `--reason` and `--expect-version` (the `VERSION` column of `list`), refuses anything that isn't parked or changed since you listed it, and is recorded in `admin_actions`. `compensate` and `fail` also need `--confirm-no-effect` when money may have moved. That's because:
 - refunding a customer whose merchant was paid pays out twice
 - failing a charge that happened loses the customer's money
 

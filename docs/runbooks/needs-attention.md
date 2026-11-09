@@ -10,13 +10,14 @@ idem parks a workflow in `NEEDS_ATTENTION` when it cannot finish it **without gu
 export IDEM_DATABASE_URL=postgres://…    # compose: postgres://idem:idem@localhost:5432/idem?sslmode=disable
 export IDEM_ADMIN_ACTOR=your.name        # recorded in the audit log (defaults to $USER)
 
-idem admin list                          # every parked workflow, its step and reason
+idem admin list                          # every parked workflow, its version, step and reason
 idem admin list --reason attempts_exhausted_in_doubt
 idem admin list --json                   # with amounts, customer and merchant
 ```
 
 | Column | Meaning |
 |---|---|
+| `VERSION` | what you decide on: pass it to any action as `--expect-version`. It changes whenever the workflow leaves `NEEDS_ATTENTION` and comes back |
 | `STEP` | the step that parked the workflow: `charge`, `payout` or `refund` |
 | `STATUS` | `DEAD` (gave up) or `FAILED_PERMANENT` (a refund the provider refused) |
 | `REASON` | the `dead_reason`; for a refused refund, `refused`. The sections below are named after these reasons |
@@ -44,6 +45,8 @@ Worker logs carry `workflow_id`, `step_id`, `attempt` and `lease_epoch` on every
 
 ## 2. The actions
 
+Every command below also takes **`--expect-version <VERSION>`** from `idem admin list` (omitted from the table for brevity). It ties your decision to the facts you checked. If someone else acted in between, for example a retry that has since charged the customer and parked again, the command is refused as **stale** and changes nothing: list again, re-check with the provider, and decide again.
+
 | Command | Use it when | What it does |
 |---|---|---|
 | `idem admin retry-step <step> --reason …` | The cause was temporary. | Retries with the **same** key, which is always safe because the provider deduplicates. A step that may have moved money stays in doubt. |
@@ -52,7 +55,7 @@ Worker logs carry `workflow_id`, `step_id`, `attempt` and `lease_epoch` on every
 | `idem admin fail <workflow> --reason … [--confirm-no-effect]` | Parked **charge**, and you verified the customer was **not** charged. | Closes the workflow as `FAILED`. |
 | `idem admin new-generation <step> --reason … --confirm-no-effect` | You verified the old key moved **no** money and want to send the request again. | **Dangerous:** sends under a **new** key, which to the provider is a brand-new payment. The old step stays as history. |
 
-Every command refuses to act on a workflow that isn't parked, or on a step that isn't the parked one. It also refuses any action that doesn't fit the step: `compensate` only applies to a payout, `fail` only to a charge. When refused, nothing changes and the exit code is `1`.
+Every command refuses to act on a workflow that isn't parked, on a step that isn't the parked one, or on a version that is no longer current. It also refuses any action that doesn't fit the step: `compensate` only applies to a payout, `fail` only to a charge. When refused, nothing changes and the exit code is `1`. A usage mistake (missing flag, bad ID, unknown command) exits `2`.
 
 **`--confirm-no-effect` is required** on `compensate` and `fail` whenever the parked step **may have moved money**: its reason is anything but `attempts_exhausted_no_effect`, or any attempt was ambiguous. Without the flag the command exits `2` and changes nothing.
 - **Why:** compensating a payout that actually paid the merchant pays out twice, and failing a charge that actually charged the customer loses their money.
@@ -126,12 +129,12 @@ A parked workflow's reason is anything other than `attempts_exhausted_no_effect`
 
 ### IdemWorkflowsStuck
 
-The oldest unsettled workflow is older than 15 minutes while **not** parked. Usual causes:
+An unsettled workflow (not parked) has made **no progress** for 15 minutes: no status change and no step attempt. Age alone doesn't count, so a workflow retried hours after it was parked doesn't page. Usual causes:
 - the workers are down or crash-looping (check process restarts and worker logs)
 - the database is unreachable
 - a provider is slow enough that backoff keeps pushing retries out
 
-The sweeper also logs `stuck workflows count=… oldest=…` with the oldest workflow's ID.
+The sweeper also logs `stuck workflows count=… longest_idle=…` with the longest-idle workflow's ID (`longest_idle_workflow_id`).
 
 ### IdemStepsOverAttemptLimit
 
@@ -167,14 +170,14 @@ curl -s -X POST localhost:8080/workflows -H 'Authorization: Bearer demo-token-01
   -H 'Idempotency-Key: rb-1' -d '{"amount_cents":10000,"currency":"EUR","customer_id":"cus_1","merchant_id":"mer_invalid_1"}'
 
 docker compose run --rm --entrypoint /idem worker admin list
-# WORKFLOW  STEP    STATUS  REASON                    ATTEMPTS  PARKED FOR  LAST ERROR
-# 01a1…     payout  DEAD    permanent_after_in_doubt  2         12s         provider refused request: 422 invalid_account
+# WORKFLOW  VERSION  STEP    STATUS  REASON                    ATTEMPTS  PARKED FOR  LAST ERROR
+# 01a1…     3        payout  DEAD    permanent_after_in_doubt  2         12s         provider refused request: 422 invalid_account
 
 curl -s localhost:9091/api/v1/alerts            # IdemWorkflowsNeedAttention, IdemMoneyMayHaveMoved firing
 
 # the provider confirms no payout was made → refund the customer
 docker compose run --rm -e IDEM_ADMIN_ACTOR=oncall --entrypoint /idem worker \
-  admin compensate <workflow-id> --confirm-no-effect \
+  admin compensate <workflow-id> --expect-version 3 --confirm-no-effect \
   --reason "provider: no payout for this workflow; merchant account invalid"
 
 docker compose run --rm --entrypoint /idem worker check   # 0 violations, 0 need attention
