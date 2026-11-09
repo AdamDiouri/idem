@@ -470,7 +470,7 @@ The heart of the design. Every row should eventually map to at least one automat
 - In-memory state; restarts are out of the fault model.
 
 ### 14.2 Failpoints
-`failpoint.Hit("after_provider_call")` calls compiled into the engine. Configured via env (`FAILPOINTS=after_provider_call=exit:0.05`) with actions `exit`, `panic`, `sleep:<d>`. Compiled out with a build tag in release builds.
+`failpoint.Hit("after_provider_call")` calls compiled into the engine. Configured via env (`FAILPOINTS=after_provider_call=exit:0.05`) with actions `exit`, `panic`, `sleep:<d>`. Compiled out with a build tag in release builds (`make build-release`, tag `nofailpoint`). Dev/compose images keep them compiled in but inactive unless `IDEM_FAILPOINTS` is set, so chaos runs can use them.
 
 Initial set: `after_claim`, `before_provider_call`, `after_provider_call`, `before_commit`, `after_commit`, `sweeper_after_select`. (M2 adds `webhook_after_insert`.)
 
@@ -496,7 +496,7 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 | Slice | Delivers | Failure work in the same slice |
 |---|---|---|
 | **1.1** Skeleton | Repo, migrations, `docker compose` (Postgres), `POST /workflows` with inbound idempotency | F1–F3 tests |
-| **1.2** One step, end to end | Claim/lease/fencing, `charge` against fake provider, ledger posting, fake provider + oracle, failpoint package, invariant checker v0 (I1, I2) | F4–F6, F10, F12, F27 |
+| **1.2** One step, end to end | Claim/lease/fencing, `charge` against fake provider, ledger posting, fake provider + oracle, failpoint package, invariant checker v0 (I1, I2), **lease-expiry reclaim (pulled forward from 1.3)** | F4–F6, F7–F9 (fixed-delay retry), F10, F12, F13, F27 |
 | **1.3** Ambiguity | Outcome classification, retries with jitter, `IN_DOUBT`, sweeper, `DEAD`/`NEEDS_ATTENTION` | F7–F9, F11, F22–F25 |
 | **1.4** Full flow | `payout` (synchronous), `refund` compensation, fees, I3, I5, I7 | F20, F21 |
 | **1.5** Chaos harness | `cmd/chaos`, process kill/pause/DB restart, report | F13, F14, F26; full invariant suite |

@@ -35,6 +35,20 @@ func EnableFromEnv(spec string) error {
 	return nil
 }
 
+// ValidateSpec reports whether spec is valid for EnableFromEnv, without enabling anything.
+func ValidateSpec(spec string) error {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil
+	}
+	for entry := range strings.SplitSeq(spec, ",") {
+		if _, _, err := parseEntry(strings.TrimSpace(entry)); err != nil {
+			return fmt.Errorf("failpoint spec entry %q: %w", entry, err)
+		}
+	}
+	return nil
+}
+
 func parseEntry(entry string) (string, Action, error) {
 	name, rest, ok := strings.Cut(entry, "=")
 	if !ok || name == "" || rest == "" {

@@ -29,7 +29,7 @@ func main() {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(migrateCmd(), apiCmd())
+	root.AddCommand(migrateCmd(), apiCmd(), workerCmd(), sweeperCmd(), checkCmd())
 
 	if err := root.Execute(); err != nil {
 		slog.Error("idem failed", "error", err)
