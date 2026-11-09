@@ -461,7 +461,7 @@ The heart of the design. Every row should eventually map to at least one automat
 ## 14. Testing strategy and fault injection
 
 ### 14.1 Fake provider
-- Endpoints: `POST /charges`, `POST /payouts` (async), `POST /refunds`, `GET /{resource}/{id}`, `GET /{resource}?idempotency_key=…`.
+- Endpoints: `POST /charges`, `POST /payouts` (synchronous in M1, async in M2), `POST /refunds` (must reference a real charge; total refunds ≤ the charge), `GET /{resource}?idempotency_key=…` (`409` while the key is in flight). Keys are namespaced per resource. Deterministic refusals: customers `cus_decline*` (402), merchants `mer_invalid*` (422).
 - Implements Stripe-like idempotency: same key + same body → replay; same key + different body → `422`; same key in flight → `409`. Keys expire after `provider_key_retention` (set to minutes in tests to exercise F23).
 - Payouts answer synchronously in M1. **M2:** returns `202` and sends signed webhooks.
 - **Fault injection** via `PUT /_faults`, seeded RNG, per-endpoint probabilities:
@@ -498,7 +498,7 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 | **1.1** Skeleton | Repo, migrations, `docker compose` (Postgres), `POST /workflows` with inbound idempotency | F1–F3 tests |
 | **1.2** One step, end to end | Claim/lease/fencing, `charge` against fake provider, ledger posting, fake provider + oracle, failpoint package, invariant checker v0 (I1, I2), **lease-expiry reclaim (pulled forward from 1.3)** | F4–F6, F7–F9 (fixed-delay retry), F10, F12, F13, F27 |
 | **1.3** Ambiguity | Outcome classification (incl. no-effect 429 / refused connections, `Retry-After`, 409 in-flight), retries with full-jitter backoff, sticky `IN_DOUBT`, `DEAD`/`NEEDS_ATTENTION` with `dead_reason`, lookup near key retention, stuck-workflow reporting, bounded shutdown | F7–F9, F11, F22, F23, F25 |
-| **1.4** Full flow | `payout` (synchronous), `refund` compensation, fees, I3, I5, I7 | F20, F21 |
+| **1.4** Full flow | `payout` (synchronous, the pivot), `refund` compensation only on a *definite* payout failure, refund charge reference frozen in a typed column, CAS workflow transitions, fees, I3, I5, I7 | F20, F21 |
 | **1.5** Chaos harness | `cmd/chaos`, process kill/pause/DB restart, report | F13, F14, F26; full invariant suite |
 | **1.6** Operability | Metrics, structured logs, admin CLI, runbook for `NEEDS_ATTENTION` | — |
 

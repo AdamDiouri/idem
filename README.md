@@ -5,7 +5,7 @@ Work may be attempted more than once; its effects happen at most once.
 
 See [`docs/design.md`](docs/design.md) for the design, guarantees, fault model and failure-mode table.
 
-**Status:** Milestone 1, slice 1.2: idempotent submission, plus workers that run the `charge` step end to end against a fake payment provider. Crashes and pauses at every step boundary are tested to never charge twice. Payout, retries with backoff and the chaos harness come next.
+**Status:** Milestone 1, slice 1.4: the full saga runs end to end — charge the customer, pay the merchant (amount − fee), or refund the customer if the payout definitively fails — with retries, dead letters and invariant checks. The chaos harness and operability (metrics, admin CLI) come next.
 
 ## Prerequisites
 
@@ -41,7 +41,28 @@ curl -i -X POST localhost:8080/workflows \
 
 Health: `GET /healthz` (process alive), `GET /readyz` (database reachable, else `503`).
 
-A second later the worker has charged the customer and posted the ledger:
+A few seconds later the workflow has run its saga:
+
+```
+charge ──ok──▶ payout ──ok──▶ SUCCEEDED
+  │ declined      │ definitively refused
+  ▼               ▼
+FAILED          refund ──ok──▶ COMPENSATED
+                  │ refused / exhausted
+                  ▼
+           NEEDS_ATTENTION   (also: any step DEAD, e.g. an ambiguous payout — never auto-refunded)
+```
+
+Magic test IDs in the fake provider: customers starting with `cus_decline` are declined; merchants starting with `mer_invalid` have an invalid account, so the payout fails and the customer is refunded. Watch a compensation:
+
+```bash
+curl -s -X POST localhost:8080/workflows -H 'Authorization: Bearer demo-token-0123456789' \
+  -H 'Idempotency-Key: comp-1' -d '{"amount_cents":10000,"currency":"EUR","customer_id":"cus_1","merchant_id":"mer_invalid_1"}'
+docker compose exec postgres psql -U idem -c "select name, status from steps order by created_at"
+# charge SUCCEEDED, payout FAILED_PERMANENT, refund SUCCEEDED; workflow COMPENSATED; its ledger nets to zero
+```
+
+Check the books at any time:
 
 ```bash
 docker compose exec postgres psql -U idem -c "select name, status from steps"   # charge SUCCEEDED, payout PENDING

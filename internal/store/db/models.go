@@ -59,6 +59,7 @@ type Step struct {
 	FirstAttemptedAt pgtype.Timestamptz
 	CreatedAt        pgtype.Timestamptz
 	DeadReason       *string
+	RefundChargeRef  *string
 }
 
 type StepAttempt struct {

@@ -34,16 +34,17 @@ var ErrFenced = errors.New("lease lost: completion fenced")
 
 // ClaimedStep is a step owned by this worker until its lease expires.
 type ClaimedStep struct {
-	ID             uuid.UUID
-	WorkflowID     uuid.UUID
-	Name           string
-	IdempotencyKey string // stored at step creation; never recomputed (D6)
-	LeaseEpoch     int64  // fencing token
-	Attempt        int32
-	PriorStatus    string // PENDING or IN_DOUBT
-	MaxAttempts    int32
-	KeyAge         time.Duration // since the first attempt, by the DB clock
-	Input          workflow.PaymentInput
+	ID              uuid.UUID
+	WorkflowID      uuid.UUID
+	Name            string
+	IdempotencyKey  string // stored at step creation; never recomputed (D6)
+	LeaseEpoch      int64  // fencing token
+	Attempt         int32
+	PriorStatus     string // PENDING or IN_DOUBT
+	MaxAttempts     int32
+	KeyAge          time.Duration // since the first attempt, by the DB clock
+	RefundChargeRef string        // refunds only: the charge being reversed
+	Input           workflow.PaymentInput
 }
 
 // ResultKind is the step's next status; also the attempt's outcome.

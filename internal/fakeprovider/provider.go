@@ -1,6 +1,9 @@
 // Package fakeprovider is a Stripe-like payment provider for tests and local
 // runs. It honours idempotency keys, injects faults on demand and records every
 // real effect in an oracle that the invariant checker treats as ground truth.
+//
+// Three resources share one idempotency engine: charges (take money from a
+// customer), payouts (pay a merchant) and refunds (return a charge).
 package fakeprovider
 
 import (
@@ -10,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"strings"
@@ -20,10 +24,10 @@ import (
 )
 
 const (
-	defaultHang      = 30 * time.Second
-	maxBodyBytes     = 64 << 10
-	declinePrefix    = "cus_decline"
-	effectTypeCharge = "charge"
+	defaultHang   = 30 * time.Second
+	maxBodyBytes  = 64 << 10
+	declinePrefix = "cus_decline"
+	invalidPrefix = "mer_invalid"
 )
 
 // Options configures a Provider.
@@ -33,25 +37,90 @@ type Options struct {
 	Hang time.Duration
 	// KeyRetention is how long completed idempotency keys are remembered
 	// (0 = forever). Like a real provider, an expired key is unknown: lookups
-	// return 404 and a new request with it performs a NEW charge.
+	// return 404 and a new request with it performs a NEW effect.
 	KeyRetention time.Duration
 }
 
 // Effect is one real movement of money performed by the provider.
 type Effect struct {
 	ID             string    `json:"id"`
-	Type           string    `json:"type"`
+	Type           string    `json:"type"` // charge | payout | refund
 	WorkflowID     string    `json:"workflow_id"`
 	IdempotencyKey string    `json:"idempotency_key"`
 	AmountCents    int64     `json:"amount_cents"`
+	RefundOf       string    `json:"refund_of,omitempty"` // refunds: the charge ID
 	At             time.Time `json:"at"`
 }
 
-type chargeRequest struct {
-	AmountCents int64  `json:"amount_cents"`
-	Currency    string `json:"currency"`
-	CustomerID  string `json:"customer_id"`
-	WorkflowID  string `json:"workflow_id"`
+// request is the common view of a decoded resource request.
+type request struct {
+	AmountCents int64
+	Currency    string
+	WorkflowID  string
+	CustomerID  string // charges
+	MerchantID  string // payouts
+	ChargeID    string // refunds
+	fingerprint string
+}
+
+// resource describes one idempotent money-moving endpoint.
+type resource struct {
+	name          string // URL path segment and fault endpoint: charges | payouts | refunds
+	effectType    string // charge | payout | refund
+	idPrefix      string // ch_ | po_ | re_
+	successStatus string // succeeded | paid
+	decode        func(*json.Decoder) (request, bool)
+	// rejection is the definitive refusal for this resource (stored and
+	// replayed like a success), used by the decline/payout_fail modes.
+	rejectStatus int
+	rejectCode   string
+	// rejects reports whether req is refused on its merits. Called with p.mu held.
+	rejects func(p *Provider, req request) bool
+}
+
+var resources = []resource{
+	{
+		name: "charges", effectType: "charge", idPrefix: "ch_", successStatus: "succeeded",
+		decode: decodeInto(func(r struct {
+			AmountCents int64  `json:"amount_cents"`
+			Currency    string `json:"currency"`
+			CustomerID  string `json:"customer_id"`
+			WorkflowID  string `json:"workflow_id"`
+		}) (request, bool) {
+			return request{AmountCents: r.AmountCents, Currency: r.Currency, WorkflowID: r.WorkflowID, CustomerID: r.CustomerID},
+				r.CustomerID != ""
+		}),
+		rejectStatus: http.StatusPaymentRequired, rejectCode: "card_declined",
+		rejects: func(_ *Provider, req request) bool { return strings.HasPrefix(req.CustomerID, declinePrefix) },
+	},
+	{
+		name: "payouts", effectType: "payout", idPrefix: "po_", successStatus: "paid",
+		decode: decodeInto(func(r struct {
+			AmountCents int64  `json:"amount_cents"`
+			Currency    string `json:"currency"`
+			MerchantID  string `json:"merchant_id"`
+			WorkflowID  string `json:"workflow_id"`
+		}) (request, bool) {
+			return request{AmountCents: r.AmountCents, Currency: r.Currency, WorkflowID: r.WorkflowID, MerchantID: r.MerchantID},
+				r.MerchantID != ""
+		}),
+		rejectStatus: http.StatusUnprocessableEntity, rejectCode: "invalid_account",
+		rejects: func(_ *Provider, req request) bool { return strings.HasPrefix(req.MerchantID, invalidPrefix) },
+	},
+	{
+		name: "refunds", effectType: "refund", idPrefix: "re_", successStatus: "succeeded",
+		decode: decodeInto(func(r struct {
+			AmountCents int64  `json:"amount_cents"`
+			Currency    string `json:"currency"`
+			ChargeID    string `json:"charge_id"`
+			WorkflowID  string `json:"workflow_id"`
+		}) (request, bool) {
+			return request{AmountCents: r.AmountCents, Currency: r.Currency, WorkflowID: r.WorkflowID, ChargeID: r.ChargeID},
+				r.ChargeID != ""
+		}),
+		rejectStatus: http.StatusUnprocessableEntity, rejectCode: "invalid_refund",
+		rejects: func(p *Provider, req request) bool { return !p.refundableLocked(req) },
+	},
 }
 
 type keyState struct {
@@ -67,7 +136,7 @@ type Provider struct {
 	opts Options
 
 	mu       sync.Mutex
-	keys     map[string]*keyState
+	keys     map[string]*keyState // "<resource>:<key>"
 	effects  []Effect
 	calls    map[string]int
 	faults   Faults
@@ -88,8 +157,10 @@ func New(opts Options) *Provider {
 // Handler returns the provider's HTTP API, including the /_ control endpoints.
 func (p *Provider) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /charges", p.postCharge)
-	mux.HandleFunc("GET /charges", p.getCharge)
+	for _, res := range resources {
+		mux.HandleFunc("POST /"+res.name, p.create(res))
+		mux.HandleFunc("GET /"+res.name, p.lookup(res))
+	}
 	mux.HandleFunc("PUT /_faults", p.putFaults)
 	mux.HandleFunc("GET /_effects", p.getEffects)
 	mux.HandleFunc("POST /_reset", p.postReset)
@@ -125,15 +196,11 @@ func (p *Provider) Effects() []Effect {
 }
 
 // Calls returns how many requests each API endpoint received ("POST /charges",
-// "GET /charges"), so tests can prove which path a client took.
+// "GET /payouts", ...), so tests can prove which path a client took.
 func (p *Provider) Calls() map[string]int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := make(map[string]int, len(p.calls))
-	for k, v := range p.calls {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(p.calls)
 }
 
 func (p *Provider) count(endpoint string) {
@@ -152,124 +219,146 @@ func (p *Provider) Reset() {
 	p.setFaultsLocked(Faults{})
 }
 
-func (p *Provider) postCharge(w http.ResponseWriter, r *http.Request) {
-	p.count("POST /charges")
-	key := r.Header.Get("Idempotency-Key")
-	if key == "" {
-		writeError(w, http.StatusBadRequest, "idempotency_key_required")
-		return
-	}
-	req, ok := decodeCharge(r)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	fp := fingerprint(req)
-
-	p.mu.Lock()
-	p.expireLocked(key)
-	if ks, exists := p.keys[key]; exists {
-		p.mu.Unlock()
-		switch {
-		case ks.inFlight:
-			writeError(w, http.StatusConflict, "idempotency_key_in_flight")
-		case ks.fingerprint != fp:
-			writeError(w, http.StatusUnprocessableEntity, "idempotency_key_reused")
-		default:
-			writeRaw(w, ks.status, ks.body)
-		}
-		return
-	}
-	p.keys[key] = &keyState{createdAt: time.Now(), inFlight: true, fingerprint: fp}
-	mode := p.pickFault("charges")
-	p.mu.Unlock()
-
-	switch mode {
-	case ModeTimeoutBeforeEffect:
-		p.hang(r.Context())
-		p.release(key)
-		writeError(w, http.StatusGatewayTimeout, "timeout")
-	case ModeErrorBeforeEffect:
-		p.release(key)
-		writeError(w, http.StatusInternalServerError, "internal_error")
-	case ModeRateLimit:
-		p.release(key)
-		w.Header().Set("Retry-After", "1")
-		writeError(w, http.StatusTooManyRequests, "rate_limited")
-	case ModeTimeoutAfterEffect:
-		status, b := p.perform(key, req)
-		p.hang(r.Context())
-		writeRaw(w, status, b)
-	case ModeErrorAfterEffect:
-		p.perform(key, req)
-		writeError(w, http.StatusInternalServerError, "internal_error")
-	case ModeDecline:
-		status, b := p.decline(key)
-		writeRaw(w, status, b)
-	default:
-		if strings.HasPrefix(req.CustomerID, declinePrefix) {
-			status, b := p.decline(key)
-			writeRaw(w, status, b)
+func (p *Provider) create(res resource) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p.count("POST /" + res.name)
+		key := r.Header.Get("Idempotency-Key")
+		if key == "" {
+			writeError(w, http.StatusBadRequest, "idempotency_key_required")
 			return
 		}
-		status, b := p.perform(key, req)
+		req, ok := decodeBody(r, res)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		slot := res.name + ":" + key
+
+		p.mu.Lock()
+		p.expireLocked(slot)
+		if ks, exists := p.keys[slot]; exists {
+			p.mu.Unlock()
+			switch {
+			case ks.inFlight:
+				writeError(w, http.StatusConflict, "idempotency_key_in_flight")
+			case ks.fingerprint != req.fingerprint:
+				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_reused")
+			default:
+				writeRaw(w, ks.status, ks.body)
+			}
+			return
+		}
+		p.keys[slot] = &keyState{createdAt: time.Now(), inFlight: true, fingerprint: req.fingerprint}
+		mode := p.pickFault(res.name)
+		p.mu.Unlock()
+
+		var status int
+		var b []byte
+		switch mode {
+		case ModeTimeoutBeforeEffect:
+			p.hang(r.Context())
+			p.release(slot)
+			status, b = http.StatusGatewayTimeout, errorBody("timeout")
+		case ModeErrorBeforeEffect:
+			p.release(slot)
+			status, b = http.StatusInternalServerError, errorBody("internal_error")
+		case ModeRateLimit:
+			p.release(slot)
+			w.Header().Set("Retry-After", "1")
+			status, b = http.StatusTooManyRequests, errorBody("rate_limited")
+		case ModeTimeoutAfterEffect:
+			status, b = p.perform(res, slot, key, req)
+			p.hang(r.Context())
+		case ModeErrorAfterEffect:
+			p.perform(res, slot, key, req)
+			status, b = http.StatusInternalServerError, errorBody("internal_error")
+		case ModeDecline, ModePayoutFail:
+			status, b = p.reject(res, slot)
+		default:
+			status, b = p.perform(res, slot, key, req)
+		}
 		writeRaw(w, status, b)
 	}
 }
 
-// perform moves the money: records the effect and stores the success response.
-func (p *Provider) perform(key string, req chargeRequest) (int, []byte) {
-	id := "ch_" + uuid.Must(uuid.NewV7()).String()
+// perform moves the money (or refuses on the request's merits) and stores the
+// final response under slot.
+func (p *Provider) perform(res resource, slot, key string, req request) (int, []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if res.rejects(p, req) {
+		return p.rejectLocked(res, slot)
+	}
+	id := res.idPrefix + uuid.Must(uuid.NewV7()).String()
 	b := mustJSON(map[string]any{
 		"id":           id,
-		"status":       "succeeded",
+		"status":       res.successStatus,
 		"amount_cents": req.AmountCents,
 		"currency":     req.Currency,
 	})
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.effects = append(p.effects, Effect{
 		ID:             id,
-		Type:           effectTypeCharge,
+		Type:           res.effectType,
 		WorkflowID:     req.WorkflowID,
 		IdempotencyKey: key,
 		AmountCents:    req.AmountCents,
+		RefundOf:       req.ChargeID,
 		At:             time.Now().UTC(),
 	})
-	p.store(key, http.StatusCreated, b)
+	p.store(slot, http.StatusCreated, b)
 	return http.StatusCreated, b
 }
 
-func (p *Provider) decline(key string) (int, []byte) {
-	b := mustJSON(map[string]any{"error": map[string]string{"code": "card_declined"}})
+func (p *Provider) reject(res resource, slot string) (int, []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.store(key, http.StatusPaymentRequired, b)
-	return http.StatusPaymentRequired, b
+	return p.rejectLocked(res, slot)
 }
 
-// store records a final response for key. Callers must hold p.mu.
-func (p *Provider) store(key string, status int, b []byte) {
-	ks := p.keys[key]
+func (p *Provider) rejectLocked(res resource, slot string) (int, []byte) {
+	b := errorBody(res.rejectCode)
+	p.store(slot, res.rejectStatus, b)
+	return res.rejectStatus, b
+}
+
+// refundableLocked reports whether req refunds a real charge without exceeding
+// what is left of it. Callers must hold p.mu.
+func (p *Provider) refundableLocked(req request) bool {
+	var charged, refunded int64
+	found := false
+	for _, e := range p.effects {
+		switch {
+		case e.Type == "charge" && e.ID == req.ChargeID:
+			charged, found = e.AmountCents, true
+		case e.Type == "refund" && e.RefundOf == req.ChargeID:
+			refunded += e.AmountCents
+		}
+	}
+	return found && refunded+req.AmountCents <= charged
+}
+
+// store records a final response for slot. Callers must hold p.mu.
+func (p *Provider) store(slot string, status int, b []byte) {
+	ks := p.keys[slot]
 	ks.inFlight, ks.status, ks.body = false, status, b
 }
 
 // release forgets an in-flight key that produced no effect, so it can be retried.
-func (p *Provider) release(key string) {
+func (p *Provider) release(slot string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if ks, ok := p.keys[key]; ok && ks.inFlight {
-		delete(p.keys, key)
+	if ks, ok := p.keys[slot]; ok && ks.inFlight {
+		delete(p.keys, slot)
 	}
 }
 
-// expireLocked forgets key if it completed longer than KeyRetention ago.
+// expireLocked forgets slot if it completed longer than KeyRetention ago.
 // Callers must hold p.mu.
-func (p *Provider) expireLocked(key string) {
-	ks, ok := p.keys[key]
+func (p *Provider) expireLocked(slot string) {
+	ks, ok := p.keys[slot]
 	if ok && !ks.inFlight && p.opts.KeyRetention > 0 && time.Since(ks.createdAt) > p.opts.KeyRetention {
-		delete(p.keys, key)
+		delete(p.keys, slot)
 	}
 }
 
@@ -280,26 +369,31 @@ func (p *Provider) hang(ctx context.Context) {
 	}
 }
 
-func (p *Provider) getCharge(w http.ResponseWriter, r *http.Request) {
-	p.count("GET /charges")
-	key := r.URL.Query().Get("idempotency_key")
-	p.mu.Lock()
-	p.expireLocked(key)
-	ks, ok := p.keys[key]
-	var status int
-	var b []byte
-	if ok && !ks.inFlight {
-		status, b = ks.status, ks.body
-	}
-	p.mu.Unlock()
+func (p *Provider) lookup(res resource) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p.count("GET /" + res.name)
+		slot := res.name + ":" + r.URL.Query().Get("idempotency_key")
+		p.mu.Lock()
+		p.expireLocked(slot)
+		ks, ok := p.keys[slot]
+		var inFlight bool
+		var status int
+		var b []byte
+		if ok {
+			inFlight, status, b = ks.inFlight, ks.status, ks.body
+		}
+		p.mu.Unlock()
 
-	switch {
-	case b == nil:
-		writeError(w, http.StatusNotFound, "not_found")
-	case status >= 200 && status < 300:
-		writeRaw(w, http.StatusOK, b)
-	default:
-		writeRaw(w, status, b)
+		switch {
+		case inFlight:
+			writeError(w, http.StatusConflict, "idempotency_key_in_flight")
+		case b == nil:
+			writeError(w, http.StatusNotFound, "not_found")
+		case status >= 200 && status < 300:
+			writeRaw(w, http.StatusOK, b)
+		default:
+			writeRaw(w, status, b)
+		}
 	}
 }
 
@@ -333,22 +427,26 @@ func (p *Provider) postReset(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func decodeCharge(r *http.Request) (chargeRequest, bool) {
-	dec := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
-	dec.DisallowUnknownFields()
-	var req chargeRequest
-	if err := dec.Decode(&req); err != nil {
-		return req, false
+// decodeInto builds a strict decoder for one resource's JSON body shape.
+func decodeInto[T any](convert func(T) (request, bool)) func(*json.Decoder) (request, bool) {
+	return func(dec *json.Decoder) (request, bool) {
+		var body T
+		if err := dec.Decode(&body); err != nil {
+			return request{}, false
+		}
+		if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			return request{}, false
+		}
+		req, ok := convert(body)
+		req.fingerprint = string(mustJSON(body))
+		return req, ok && req.AmountCents > 0 && req.Currency != "" && req.WorkflowID != ""
 	}
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return req, false
-	}
-	ok := req.AmountCents > 0 && req.Currency != "" && req.CustomerID != "" && req.WorkflowID != ""
-	return req, ok
 }
 
-func fingerprint(req chargeRequest) string {
-	return string(mustJSON(req))
+func decodeBody(r *http.Request, res resource) (request, bool) {
+	dec := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
+	dec.DisallowUnknownFields()
+	return res.decode(dec)
 }
 
 func mustJSON(v any) []byte {
@@ -359,6 +457,10 @@ func mustJSON(v any) []byte {
 	return b
 }
 
+func errorBody(code string) []byte {
+	return mustJSON(map[string]any{"error": map[string]string{"code": code}})
+}
+
 func writeRaw(w http.ResponseWriter, status int, b []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -366,5 +468,5 @@ func writeRaw(w http.ResponseWriter, status int, b []byte) {
 }
 
 func writeError(w http.ResponseWriter, status int, code string) {
-	writeRaw(w, status, mustJSON(map[string]any{"error": map[string]string{"code": code}}))
+	writeRaw(w, status, errorBody(code))
 }

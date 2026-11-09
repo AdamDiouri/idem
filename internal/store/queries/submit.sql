@@ -16,8 +16,9 @@ VALUES (@id, @client_id, @type, @status, @input)
 RETURNING created_at;
 
 -- name: InsertStep :exec
-INSERT INTO steps (id, workflow_id, name, generation, status, idempotency_key, max_attempts)
-VALUES (@id, @workflow_id, @name, @generation, @status, @idempotency_key, @max_attempts);
+INSERT INTO steps (id, workflow_id, name, generation, status, idempotency_key, max_attempts, refund_charge_ref)
+VALUES (sqlc.arg(id), sqlc.arg(workflow_id), sqlc.arg(name), sqlc.arg(generation), sqlc.arg(status),
+        sqlc.arg(idempotency_key), sqlc.arg(max_attempts), sqlc.narg(refund_charge_ref));
 
 -- name: SetIdempotencyKeyResponse :exec
 UPDATE api_idempotency_keys

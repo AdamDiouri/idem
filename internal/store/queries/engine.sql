@@ -2,14 +2,18 @@
 -- Claims the next runnable step (design section 9.1). SKIP LOCKED lets many workers
 -- claim concurrently without blocking or double-claiming; lease_epoch + 1 is
 -- the fencing token of the new owner. All times come from the database clock.
+-- Only steps of active workflows are claimable: a parked (NEEDS_ATTENTION) or
+-- finished workflow must not move money it could no longer record.
 WITH next AS (
-  SELECT id FROM steps
-  WHERE status IN ('PENDING', 'IN_DOUBT')
-    AND run_after <= now()
-    AND name = ANY(sqlc.arg(names)::text[])
-  ORDER BY run_after
+  SELECT st.id FROM steps st
+  JOIN workflows wf ON wf.id = st.workflow_id
+  WHERE st.status IN ('PENDING', 'IN_DOUBT')
+    AND st.run_after <= now()
+    AND st.name = ANY(sqlc.arg(names)::text[])
+    AND wf.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+  ORDER BY st.run_after
   LIMIT 1
-  FOR UPDATE SKIP LOCKED
+  FOR UPDATE OF st SKIP LOCKED
 )
 UPDATE steps s
 SET status             = 'RUNNING',
@@ -22,7 +26,7 @@ SET status             = 'RUNNING',
 FROM next, workflows w
 WHERE s.id = next.id AND w.id = s.workflow_id
 RETURNING s.id, s.workflow_id, s.name, s.idempotency_key, s.lease_epoch, s.attempt_count, s.prior_status,
-          s.max_attempts,
+          s.max_attempts, s.refund_charge_ref,
           (EXTRACT(EPOCH FROM (now() - s.first_attempted_at)) * 1000)::bigint AS key_age_ms,
           w.input;
 
@@ -83,8 +87,15 @@ SELECT count(*)::bigint AS reclaimed FROM reclaimed;
 -- name: BumpWorkflowVersion :exec
 UPDATE workflows SET version = version + 1, updated_at = now() WHERE id = sqlc.arg(id);
 
--- name: SetWorkflowStatus :exec
-UPDATE workflows SET status = sqlc.arg(status)::text, version = version + 1, updated_at = now() WHERE id = sqlc.arg(id);
+-- name: TransitionWorkflow :execrows
+-- Compare-and-swap: only moves the workflow if it is in one of the expected states.
+UPDATE workflows
+SET status = sqlc.arg(to_status)::text, version = version + 1, updated_at = now()
+WHERE id = sqlc.arg(id) AND status = ANY(sqlc.arg(from_statuses)::text[]);
+
+-- name: ChargeProviderRef :one
+SELECT provider_ref::text FROM steps
+WHERE workflow_id = sqlc.arg(workflow_id) AND name = 'charge' AND status = 'SUCCEEDED' AND provider_ref IS NOT NULL;
 
 -- name: FindStuckWorkflows :many
 SELECT id, status, (EXTRACT(EPOCH FROM (now() - updated_at)) * 1000)::bigint AS age_ms

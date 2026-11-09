@@ -11,7 +11,8 @@ const (
 	ModeErrorBeforeEffect   = "error_before_effect"
 	ModeErrorAfterEffect    = "error_after_effect"
 	ModeDecline             = "decline"
-	ModeRateLimit           = "rate_limit" // 429 + Retry-After: 1, no effect
+	ModeRateLimit           = "rate_limit"  // 429 + Retry-After: 1, no effect
+	ModePayoutFail          = "payout_fail" // payouts only: 422 invalid_account, stored
 )
 
 // Faults configures fault injection. The first matching rule wins.
@@ -20,7 +21,7 @@ type Faults struct {
 	Rules []Rule `json:"rules"`
 }
 
-// Rule injects Mode on requests to Endpoint ("charges").
+// Rule injects Mode on requests to Endpoint (charges, payouts or refunds).
 // Probability 0 means always; Times 0 means unlimited.
 type Rule struct {
 	Endpoint    string  `json:"endpoint"`
@@ -36,17 +37,22 @@ var validModes = map[string]bool{
 	ModeErrorAfterEffect:    true,
 	ModeDecline:             true,
 	ModeRateLimit:           true,
+	ModePayoutFail:          true,
 }
+
+var validEndpoints = map[string]bool{"charges": true, "payouts": true, "refunds": true}
 
 // Validate rejects rules that would otherwise be silently ignored, so a typo
 // can never make a fault-injection run pass without injecting anything.
 func (f Faults) Validate() error {
 	for i, r := range f.Rules {
 		switch {
-		case r.Endpoint != "charges":
-			return fmt.Errorf("rule %d: unknown endpoint %q (want \"charges\")", i, r.Endpoint)
+		case !validEndpoints[r.Endpoint]:
+			return fmt.Errorf("rule %d: unknown endpoint %q (want charges, payouts or refunds)", i, r.Endpoint)
 		case !validModes[r.Mode]:
 			return fmt.Errorf("rule %d: unknown mode %q", i, r.Mode)
+		case r.Mode == ModePayoutFail && r.Endpoint != "payouts":
+			return fmt.Errorf("rule %d: mode payout_fail is only valid on payouts", i)
 		case r.Probability < 0 || r.Probability > 1:
 			return fmt.Errorf("rule %d: probability %v outside [0,1]", i, r.Probability)
 		case r.Times < 0:

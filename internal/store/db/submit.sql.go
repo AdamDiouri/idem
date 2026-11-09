@@ -58,18 +58,20 @@ func (q *Queries) InsertIdempotencyKey(ctx context.Context, arg InsertIdempotenc
 }
 
 const insertStep = `-- name: InsertStep :exec
-INSERT INTO steps (id, workflow_id, name, generation, status, idempotency_key, max_attempts)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO steps (id, workflow_id, name, generation, status, idempotency_key, max_attempts, refund_charge_ref)
+VALUES ($1, $2, $3, $4, $5,
+        $6, $7, $8)
 `
 
 type InsertStepParams struct {
-	ID             uuid.UUID
-	WorkflowID     uuid.UUID
-	Name           string
-	Generation     int32
-	Status         string
-	IdempotencyKey string
-	MaxAttempts    int32
+	ID              uuid.UUID
+	WorkflowID      uuid.UUID
+	Name            string
+	Generation      int32
+	Status          string
+	IdempotencyKey  string
+	MaxAttempts     int32
+	RefundChargeRef *string
 }
 
 func (q *Queries) InsertStep(ctx context.Context, arg InsertStepParams) error {
@@ -81,6 +83,7 @@ func (q *Queries) InsertStep(ctx context.Context, arg InsertStepParams) error {
 		arg.Status,
 		arg.IdempotencyKey,
 		arg.MaxAttempts,
+		arg.RefundChargeRef,
 	)
 	return err
 }

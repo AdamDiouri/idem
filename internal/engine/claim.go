@@ -46,6 +46,9 @@ func Claim(ctx context.Context, pool *pgxpool.Pool, workerID string, names []str
 		MaxAttempts:    row.MaxAttempts,
 		KeyAge:         time.Duration(row.KeyAgeMs) * time.Millisecond,
 	}
+	if row.RefundChargeRef != nil {
+		s.RefundChargeRef = *row.RefundChargeRef
+	}
 	if row.PriorStatus != nil {
 		s.PriorStatus = *row.PriorStatus
 	}

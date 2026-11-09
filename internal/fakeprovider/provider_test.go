@@ -295,7 +295,7 @@ func TestControlAPI_RejectsInvalidFaults(t *testing.T) {
 	for _, r := range []fakeprovider.Rule{
 		{Endpoint: "charges", Mode: "timeout_after_efect"},
 		{Endpoint: "charges", Mode: "latency"},
-		{Endpoint: "payouts", Mode: fakeprovider.ModeErrorBeforeEffect},
+		{Endpoint: "subscriptions", Mode: fakeprovider.ModeErrorBeforeEffect},
 		{Endpoint: "charges", Mode: fakeprovider.ModeErrorBeforeEffect, Probability: 1.5},
 		{Endpoint: "charges", Mode: fakeprovider.ModeErrorBeforeEffect, Probability: -0.1},
 		{Endpoint: "charges", Mode: fakeprovider.ModeErrorBeforeEffect, Times: -1},
@@ -339,4 +339,136 @@ func TestControlAPI(t *testing.T) {
 	r.Body.Close()
 	require.Equal(t, http.StatusNoContent, r.StatusCode)
 	require.Empty(t, p.Effects())
+}
+
+func post(t *testing.T, url, path, key, b string) resp {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url+path, strings.NewReader(b))
+	require.NoError(t, err)
+	req.Header.Set("Idempotency-Key", key)
+	r, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer r.Body.Close()
+	data, err := io.ReadAll(r.Body)
+	require.NoError(t, err)
+	return resp{status: r.StatusCode, body: string(data)}
+}
+
+func payoutBody(merchant string, amount int64) string {
+	return fmt.Sprintf(`{"amount_cents":%d,"currency":"EUR","merchant_id":%q,"workflow_id":%q}`, amount, merchant, wfID)
+}
+
+func refundBody(chargeID string, amount int64) string {
+	return fmt.Sprintf(`{"amount_cents":%d,"currency":"EUR","charge_id":%q,"workflow_id":%q}`, amount, chargeID, wfID)
+}
+
+func idOf(t *testing.T, b, prefix, status string) string {
+	t.Helper()
+	var c struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(b), &c), b)
+	require.Equal(t, status, c.Status)
+	require.True(t, strings.HasPrefix(c.ID, prefix), c.ID)
+	return c.ID
+}
+
+func TestPayout_CreatesEffectOnceAndReplays(t *testing.T) {
+	p, srv := newServer(t)
+	first := post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825))
+	second := post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825))
+	require.Equal(t, http.StatusCreated, first.status, first.body)
+	require.Equal(t, first, second)
+	id := idOf(t, first.body, "po_", "paid")
+
+	effects := p.Effects()
+	require.Len(t, effects, 1)
+	require.Equal(t, fakeprovider.Effect{ID: id, Type: "payout", WorkflowID: wfID, IdempotencyKey: "k1", AmountCents: 9825, At: effects[0].At}, effects[0])
+}
+
+func TestPayout_InvalidMerchant(t *testing.T) {
+	p, srv := newServer(t)
+	first := post(t, srv.URL, "/payouts", "k1", payoutBody("mer_invalid_1", 9825))
+	require.Equal(t, http.StatusUnprocessableEntity, first.status)
+	require.Contains(t, first.body, "invalid_account")
+	require.Equal(t, first, post(t, srv.URL, "/payouts", "k1", payoutBody("mer_invalid_1", 9825)))
+	require.Empty(t, p.Effects())
+}
+
+func TestFault_PayoutFail(t *testing.T) {
+	p, srv := newServer(t)
+	p.SetFaults(faults(fakeprovider.Rule{Endpoint: "payouts", Mode: fakeprovider.ModePayoutFail, Times: 1}))
+	r := post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825))
+	require.Equal(t, http.StatusUnprocessableEntity, r.status)
+	require.Contains(t, r.body, "invalid_account")
+	require.Empty(t, p.Effects())
+}
+
+func TestRefund_OfExistingCharge(t *testing.T) {
+	p, srv := newServer(t)
+	chargeID := chargeID(t, mustCharge(t, srv.URL, "c1", body("cus_1", 10000)).body)
+	r := post(t, srv.URL, "/refunds", "r1", refundBody(chargeID, 10000))
+	require.Equal(t, http.StatusCreated, r.status, r.body)
+	idOf(t, r.body, "re_", "succeeded")
+
+	effects := p.Effects()
+	require.Len(t, effects, 2)
+	require.Equal(t, "refund", effects[1].Type)
+	require.Equal(t, int64(10000), effects[1].AmountCents)
+}
+
+func TestRefund_Invalid(t *testing.T) {
+	p, srv := newServer(t)
+	chargeID := chargeID(t, mustCharge(t, srv.URL, "c1", body("cus_1", 10000)).body)
+
+	unknown := post(t, srv.URL, "/refunds", "r1", refundBody("ch_missing", 100))
+	require.Equal(t, http.StatusUnprocessableEntity, unknown.status)
+	require.Contains(t, unknown.body, "invalid_refund")
+
+	tooMuch := post(t, srv.URL, "/refunds", "r2", refundBody(chargeID, 10001))
+	require.Equal(t, http.StatusUnprocessableEntity, tooMuch.status)
+
+	require.Equal(t, http.StatusCreated, post(t, srv.URL, "/refunds", "r3", refundBody(chargeID, 6000)).status)
+	twice := post(t, srv.URL, "/refunds", "r4", refundBody(chargeID, 6000))
+	require.Equal(t, http.StatusUnprocessableEntity, twice.status, "total refunds may not exceed the charge")
+
+	require.Len(t, p.Effects(), 2) // the charge and one refund
+}
+
+func TestKeysNamespacedPerResource(t *testing.T) {
+	p, srv := newServer(t)
+	require.Equal(t, http.StatusCreated, mustCharge(t, srv.URL, "k1", body("cus_1", 10000)).status)
+	require.Equal(t, http.StatusCreated, post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825)).status)
+	require.Len(t, p.Effects(), 2)
+}
+
+func TestLookup_InFlightIs409(t *testing.T) {
+	p, srv := newServer(t)
+	p.SetFaults(faults(fakeprovider.Rule{Endpoint: "charges", Mode: fakeprovider.ModeTimeoutBeforeEffect, Times: 1}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/charges", strings.NewReader(body("cus_1", 10000)))
+		req.Header.Set("Idempotency-Key", "k1")
+		if r, err := http.DefaultClient.Do(req); err == nil {
+			r.Body.Close()
+		}
+	}()
+	require.Eventually(t, func() bool {
+		r, err := http.Get(srv.URL + "/charges?idempotency_key=k1")
+		if err != nil {
+			return false
+		}
+		r.Body.Close()
+		return r.StatusCode == http.StatusConflict
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestFaultValidate_PayoutFailOnlyOnPayouts(t *testing.T) {
+	_, srv := newServer(t)
+	ctx := context.Background()
+	require.Error(t, fakeprovider.PutFaults(ctx, srv.URL, faults(fakeprovider.Rule{Endpoint: "charges", Mode: fakeprovider.ModePayoutFail})))
+	require.NoError(t, fakeprovider.PutFaults(ctx, srv.URL, faults(fakeprovider.Rule{Endpoint: "refunds", Mode: fakeprovider.ModeErrorBeforeEffect})))
+	require.NoError(t, fakeprovider.PutFaults(ctx, srv.URL, faults(fakeprovider.Rule{Endpoint: "payouts", Mode: fakeprovider.ModePayoutFail})))
 }
