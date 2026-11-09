@@ -20,6 +20,18 @@ func (q *Queries) BumpWorkflowVersion(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const chargeProviderRef = `-- name: ChargeProviderRef :one
+SELECT provider_ref::text FROM steps
+WHERE workflow_id = $1 AND name = 'charge' AND status = 'SUCCEEDED' AND provider_ref IS NOT NULL
+`
+
+func (q *Queries) ChargeProviderRef(ctx context.Context, workflowID uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, chargeProviderRef, workflowID)
+	var provider_ref string
+	err := row.Scan(&provider_ref)
+	return provider_ref, err
+}
+
 const claimStep = `-- name: ClaimStep :one
 WITH next AS (
   SELECT id FROM steps
@@ -41,7 +53,7 @@ SET status             = 'RUNNING',
 FROM next, workflows w
 WHERE s.id = next.id AND w.id = s.workflow_id
 RETURNING s.id, s.workflow_id, s.name, s.idempotency_key, s.lease_epoch, s.attempt_count, s.prior_status,
-          s.max_attempts,
+          s.max_attempts, s.refund_charge_ref,
           (EXTRACT(EPOCH FROM (now() - s.first_attempted_at)) * 1000)::bigint AS key_age_ms,
           w.input
 `
@@ -53,16 +65,17 @@ type ClaimStepParams struct {
 }
 
 type ClaimStepRow struct {
-	ID             uuid.UUID
-	WorkflowID     uuid.UUID
-	Name           string
-	IdempotencyKey string
-	LeaseEpoch     int64
-	AttemptCount   int32
-	PriorStatus    *string
-	MaxAttempts    int32
-	KeyAgeMs       int64
-	Input          []byte
+	ID              uuid.UUID
+	WorkflowID      uuid.UUID
+	Name            string
+	IdempotencyKey  string
+	LeaseEpoch      int64
+	AttemptCount    int32
+	PriorStatus     *string
+	MaxAttempts     int32
+	RefundChargeRef *string
+	KeyAgeMs        int64
+	Input           []byte
 }
 
 // Claims the next runnable step (design section 9.1). SKIP LOCKED lets many workers
@@ -80,6 +93,7 @@ func (q *Queries) ClaimStep(ctx context.Context, arg ClaimStepParams) (ClaimStep
 		&i.AttemptCount,
 		&i.PriorStatus,
 		&i.MaxAttempts,
+		&i.RefundChargeRef,
 		&i.KeyAgeMs,
 		&i.Input,
 	)
@@ -253,16 +267,23 @@ func (q *Queries) ReclaimExpiredLeases(ctx context.Context) (int64, error) {
 	return reclaimed, err
 }
 
-const setWorkflowStatus = `-- name: SetWorkflowStatus :exec
-UPDATE workflows SET status = $1::text, version = version + 1, updated_at = now() WHERE id = $2
+const transitionWorkflow = `-- name: TransitionWorkflow :execrows
+UPDATE workflows
+SET status = $1::text, version = version + 1, updated_at = now()
+WHERE id = $2 AND status = ANY($3::text[])
 `
 
-type SetWorkflowStatusParams struct {
-	Status string
-	ID     uuid.UUID
+type TransitionWorkflowParams struct {
+	ToStatus     string
+	ID           uuid.UUID
+	FromStatuses []string
 }
 
-func (q *Queries) SetWorkflowStatus(ctx context.Context, arg SetWorkflowStatusParams) error {
-	_, err := q.db.Exec(ctx, setWorkflowStatus, arg.Status, arg.ID)
-	return err
+// Compare-and-swap: only moves the workflow if it is in one of the expected states.
+func (q *Queries) TransitionWorkflow(ctx context.Context, arg TransitionWorkflowParams) (int64, error) {
+	result, err := q.db.Exec(ctx, transitionWorkflow, arg.ToStatus, arg.ID, arg.FromStatuses)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

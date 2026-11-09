@@ -499,3 +499,55 @@ func TestFindStuckWorkflows(t *testing.T) {
 	require.Equal(t, "RUNNING", got[0].Status)
 	require.GreaterOrEqual(t, got[0].Age, 2*time.Hour-time.Minute)
 }
+
+func insertRefundStep(t *testing.T, pool *pgxpool.Pool, wf uuid.UUID, ref *string) error {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO steps (id, workflow_id, name, generation, status, idempotency_key, max_attempts, refund_charge_ref)
+		VALUES (gen_random_uuid(), $1, 'refund', 0, 'PENDING', $2, 20, $3)`, wf, uuid.NewString(), ref)
+	return err
+}
+
+func TestClaim_ReturnsRefundChargeRef(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	wf := submit(t, pool, "cus_1")
+	ref := "ch_1"
+	require.NoError(t, insertRefundStep(t, pool, wf, &ref))
+
+	s, ok, err := engine.Claim(context.Background(), pool, "w1", []string{"refund"}, time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "ch_1", s.RefundChargeRef)
+
+	c := mustClaim(t, pool, "w1", time.Minute)
+	require.Equal(t, "", c.RefundChargeRef)
+}
+
+func TestSchema_RefundRequiresChargeRef(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	wf := submit(t, pool, "cus_1")
+
+	err := insertRefundStep(t, pool, wf, nil)
+	require.Error(t, err)
+	var pgErr interface{ SQLState() string }
+	require.True(t, errors.As(err, &pgErr))
+	require.Equal(t, "23514", pgErr.SQLState())
+
+	_, err = pool.Exec(context.Background(), `UPDATE steps SET refund_charge_ref = 'ch_1' WHERE name = 'charge'`)
+	require.Error(t, err, "only refunds carry a charge reference")
+}
+
+func TestTransitionWorkflow_RejectsUnexpectedStatus(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.NewPool(t, dsn)
+	wf := submit(t, pool, "cus_1")
+	s := mustClaim(t, pool, "w1", time.Minute)
+	_, err := pool.Exec(ctx, `UPDATE workflows SET status = 'NEEDS_ATTENTION' WHERE id = $1`, wf) // a human got there first
+	require.NoError(t, err)
+
+	err = engine.Complete(ctx, pool, s, engine.Result{Kind: engine.ResultFailedPermanent, HTTPStatus: 402},
+		engine.NewChargeStep(nil))
+	require.ErrorIs(t, err, engine.ErrUnexpectedWorkflowStatus)
+	require.Equal(t, "RUNNING", readStep(t, pool, s.ID).status, "completion rolled back")
+	require.Equal(t, "NEEDS_ATTENTION", scalar[string](t, pool, `SELECT status FROM workflows WHERE id = $1`, wf))
+}

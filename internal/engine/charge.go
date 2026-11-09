@@ -2,21 +2,16 @@ package engine
 
 import (
 	"context"
-	"fmt"
-
-	"github.com/google/uuid"
 
 	"github.com/AdamDiouri/idem/internal/ledger"
 	"github.com/AdamDiouri/idem/internal/provider"
 	"github.com/AdamDiouri/idem/internal/store/db"
-	"github.com/AdamDiouri/idem/internal/workflow"
 )
 
 const (
 	stepCharge        = "charge"
 	stepPayout        = "payout"
 	payoutMaxAttempts = 8
-	statusPending     = "PENDING"
 )
 
 type chargeStep struct {
@@ -59,20 +54,8 @@ func (c *chargeStep) OnSuccess(ctx context.Context, q *db.Queries, s ClaimedStep
 		return err
 	}
 
-	payoutID, err := uuid.NewV7()
-	if err != nil {
-		return fmt.Errorf("new payout step id: %w", err)
-	}
-	if err := q.InsertStep(ctx, db.InsertStepParams{
-		ID:             payoutID,
-		WorkflowID:     s.WorkflowID,
-		Name:           stepPayout,
-		Generation:     0,
-		Status:         statusPending,
-		IdempotencyKey: workflow.StepIdempotencyKey(s.WorkflowID, stepPayout, 0),
-		MaxAttempts:    payoutMaxAttempts,
-	}); err != nil {
-		return fmt.Errorf("create payout step: %w", err)
+	if err := newStep(ctx, q, s.WorkflowID, stepPayout, payoutMaxAttempts, ""); err != nil {
+		return err
 	}
 	return q.BumpWorkflowVersion(ctx, s.WorkflowID)
 }
@@ -80,5 +63,5 @@ func (c *chargeStep) OnSuccess(ctx context.Context, q *db.Queries, s ClaimedStep
 // OnPermanentFailure fails the workflow: the charge never happened, so there is
 // nothing to compensate.
 func (c *chargeStep) OnPermanentFailure(ctx context.Context, q *db.Queries, s ClaimedStep) error {
-	return q.SetWorkflowStatus(ctx, db.SetWorkflowStatusParams{Status: "FAILED", ID: s.WorkflowID})
+	return transitionWorkflow(ctx, q, s.WorkflowID, []string{wfRunning}, wfFailed)
 }

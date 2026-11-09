@@ -50,8 +50,8 @@ func Complete(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, r Result, 
 	case ResultInDoubt, ResultRetryNoEffect:
 		// No hook: nothing is known to have happened, so nothing else may change.
 	case ResultDead:
-		if err := q.SetWorkflowStatus(ctx, db.SetWorkflowStatusParams{Status: "NEEDS_ATTENTION", ID: s.WorkflowID}); err != nil {
-			return fmt.Errorf("mark workflow needs attention: %w", err)
+		if err := transitionWorkflow(ctx, q, s.WorkflowID, []string{wfRunning, wfCompensating}, wfNeedsAttention); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("unknown result kind %q", r.Kind)

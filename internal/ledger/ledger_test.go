@@ -166,3 +166,47 @@ func TestSchema_LedgerIsAppendOnly(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, "42501", pgCode(t, err))
 }
+
+func TestPayoutEntries(t *testing.T) {
+	entries := ledger.PayoutEntries(10000, 175)
+	require.Equal(t, []ledger.Entry{
+		{Account: ledger.MerchantPayable, AmountCents: 9825},
+		{Account: ledger.ProviderReceivable, AmountCents: -9825},
+	}, entries)
+	require.Zero(t, sum(entries))
+}
+
+func TestRefundEntries(t *testing.T) {
+	entries := ledger.RefundEntries(10000, 175)
+	require.Equal(t, []ledger.Entry{
+		{Account: ledger.MerchantPayable, AmountCents: 9825},
+		{Account: ledger.PlatformRevenue, AmountCents: 175},
+		{Account: ledger.ProviderReceivable, AmountCents: -10000},
+	}, entries)
+	require.Zero(t, sum(entries))
+	require.Len(t, ledger.RefundEntries(10000, 0), 2)
+}
+
+func accountTotals(groups ...[]ledger.Entry) map[string]int64 {
+	totals := map[string]int64{}
+	for _, g := range groups {
+		for _, e := range g {
+			totals[e.Account] += e.AmountCents
+		}
+	}
+	return totals
+}
+
+func TestChargePayoutRefund_NetToZeroPerAccount(t *testing.T) {
+	compensated := accountTotals(ledger.ChargeEntries(10000, 175), ledger.RefundEntries(10000, 175))
+	for account, total := range compensated {
+		require.Zero(t, total, "compensated workflow: %s", account)
+	}
+
+	succeeded := accountTotals(ledger.ChargeEntries(10000, 175), ledger.PayoutEntries(10000, 175))
+	require.Equal(t, map[string]int64{
+		ledger.ProviderReceivable: 175, // the fee is still held at the provider
+		ledger.MerchantPayable:    0,
+		ledger.PlatformRevenue:    -175,
+	}, succeeded)
+}

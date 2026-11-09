@@ -22,7 +22,7 @@ SET status             = 'RUNNING',
 FROM next, workflows w
 WHERE s.id = next.id AND w.id = s.workflow_id
 RETURNING s.id, s.workflow_id, s.name, s.idempotency_key, s.lease_epoch, s.attempt_count, s.prior_status,
-          s.max_attempts,
+          s.max_attempts, s.refund_charge_ref,
           (EXTRACT(EPOCH FROM (now() - s.first_attempted_at)) * 1000)::bigint AS key_age_ms,
           w.input;
 
@@ -83,8 +83,15 @@ SELECT count(*)::bigint AS reclaimed FROM reclaimed;
 -- name: BumpWorkflowVersion :exec
 UPDATE workflows SET version = version + 1, updated_at = now() WHERE id = sqlc.arg(id);
 
--- name: SetWorkflowStatus :exec
-UPDATE workflows SET status = sqlc.arg(status)::text, version = version + 1, updated_at = now() WHERE id = sqlc.arg(id);
+-- name: TransitionWorkflow :execrows
+-- Compare-and-swap: only moves the workflow if it is in one of the expected states.
+UPDATE workflows
+SET status = sqlc.arg(to_status)::text, version = version + 1, updated_at = now()
+WHERE id = sqlc.arg(id) AND status = ANY(sqlc.arg(from_statuses)::text[]);
+
+-- name: ChargeProviderRef :one
+SELECT provider_ref::text FROM steps
+WHERE workflow_id = sqlc.arg(workflow_id) AND name = 'charge' AND status = 'SUCCEEDED' AND provider_ref IS NOT NULL;
 
 -- name: FindStuckWorkflows :many
 SELECT id, status, (EXTRACT(EPOCH FROM (now() - updated_at)) * 1000)::bigint AS age_ms

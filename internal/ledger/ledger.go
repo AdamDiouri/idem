@@ -108,3 +108,23 @@ func ChargeEntries(amountCents, feeCents int64) []Entry {
 	}
 	return entries
 }
+
+// PayoutEntries records a successful payout: the merchant is paid what we owed
+// them, from the money the provider held for us.
+func PayoutEntries(amountCents, feeCents int64) []Entry {
+	net := amountCents - feeCents
+	return []Entry{
+		{Account: MerchantPayable, AmountCents: net},
+		{Account: ProviderReceivable, AmountCents: -net},
+	}
+}
+
+// RefundEntries records a successful refund of the full charge: it reverses the
+// charge's postings, including the platform fee.
+func RefundEntries(amountCents, feeCents int64) []Entry {
+	entries := []Entry{{Account: MerchantPayable, AmountCents: amountCents - feeCents}}
+	if feeCents != 0 {
+		entries = append(entries, Entry{Account: PlatformRevenue, AmountCents: feeCents})
+	}
+	return append(entries, Entry{Account: ProviderReceivable, AmountCents: -amountCents})
+}
