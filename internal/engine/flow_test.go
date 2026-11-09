@@ -180,6 +180,38 @@ func TestFlow_PayoutDeadDoesNotCompensate(t *testing.T) {
 	h.assertNoViolations(t)
 }
 
+// Review finding: the dangerous variant of the pivot — the merchant really was
+// paid, but we cannot tell. DEAD, NEEDS_ATTENTION, no refund; and the
+// invariants accept it (the ledger may lag the provider until a human acts).
+func TestFlow_PayoutDeadAfterMoneyMoved(t *testing.T) {
+	h := newHarness(t)
+	h.setFaults(fakeprovider.Rule{Endpoint: "payouts", Mode: fakeprovider.ModeTimeoutAfterEffect})
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	h.drain(t, h.workerWith("w1", nil, h.chargeStep()))
+	h.setStepMaxAttempts(t, wf, "payout", 1)
+
+	h.drain(t, h.workerWith("w1", nil, h.allSteps()...))
+	require.Len(t, h.effectsOf(wf, "payout"), 1, "the merchant was paid")
+	require.Equal(t, "DEAD", h.stepStatus(t, wf, "payout"))
+	require.Equal(t, "NEEDS_ATTENTION", h.workflowStatus(t, wf))
+	require.Equal(t, 0, h.count(t, `SELECT count(*) FROM steps WHERE workflow_id = $1 AND name = 'refund'`, wf), "no automatic refund")
+	h.assertNoViolations(t)
+}
+
+// Review finding: a parked workflow moves no more money.
+func TestFlow_ParkedWorkflowMovesNoMoney(t *testing.T) {
+	h := newHarness(t)
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	h.drain(t, h.workerWith("w1", nil, h.chargeStep()))
+	_, err := h.pool.Exec(context.Background(), `UPDATE workflows SET status = 'NEEDS_ATTENTION' WHERE id = $1`, wf)
+	require.NoError(t, err)
+
+	h.drain(t, h.workerWith("w1", nil, h.allSteps()...))
+	require.Empty(t, h.effectsOf(wf, "payout"))
+	require.Equal(t, "PENDING", h.stepStatus(t, wf, "payout"))
+	h.assertNoViolations(t)
+}
+
 func TestFlow_PayoutCrashRecovery(t *testing.T) {
 	h := newHarness(t)
 	wf := submitTo(t, h, "cus_1", "mer_1")
@@ -231,5 +263,11 @@ func TestFlow_ManyWorkflowsUnderFaults(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return h.count(t, `SELECT count(*) FROM workflows WHERE status IN ('SUCCEEDED','FAILED','COMPENSATED','NEEDS_ATTENTION')`) == n
 	}, 30*time.Second, 50*time.Millisecond)
+	// The outcome mix is fixed by construction (i%7 declines, i%3 invalid
+	// merchants); faults must only delay, never change, an outcome.
+	require.Equal(t, 5, h.count(t, `SELECT count(*) FROM workflows WHERE status = 'FAILED'`))
+	require.Equal(t, 8, h.count(t, `SELECT count(*) FROM workflows WHERE status = 'COMPENSATED'`))
+	require.Equal(t, 17, h.count(t, `SELECT count(*) FROM workflows WHERE status = 'SUCCEEDED'`))
+	require.Equal(t, 0, h.count(t, `SELECT count(*) FROM workflows WHERE status = 'NEEDS_ATTENTION'`))
 	h.assertNoViolations(t)
 }

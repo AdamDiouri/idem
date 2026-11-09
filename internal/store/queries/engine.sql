@@ -2,14 +2,18 @@
 -- Claims the next runnable step (design section 9.1). SKIP LOCKED lets many workers
 -- claim concurrently without blocking or double-claiming; lease_epoch + 1 is
 -- the fencing token of the new owner. All times come from the database clock.
+-- Only steps of active workflows are claimable: a parked (NEEDS_ATTENTION) or
+-- finished workflow must not move money it could no longer record.
 WITH next AS (
-  SELECT id FROM steps
-  WHERE status IN ('PENDING', 'IN_DOUBT')
-    AND run_after <= now()
-    AND name = ANY(sqlc.arg(names)::text[])
-  ORDER BY run_after
+  SELECT st.id FROM steps st
+  JOIN workflows wf ON wf.id = st.workflow_id
+  WHERE st.status IN ('PENDING', 'IN_DOUBT')
+    AND st.run_after <= now()
+    AND st.name = ANY(sqlc.arg(names)::text[])
+    AND wf.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+  ORDER BY st.run_after
   LIMIT 1
-  FOR UPDATE SKIP LOCKED
+  FOR UPDATE OF st SKIP LOCKED
 )
 UPDATE steps s
 SET status             = 'RUNNING',

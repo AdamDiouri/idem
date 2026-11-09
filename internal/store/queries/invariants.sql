@@ -20,3 +20,6 @@ GROUP BY t.id, t.workflow_id, t.kind;
 
 -- name: TerminalWorkflows :many
 SELECT id, status FROM workflows WHERE status IN ('SUCCEEDED', 'FAILED', 'COMPENSATED');
+
+-- name: NeedsAttentionWorkflows :many
+SELECT id FROM workflows WHERE status = 'NEEDS_ATTENTION' ORDER BY updated_at;

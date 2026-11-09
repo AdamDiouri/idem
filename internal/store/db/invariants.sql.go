@@ -59,6 +59,30 @@ func (q *Queries) LedgerTransactionsSummary(ctx context.Context) ([]LedgerTransa
 	return items, nil
 }
 
+const needsAttentionWorkflows = `-- name: NeedsAttentionWorkflows :many
+SELECT id FROM workflows WHERE status = 'NEEDS_ATTENTION' ORDER BY updated_at
+`
+
+func (q *Queries) NeedsAttentionWorkflows(ctx context.Context) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, needsAttentionWorkflows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const terminalWorkflows = `-- name: TerminalWorkflows :many
 SELECT id, status FROM workflows WHERE status IN ('SUCCEEDED', 'FAILED', 'COMPENSATED')
 `

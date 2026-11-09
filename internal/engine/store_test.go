@@ -551,3 +551,34 @@ func TestTransitionWorkflow_RejectsUnexpectedStatus(t *testing.T) {
 	require.Equal(t, "RUNNING", readStep(t, pool, s.ID).status, "completion rolled back")
 	require.Equal(t, "NEEDS_ATTENTION", scalar[string](t, pool, `SELECT status FROM workflows WHERE id = $1`, wf))
 }
+
+// Review finding: a workflow that is parked (NEEDS_ATTENTION) or finished must
+// not have its steps claimed — otherwise money moves with nowhere to record it.
+func TestClaim_SkipsStepsOfInactiveWorkflows(t *testing.T) {
+	for _, status := range []string{"NEEDS_ATTENTION", "SUCCEEDED", "FAILED", "COMPENSATED"} {
+		t.Run(status, func(t *testing.T) {
+			pool := testutil.NewPool(t, dsn)
+			wf := submit(t, pool, "cus_1")
+			_, err := pool.Exec(context.Background(), `UPDATE workflows SET status = $2 WHERE id = $1`, wf, status)
+			require.NoError(t, err)
+
+			_, ok, err := engine.Claim(context.Background(), pool, "w1", charge, time.Minute)
+			require.NoError(t, err)
+			require.False(t, ok)
+		})
+	}
+}
+
+func TestComplete_ChargeSuccessOnParkedWorkflowRollsBack(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.NewPool(t, dsn)
+	wf := submit(t, pool, "cus_1")
+	s := mustClaim(t, pool, "w1", time.Minute)
+	_, err := pool.Exec(ctx, `UPDATE workflows SET status = 'NEEDS_ATTENTION' WHERE id = $1`, wf)
+	require.NoError(t, err)
+
+	err = engine.Complete(ctx, pool, s, engine.Result{Kind: engine.ResultSucceeded, ProviderRef: "ch_1"}, engine.NewChargeStep(nil))
+	require.ErrorIs(t, err, engine.ErrUnexpectedWorkflowStatus)
+	require.Equal(t, 0, scalar[int](t, pool, `SELECT count(*) FROM steps WHERE workflow_id = $1 AND name = 'payout'`, wf),
+		"a parked workflow must not advance to the payout")
+}

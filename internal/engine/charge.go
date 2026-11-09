@@ -57,7 +57,8 @@ func (c *chargeStep) OnSuccess(ctx context.Context, q *db.Queries, s ClaimedStep
 	if err := newStep(ctx, q, s.WorkflowID, stepPayout, payoutMaxAttempts, ""); err != nil {
 		return err
 	}
-	return q.BumpWorkflowVersion(ctx, s.WorkflowID)
+	// Advance only a RUNNING workflow: if it was parked meanwhile, roll back.
+	return transitionWorkflow(ctx, q, s.WorkflowID, []string{wfRunning}, wfRunning)
 }
 
 // OnPermanentFailure fails the workflow: the charge never happened, so there is
