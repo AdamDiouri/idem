@@ -71,8 +71,12 @@ func workerCmd() *cobra.Command {
 			}
 			client := provider.NewClient(e.cfg.ProviderURL, e.cfg.ProviderTimeout)
 			return engine.NewWorker(e.pool, engine.WorkerOptions{
-				ID:                 id,
-				Steps:              []engine.Step{engine.NewChargeStep(client)},
+				ID: id,
+				Steps: []engine.Step{
+					engine.NewChargeStep(client),
+					engine.NewPayoutStep(client),
+					engine.NewRefundStep(client),
+				},
 				LeaseTTL:           e.cfg.LeaseTTL,
 				PollInterval:       e.cfg.PollInterval,
 				Backoff:            engine.Backoff{Base: e.cfg.RetryBase, Cap: e.cfg.RetryCap},
