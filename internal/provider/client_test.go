@@ -229,3 +229,83 @@ func TestClassString(t *testing.T) {
 	require.Equal(t, "permanent", provider.Permanent.String())
 	require.Equal(t, "ambiguous", provider.Ambiguous.String())
 }
+
+func payoutReq(merchant string) provider.PayoutRequest {
+	return provider.PayoutRequest{AmountCents: 9825, Currency: "EUR", MerchantID: merchant, WorkflowID: wfID}
+}
+
+func refundReq(chargeID string) provider.RefundRequest {
+	return provider.RefundRequest{AmountCents: 10000, Currency: "EUR", ChargeID: chargeID, WorkflowID: wfID}
+}
+
+func TestCreatePayout_SuccessAndInvalidAccount(t *testing.T) {
+	ctx := context.Background()
+	p, url := fake(t)
+	c := provider.NewClient(url, time.Second)
+
+	ok := c.CreatePayout(ctx, "po-key-1", payoutReq("mer_1"))
+	require.Equal(t, provider.Success, ok.Class, "err: %v", ok.Err)
+	require.True(t, strings.HasPrefix(ok.ProviderRef, "po_"))
+	require.Equal(t, "payout", p.Effects()[0].Type)
+
+	bad := c.CreatePayout(ctx, "po-key-2", payoutReq("mer_invalid_1"))
+	require.Equal(t, provider.Permanent, bad.Class)
+	require.Equal(t, http.StatusUnprocessableEntity, bad.HTTPStatus)
+}
+
+func TestCreateRefund_SuccessAndInvalid(t *testing.T) {
+	ctx := context.Background()
+	_, url := fake(t)
+	c := provider.NewClient(url, time.Second)
+	charge := c.CreateCharge(ctx, "ch-key-1", chargeReq("cus_1"))
+	require.Equal(t, provider.Success, charge.Class)
+
+	ok := c.CreateRefund(ctx, "re-key-1", refundReq(charge.ProviderRef))
+	require.Equal(t, provider.Success, ok.Class, "err: %v", ok.Err)
+	require.True(t, strings.HasPrefix(ok.ProviderRef, "re_"))
+
+	bad := c.CreateRefund(ctx, "re-key-2", refundReq("ch_missing"))
+	require.Equal(t, provider.Permanent, bad.Class)
+}
+
+func TestPayout_WrongStatusIsAmbiguous(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"po_1","status":"pending","amount_cents":9825,"currency":"EUR"}`))
+	}))
+	defer srv.Close()
+	out := provider.NewClient(srv.URL, time.Second).CreatePayout(context.Background(), "k", payoutReq("mer_1"))
+	require.Equal(t, provider.Ambiguous, out.Class)
+}
+
+func TestLookupPayoutAndRefund(t *testing.T) {
+	ctx := context.Background()
+	_, url := fake(t)
+	c := provider.NewClient(url, time.Second)
+
+	out, found := c.LookupPayout(ctx, "po-key-1", payoutReq("mer_1"))
+	require.False(t, found)
+	require.Equal(t, provider.Permanent, out.Class)
+	created := c.CreatePayout(ctx, "po-key-1", payoutReq("mer_1"))
+	out, found = c.LookupPayout(ctx, "po-key-1", payoutReq("mer_1"))
+	require.True(t, found)
+	require.Equal(t, provider.Success, out.Class)
+	require.Equal(t, created.ProviderRef, out.ProviderRef)
+
+	charge := c.CreateCharge(ctx, "ch-key-1", chargeReq("cus_1"))
+	refund := c.CreateRefund(ctx, "re-key-1", refundReq(charge.ProviderRef))
+	out, found = c.LookupRefund(ctx, "re-key-1", refundReq(charge.ProviderRef))
+	require.True(t, found)
+	require.Equal(t, refund.ProviderRef, out.ProviderRef)
+}
+
+func TestLookup_InFlightIsAmbiguous(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"idempotency_key_in_flight"}}`))
+	}))
+	defer srv.Close()
+	out, found := provider.NewClient(srv.URL, time.Second).LookupCharge(context.Background(), "k", chargeReq("cus_1"))
+	require.False(t, found)
+	require.Equal(t, provider.Ambiguous, out.Class)
+}

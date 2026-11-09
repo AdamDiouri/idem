@@ -84,50 +84,104 @@ func NewClient(baseURL string, timeout time.Duration) *Client {
 	return &Client{baseURL: baseURL, http: &http.Client{Timeout: timeout}}
 }
 
+// PayoutRequest is the body of POST /payouts.
+type PayoutRequest struct {
+	AmountCents int64     `json:"amount_cents"`
+	Currency    string    `json:"currency"`
+	MerchantID  string    `json:"merchant_id"`
+	WorkflowID  uuid.UUID `json:"workflow_id"`
+}
+
+// RefundRequest is the body of POST /refunds.
+type RefundRequest struct {
+	AmountCents int64     `json:"amount_cents"`
+	Currency    string    `json:"currency"`
+	ChargeID    string    `json:"charge_id"`
+	WorkflowID  uuid.UUID `json:"workflow_id"`
+}
+
+// expect is what a successful response must report to count as Success.
+type expect struct {
+	AmountCents   int64
+	Currency      string
+	SuccessStatus string
+}
+
 // CreateCharge asks the provider to charge the customer, using idempotencyKey
 // so that retries of the same intended charge are deduplicated by the provider.
 func (c *Client) CreateCharge(ctx context.Context, idempotencyKey string, req ChargeRequest) Outcome {
-	body, err := json.Marshal(req)
+	return c.create(ctx, "/charges", idempotencyKey, req, expect{req.AmountCents, req.Currency, "succeeded"})
+}
+
+// LookupCharge asks what happened to the charge sent with idempotencyKey.
+// found is false when the provider has no record (404, Class Permanent) or
+// the lookup itself failed (Class Ambiguous).
+func (c *Client) LookupCharge(ctx context.Context, idempotencyKey string, want ChargeRequest) (Outcome, bool) {
+	return c.lookup(ctx, "/charges", idempotencyKey, expect{want.AmountCents, want.Currency, "succeeded"})
+}
+
+// CreatePayout asks the provider to pay the merchant.
+func (c *Client) CreatePayout(ctx context.Context, idempotencyKey string, req PayoutRequest) Outcome {
+	return c.create(ctx, "/payouts", idempotencyKey, req, expect{req.AmountCents, req.Currency, "paid"})
+}
+
+// LookupPayout asks what happened to the payout sent with idempotencyKey.
+func (c *Client) LookupPayout(ctx context.Context, idempotencyKey string, want PayoutRequest) (Outcome, bool) {
+	return c.lookup(ctx, "/payouts", idempotencyKey, expect{want.AmountCents, want.Currency, "paid"})
+}
+
+// CreateRefund asks the provider to return (part of) a charge to the customer.
+func (c *Client) CreateRefund(ctx context.Context, idempotencyKey string, req RefundRequest) Outcome {
+	return c.create(ctx, "/refunds", idempotencyKey, req, expect{req.AmountCents, req.Currency, "succeeded"})
+}
+
+// LookupRefund asks what happened to the refund sent with idempotencyKey.
+func (c *Client) LookupRefund(ctx context.Context, idempotencyKey string, want RefundRequest) (Outcome, bool) {
+	return c.lookup(ctx, "/refunds", idempotencyKey, expect{want.AmountCents, want.Currency, "succeeded"})
+}
+
+func (c *Client) create(ctx context.Context, path, idempotencyKey string, body any, want expect) Outcome {
+	b, err := json.Marshal(body)
 	if err != nil {
-		return Outcome{Class: Ambiguous, Err: fmt.Errorf("marshal charge: %w", err)}
+		return Outcome{Class: Ambiguous, Err: fmt.Errorf("marshal request: %w", err)}
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/charges", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(b))
 	if err != nil {
 		return Outcome{Class: Ambiguous, Err: fmt.Errorf("build request: %w", err)}
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Idempotency-Key", idempotencyKey)
 
-	status, header, respBody, out, ok := c.do(httpReq, "charge request")
+	status, header, respBody, out, ok := c.do(httpReq, "POST "+path)
 	if !ok {
 		return out
 	}
-	return classifyCharge(status, header, respBody, req)
+	return classify(status, header, respBody, want)
 }
 
-// LookupCharge asks the provider what happened to the charge sent with
-// idempotencyKey. found is false when the provider has no record (404) or the
-// lookup itself failed; Class tells the two apart (Permanent vs Ambiguous).
-func (c *Client) LookupCharge(ctx context.Context, idempotencyKey string, want ChargeRequest) (Outcome, bool) {
-	u := c.baseURL + "/charges?idempotency_key=" + url.QueryEscape(idempotencyKey)
+func (c *Client) lookup(ctx context.Context, path, idempotencyKey string, want expect) (Outcome, bool) {
+	u := c.baseURL + path + "?idempotency_key=" + url.QueryEscape(idempotencyKey)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return Outcome{Class: Ambiguous, Err: fmt.Errorf("build lookup: %w", err)}, false
 	}
 
-	status, header, respBody, out, ok := c.do(httpReq, "charge lookup")
+	status, header, respBody, out, ok := c.do(httpReq, "GET "+path)
 	if !ok {
-		// A failed lookup tells us nothing about the charge itself.
+		// A failed lookup tells us nothing about the request itself.
 		out.Class = Ambiguous
 		return out, false
 	}
 	switch status {
 	case http.StatusNotFound:
 		return Outcome{Class: Permanent, HTTPStatus: status, Err: errors.New("idempotency key unknown to provider")}, false
-	case http.StatusOK, http.StatusPaymentRequired:
-		return classifyCharge(status, header, respBody, want), true
+	case http.StatusOK, http.StatusPaymentRequired, http.StatusUnprocessableEntity:
+		// A stored outcome: success, or a definitive refusal (declined card,
+		// invalid account, invalid refund).
+		out := classify(status, header, respBody, want)
+		return out, out.Class != Ambiguous
 	default:
-		out := classifyCharge(status, header, respBody, want)
+		out := classify(status, header, respBody, want)
 		if out.Class != Ambiguous {
 			out = Outcome{Class: Ambiguous, HTTPStatus: status, Err: fmt.Errorf("lookup returned %d", status)}
 		}
@@ -175,7 +229,7 @@ func notSent(err error) bool {
 	return errors.As(err, &opErr) && opErr.Op == "dial"
 }
 
-func classifyCharge(status int, header http.Header, body []byte, want ChargeRequest) Outcome {
+func classify(status int, header http.Header, body []byte, want expect) Outcome {
 	out := Outcome{HTTPStatus: status}
 
 	switch {
@@ -189,18 +243,18 @@ func classifyCharge(status int, header http.Header, body []byte, want ChargeRequ
 		switch {
 		case json.Unmarshal(body, &r) != nil:
 			out.Class, out.Err = Ambiguous, fmt.Errorf("unparseable %d response", status)
-		case r.ID == "" || r.Status != "succeeded":
-			out.Class, out.Err = Ambiguous, fmt.Errorf("unexpected charge response: id=%q status=%q", r.ID, r.Status)
+		case r.ID == "" || r.Status != want.SuccessStatus:
+			out.Class, out.Err = Ambiguous, fmt.Errorf("unexpected response: id=%q status=%q", r.ID, r.Status)
 		case r.AmountCents != want.AmountCents:
-			out.Class, out.Err = Ambiguous, fmt.Errorf("charge amount mismatch: requested %d, provider reports %d", want.AmountCents, r.AmountCents)
+			out.Class, out.Err = Ambiguous, fmt.Errorf("amount mismatch: requested %d, provider reports %d", want.AmountCents, r.AmountCents)
 		case r.Currency != "" && r.Currency != want.Currency:
-			out.Class, out.Err = Ambiguous, fmt.Errorf("charge currency mismatch: requested %s, provider reports %s", want.Currency, r.Currency)
+			out.Class, out.Err = Ambiguous, fmt.Errorf("currency mismatch: requested %s, provider reports %s", want.Currency, r.Currency)
 		default:
 			out.Class, out.ProviderRef = Success, r.ID
 		}
 
 	case status == http.StatusBadRequest || status == http.StatusPaymentRequired:
-		out.Class, out.Err = Permanent, fmt.Errorf("provider refused charge: %d %s", status, errorCode(body))
+		out.Class, out.Err = Permanent, fmt.Errorf("provider refused request: %d %s", status, errorCode(body))
 
 	case status == http.StatusUnprocessableEntity:
 		code := errorCode(body)
@@ -208,7 +262,7 @@ func classifyCharge(status int, header http.Header, body []byte, want ChargeRequ
 			// Our bug: same key, different body. We cannot claim nothing happened.
 			out.Class, out.Err = Ambiguous, errors.New("provider reports idempotency key reused with a different body")
 		} else {
-			out.Class, out.Err = Permanent, fmt.Errorf("provider refused charge: %d %s", status, code)
+			out.Class, out.Err = Permanent, fmt.Errorf("provider refused request: %d %s", status, code)
 		}
 
 	case status == http.StatusConflict:
