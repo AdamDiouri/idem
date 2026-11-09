@@ -1,7 +1,9 @@
 -- name: ListParkedSteps :many
 -- Each parked workflow with the step that parked it (its most recent step).
+-- w.version changes whenever the workflow leaves NEEDS_ATTENTION and comes back,
+-- so it identifies what the operator saw.
 SELECT DISTINCT ON (w.id)
-  w.id AS workflow_id, s.id AS step_id, s.name, s.status, s.dead_reason, s.last_error, s.attempt_count, w.input,
+  w.id AS workflow_id, w.version, s.id AS step_id, s.name, s.status, s.dead_reason, s.last_error, s.attempt_count, w.input,
   (EXTRACT(EPOCH FROM (now() - w.updated_at)) * 1000)::bigint AS parked_ms
 FROM workflows w
 JOIN steps s ON s.workflow_id = w.id AND s.status IN ('DEAD', 'FAILED_PERMANENT')
@@ -13,7 +15,7 @@ ORDER BY w.id, s.created_at DESC;
 -- dead or refused, and the workflow's most recent step. Anything else (a step a
 -- worker may run, a superseded step) yields no row.
 SELECT s.id, s.workflow_id, s.name, s.generation, s.status, s.dead_reason, s.idempotency_key,
-       s.refund_charge_ref, w.input
+       s.refund_charge_ref, w.input, w.version AS workflow_version
 FROM steps s
 JOIN workflows w ON w.id = s.workflow_id
 WHERE s.id = sqlc.arg(id)

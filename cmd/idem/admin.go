@@ -100,9 +100,15 @@ func parseID(s string) (uuid.UUID, error) {
 	return id, nil
 }
 
-func addReason(cmd *cobra.Command, reason *string) {
+// addMutationFlags adds the flags every mutating command requires: why, and
+// the workflow version the decision was made on (the VERSION column of
+// `idem admin list`). A version that moved on means the facts changed.
+func addMutationFlags(cmd *cobra.Command, reason *string, version *int64) {
 	cmd.Flags().StringVar(reason, "reason", "", "why (recorded in the audit log)")
 	_ = cmd.MarkFlagRequired("reason")
+	cmd.Flags().Int64Var(version, "expect-version", 0,
+		"the VERSION shown by `idem admin list`; refused if the workflow changed since")
+	_ = cmd.MarkFlagRequired("expect-version")
 }
 
 func adminListCmd() *cobra.Command {
@@ -125,13 +131,13 @@ func adminListCmd() *cobra.Command {
 					return enc.Encode(parked)
 				}
 				tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-				_, _ = fmt.Fprintln(tw, "WORKFLOW\tSTEP\tSTATUS\tREASON\tATTEMPTS\tPARKED FOR\tLAST ERROR")
+				_, _ = fmt.Fprintln(tw, "WORKFLOW\tVERSION\tSTEP\tSTATUS\tREASON\tATTEMPTS\tPARKED FOR\tLAST ERROR")
 				for _, p := range parked {
 					why := p.DeadReason
 					if why == "" {
 						why = "refused"
 					}
-					_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", p.WorkflowID, p.Step, p.StepStatus, why,
+					_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%s\t%s\n", p.WorkflowID, p.Version, p.Step, p.StepStatus, why,
 						p.Attempts, p.ParkedFor.Round(time.Second), truncate(p.LastError, 60))
 				}
 				return tw.Flush()
@@ -145,6 +151,7 @@ func adminListCmd() *cobra.Command {
 
 func adminRetryCmd() *cobra.Command {
 	var reason string
+	var version int64
 	cmd := &cobra.Command{
 		Use:   "retry-step <step-id>",
 		Short: "Retry a parked step with the SAME idempotency key (always safe)",
@@ -155,7 +162,7 @@ func adminRetryCmd() *cobra.Command {
 				return err
 			}
 			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
-				if err := a.RetryStep(ctx, id, reason); err != nil {
+				if err := a.RetryStep(ctx, id, version, reason); err != nil {
 					return err
 				}
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "step %s handed back to workers (same idempotency key)\n", id)
@@ -163,12 +170,13 @@ func adminRetryCmd() *cobra.Command {
 			})
 		},
 	}
-	addReason(cmd, &reason)
+	addMutationFlags(cmd, &reason, &version)
 	return cmd
 }
 
 func adminNewGenerationCmd() *cobra.Command {
 	var reason string
+	var version int64
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "new-generation <step-id>",
@@ -185,7 +193,7 @@ func adminNewGenerationCmd() *cobra.Command {
 				return usageError{errors.New("new-generation mints a new idempotency key; pass --confirm-no-effect after verifying the old key moved no money")}
 			}
 			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
-				newID, err := a.NewGeneration(ctx, id, reason, confirm)
+				newID, err := a.NewGeneration(ctx, id, version, reason, confirm)
 				if err != nil {
 					return err
 				}
@@ -194,13 +202,14 @@ func adminNewGenerationCmd() *cobra.Command {
 			})
 		},
 	}
-	addReason(cmd, &reason)
+	addMutationFlags(cmd, &reason, &version)
 	cmd.Flags().BoolVar(&confirm, "confirm-no-effect", false, "I verified the old key moved no money")
 	return cmd
 }
 
 func adminConfirmCmd() *cobra.Command {
 	var reason, ref string
+	var version int64
 	cmd := &cobra.Command{
 		Use:   "confirm-step <step-id>",
 		Short: "Record that a dead step's effect DID happen (posts the ledger, advances the saga)",
@@ -211,7 +220,7 @@ func adminConfirmCmd() *cobra.Command {
 				return err
 			}
 			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
-				if err := a.ConfirmStep(ctx, id, ref, reason); err != nil {
+				if err := a.ConfirmStep(ctx, id, version, ref, reason); err != nil {
 					return err
 				}
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "step %s confirmed as succeeded (provider ref %s); ledger posted\n", id, ref)
@@ -219,7 +228,7 @@ func adminConfirmCmd() *cobra.Command {
 			})
 		},
 	}
-	addReason(cmd, &reason)
+	addMutationFlags(cmd, &reason, &version)
 	cmd.Flags().StringVar(&ref, "provider-ref", "", "provider reference of the effect (e.g. po_…)")
 	_ = cmd.MarkFlagRequired("provider-ref")
 	return cmd
@@ -227,6 +236,7 @@ func adminConfirmCmd() *cobra.Command {
 
 func adminCompensateCmd() *cobra.Command {
 	var reason string
+	var version int64
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "compensate <workflow-id>",
@@ -240,7 +250,7 @@ func adminCompensateCmd() *cobra.Command {
 				return err
 			}
 			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
-				if err := a.Compensate(ctx, id, reason, confirm); err != nil {
+				if err := a.Compensate(ctx, id, version, reason, confirm); err != nil {
 					return err
 				}
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "workflow %s is compensating: refund queued\n", id)
@@ -248,7 +258,7 @@ func adminCompensateCmd() *cobra.Command {
 			})
 		},
 	}
-	addReason(cmd, &reason)
+	addMutationFlags(cmd, &reason, &version)
 	cmd.Flags().BoolVar(&confirm, "confirm-no-effect", false,
 		"required when money may have moved: I verified with the provider that it did not")
 	return cmd
@@ -256,6 +266,7 @@ func adminCompensateCmd() *cobra.Command {
 
 func adminFailCmd() *cobra.Command {
 	var reason string
+	var version int64
 	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "fail <workflow-id>",
@@ -268,7 +279,7 @@ func adminFailCmd() *cobra.Command {
 				return err
 			}
 			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
-				if err := a.Fail(ctx, id, reason, confirm); err != nil {
+				if err := a.Fail(ctx, id, version, reason, confirm); err != nil {
 					return err
 				}
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "workflow %s marked FAILED\n", id)
@@ -276,7 +287,7 @@ func adminFailCmd() *cobra.Command {
 			})
 		},
 	}
-	addReason(cmd, &reason)
+	addMutationFlags(cmd, &reason, &version)
 	cmd.Flags().BoolVar(&confirm, "confirm-no-effect", false,
 		"required when money may have moved: I verified with the provider that it did not")
 	return cmd

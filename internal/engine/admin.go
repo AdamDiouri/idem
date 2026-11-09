@@ -26,6 +26,11 @@ var ErrNotActionable = errors.New("not actionable: workflow is not parked or the
 // provider, that it did not.
 var ErrConfirmationRequired = errors.New("money may have moved for this step: verify with the provider, then confirm (--confirm-no-effect)")
 
+// ErrStale means the parked workflow changed since the operator listed it (its
+// version moved on): the decision was made on facts that no longer hold.
+// Nothing was changed.
+var ErrStale = errors.New("stale: the workflow changed since you listed it; run `idem admin list` again and re-check before acting")
+
 const stepChargeName = "charge"
 
 // defaultMaxAttempts is used for steps created by admin actions.
@@ -34,6 +39,7 @@ var defaultMaxAttempts = map[string]int32{stepChargeName: 8, stepPayout: payoutM
 // ParkedWorkflow is a workflow waiting for a human, with the step that parked it.
 type ParkedWorkflow struct {
 	WorkflowID  uuid.UUID     `json:"workflow_id"`
+	Version     int64         `json:"version"` // pass back as the expected version of any action
 	StepID      uuid.UUID     `json:"step_id"`
 	Step        string        `json:"step"`
 	StepStatus  string        `json:"step_status"`
@@ -47,7 +53,9 @@ type ParkedWorkflow struct {
 }
 
 // Admin performs audited human interventions on parked workflows (design
-// §11.4). Every mutation is one transaction that checks the expected state,
+// §11.4). Every mutation names the workflow version the operator saw (from
+// ListParked) and is refused with ErrStale if it moved on. Every mutation is
+// one transaction that checks the expected state,
 // changes it through the steps' own hooks where money is involved, and writes
 // one admin_actions row.
 type Admin struct {
@@ -75,7 +83,7 @@ func (a *Admin) ListParked(ctx context.Context, reason string) ([]ParkedWorkflow
 	var out []ParkedWorkflow
 	for _, r := range rows {
 		p := ParkedWorkflow{
-			WorkflowID: r.WorkflowID, StepID: r.StepID, Step: r.Name, StepStatus: r.Status,
+			WorkflowID: r.WorkflowID, Version: r.Version, StepID: r.StepID, Step: r.Name, StepStatus: r.Status,
 			DeadReason: deref(r.DeadReason), LastError: deref(r.LastError), Attempts: r.AttemptCount,
 			ParkedFor: time.Duration(r.ParkedMs) * time.Millisecond,
 		}
@@ -93,8 +101,8 @@ func (a *Admin) ListParked(ctx context.Context, reason string) ([]ParkedWorkflow
 // RetryStep hands a parked step back to the workers with the SAME idempotency
 // key (always safe: the provider deduplicates). A step whose dead reason says
 // money may have moved goes back IN_DOUBT (sticky), otherwise PENDING.
-func (a *Admin) RetryStep(ctx context.Context, stepID uuid.UUID, reason string) error {
-	return a.withParkedStep(ctx, stepID, reason, func(ctx context.Context, q *db.Queries, st db.LockParkedStepRow) (string, map[string]any, error) {
+func (a *Admin) RetryStep(ctx context.Context, stepID uuid.UUID, version int64, reason string) error {
+	return a.withParkedStep(ctx, stepID, version, reason, func(ctx context.Context, q *db.Queries, st db.LockParkedStepRow) (string, map[string]any, error) {
 		to := "PENDING"
 		moved, err := mayHaveMoved(ctx, q, st)
 		if err != nil {
@@ -118,12 +126,12 @@ func (a *Admin) RetryStep(ctx context.Context, stepID uuid.UUID, reason string) 
 // a new payment as far as the provider is concerned, so the caller must have
 // verified that the old key moved no money (confirmNoEffect). The old step
 // stays as history.
-func (a *Admin) NewGeneration(ctx context.Context, stepID uuid.UUID, reason string, confirmNoEffect bool) (uuid.UUID, error) {
+func (a *Admin) NewGeneration(ctx context.Context, stepID uuid.UUID, version int64, reason string, confirmNoEffect bool) (uuid.UUID, error) {
 	if !confirmNoEffect {
 		return uuid.Nil, errors.New("new-generation mints a new idempotency key: confirm that the old key moved no money (--confirm-no-effect)")
 	}
 	var newID uuid.UUID
-	err := a.withParkedStep(ctx, stepID, reason, func(ctx context.Context, q *db.Queries, st db.LockParkedStepRow) (string, map[string]any, error) {
+	err := a.withParkedStep(ctx, stepID, version, reason, func(ctx context.Context, q *db.Queries, st db.LockParkedStepRow) (string, map[string]any, error) {
 		gen, err := q.NextStepGeneration(ctx, db.NextStepGenerationParams{WorkflowID: st.WorkflowID, Name: st.Name})
 		if err != nil {
 			return "", nil, fmt.Errorf("next generation: %w", err)
@@ -150,11 +158,11 @@ func (a *Admin) NewGeneration(ctx context.Context, stepID uuid.UUID, reason stri
 // ConfirmStep records that a dead step's effect DID happen (verified with the
 // provider, providerRef identifies it) and runs the step's own success hook:
 // the ledger posting and the saga's next move, exactly as a worker would.
-func (a *Admin) ConfirmStep(ctx context.Context, stepID uuid.UUID, providerRef, reason string) error {
+func (a *Admin) ConfirmStep(ctx context.Context, stepID uuid.UUID, version int64, providerRef, reason string) error {
 	if strings.TrimSpace(providerRef) == "" {
 		return errors.New("confirm-step needs the provider reference of the effect")
 	}
-	return a.withParkedStep(ctx, stepID, reason, func(ctx context.Context, q *db.Queries, st db.LockParkedStepRow) (string, map[string]any, error) {
+	return a.withParkedStep(ctx, stepID, version, reason, func(ctx context.Context, q *db.Queries, st db.LockParkedStepRow) (string, map[string]any, error) {
 		step, ok := a.steps[st.Name]
 		if !ok {
 			return "", nil, fmt.Errorf("%w: unknown step %s", ErrNotActionable, st.Name)
@@ -198,8 +206,8 @@ func (a *Admin) ConfirmStep(ctx context.Context, stepID uuid.UUID, providerRef, 
 // Compensate refunds the customer of a workflow whose payout is parked, after
 // a human verified the merchant was NOT paid. If the payout may have paid the
 // merchant, confirmNoEffect must be true (refunding too would pay out twice).
-func (a *Admin) Compensate(ctx context.Context, workflowID uuid.UUID, reason string, confirmNoEffect bool) error {
-	return a.withParkedWorkflow(ctx, workflowID, reason, func(ctx context.Context, q *db.Queries, st db.LockParkedStepRow) (string, map[string]any, error) {
+func (a *Admin) Compensate(ctx context.Context, workflowID uuid.UUID, version int64, reason string, confirmNoEffect bool) error {
+	return a.withParkedWorkflow(ctx, workflowID, version, reason, func(ctx context.Context, q *db.Queries, st db.LockParkedStepRow) (string, map[string]any, error) {
 		if st.Name != stepPayout {
 			return "", nil, fmt.Errorf("%w: compensate needs a parked payout (parked step is %s)", ErrNotActionable, st.Name)
 		}
@@ -227,8 +235,8 @@ func (a *Admin) Compensate(ctx context.Context, workflowID uuid.UUID, reason str
 // Fail closes a workflow whose charge is parked, after a human verified the
 // customer was NOT charged. If the charge may have happened, confirmNoEffect
 // must be true.
-func (a *Admin) Fail(ctx context.Context, workflowID uuid.UUID, reason string, confirmNoEffect bool) error {
-	return a.withParkedWorkflow(ctx, workflowID, reason, func(ctx context.Context, q *db.Queries, st db.LockParkedStepRow) (string, map[string]any, error) {
+func (a *Admin) Fail(ctx context.Context, workflowID uuid.UUID, version int64, reason string, confirmNoEffect bool) error {
+	return a.withParkedWorkflow(ctx, workflowID, version, reason, func(ctx context.Context, q *db.Queries, st db.LockParkedStepRow) (string, map[string]any, error) {
 		if st.Name != stepChargeName {
 			return "", nil, fmt.Errorf("%w: fail needs a parked charge (parked step is %s)", ErrNotActionable, st.Name)
 		}
@@ -244,7 +252,7 @@ func (a *Admin) Fail(ctx context.Context, workflowID uuid.UUID, reason string, c
 
 type parkedAction func(ctx context.Context, q *db.Queries, st db.LockParkedStepRow) (action string, details map[string]any, err error)
 
-func (a *Admin) withParkedWorkflow(ctx context.Context, workflowID uuid.UUID, reason string, fn parkedAction) error {
+func (a *Admin) withParkedWorkflow(ctx context.Context, workflowID uuid.UUID, version int64, reason string, fn parkedAction) error {
 	stepID, err := db.New(a.pool).ParkedStepOfWorkflow(ctx, workflowID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: workflow %s", ErrNotActionable, workflowID)
@@ -252,12 +260,14 @@ func (a *Admin) withParkedWorkflow(ctx context.Context, workflowID uuid.UUID, re
 	if err != nil {
 		return err
 	}
-	return a.withParkedStep(ctx, stepID, reason, fn)
+	return a.withParkedStep(ctx, stepID, version, reason, fn)
 }
 
 // withParkedStep runs fn in one transaction holding locks on the parked step
-// and its workflow, then writes the audit row. Any failure rolls back.
-func (a *Admin) withParkedStep(ctx context.Context, stepID uuid.UUID, reason string, fn parkedAction) error {
+// and its workflow, then writes the audit row. Any failure rolls back. The
+// version check happens under the lock, so two operators acting on the same
+// listing cannot both win, and nobody acts on facts that changed.
+func (a *Admin) withParkedStep(ctx context.Context, stepID uuid.UUID, version int64, reason string, fn parkedAction) error {
 	if strings.TrimSpace(reason) == "" {
 		return errors.New("a reason is required for every admin action")
 	}
@@ -275,11 +285,15 @@ func (a *Admin) withParkedStep(ctx context.Context, stepID uuid.UUID, reason str
 	if err != nil {
 		return fmt.Errorf("lock parked step: %w", err)
 	}
+	if st.WorkflowVersion != version {
+		return fmt.Errorf("%w (you saw version %d, it is now %d)", ErrStale, version, st.WorkflowVersion)
+	}
 
 	action, details, err := fn(ctx, q, st)
 	if err != nil {
 		return err
 	}
+	details["version"] = version
 	detailJSON, err := json.Marshal(details)
 	if err != nil {
 		return err

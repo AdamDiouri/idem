@@ -98,14 +98,14 @@ func TestAdmin_RefusesNonParkedWork(t *testing.T) {
 
 	for name, step := range map[string]uuid.UUID{"succeeded step": charge, "pending step": payout} {
 		t.Run(name, func(t *testing.T) {
-			require.ErrorIs(t, a.RetryStep(ctx, step, "r"), engine.ErrNotActionable)
-			_, err := a.NewGeneration(ctx, step, "r", true)
+			require.ErrorIs(t, a.RetryStep(ctx, step, h.version(t, step), "r"), engine.ErrNotActionable)
+			_, err := a.NewGeneration(ctx, step, h.version(t, step), "r", true)
 			require.ErrorIs(t, err, engine.ErrNotActionable)
-			require.ErrorIs(t, a.ConfirmStep(ctx, step, "po_x", "r"), engine.ErrNotActionable)
+			require.ErrorIs(t, a.ConfirmStep(ctx, step, h.version(t, step), "po_x", "r"), engine.ErrNotActionable)
 		})
 	}
-	require.ErrorIs(t, a.Compensate(ctx, wf, "r", true), engine.ErrNotActionable)
-	require.ErrorIs(t, a.Fail(ctx, wf, "r", true), engine.ErrNotActionable)
+	require.ErrorIs(t, a.Compensate(ctx, wf, h.version(t, wf), "r", true), engine.ErrNotActionable)
+	require.ErrorIs(t, a.Fail(ctx, wf, h.version(t, wf), "r", true), engine.ErrNotActionable)
 
 	require.Equal(t, "RUNNING", h.workflowStatus(t, wf))
 	require.Equal(t, "PENDING", h.stepStatus(t, wf, "payout"))
@@ -118,7 +118,7 @@ func TestAdmin_RequiresReason(t *testing.T) {
 	wf := parkCharge(t, h, fakeprovider.ModeErrorBeforeEffect)
 	step := h.parkedStep(t, wf).StepID
 
-	require.Error(t, h.admin().RetryStep(ctx, step, "   "))
+	require.Error(t, h.admin().RetryStep(ctx, step, h.version(t, step), "   "))
 	require.Equal(t, "DEAD", h.stepStatus(t, wf, "charge"))
 	require.Zero(t, h.auditRows(t, wf))
 }
@@ -130,7 +130,7 @@ func TestAdmin_RetryStepKeepsDoubtSticky(t *testing.T) {
 	step := h.parkedStep(t, wf).StepID
 	epoch := scalar[int64](t, h.pool, `SELECT lease_epoch FROM steps WHERE id = $1`, step)
 
-	require.NoError(t, h.admin().RetryStep(ctx, step, "provider outage over"))
+	require.NoError(t, h.admin().RetryStep(ctx, step, h.version(t, step), "provider outage over"))
 	require.Equal(t, "IN_DOUBT", h.stepStatus(t, wf, "charge"), "money may have moved: doubt stays sticky")
 	// Attempt history is kept (attempt numbers must stay unique); the budget is extended instead.
 	require.Equal(t, 2, scalar[int](t, h.pool, `SELECT attempt_count FROM steps WHERE id = $1`, step))
@@ -149,7 +149,7 @@ func TestAdmin_RetryStepNoEffectGoesPending(t *testing.T) {
 	wf := parkCharge(t, h, fakeprovider.ModeRateLimit)
 	require.Equal(t, engine.DeadAttemptsExhaustedNoEffect, h.parkedStep(t, wf).DeadReason)
 
-	require.NoError(t, h.admin().RetryStep(context.Background(), h.parkedStep(t, wf).StepID, "rate limit lifted"))
+	require.NoError(t, h.admin().RetryStep(context.Background(), h.parkedStep(t, wf).StepID, h.version(t, wf), "rate limit lifted"))
 	require.Equal(t, "PENDING", h.stepStatus(t, wf, "charge"))
 }
 
@@ -159,7 +159,7 @@ func TestAdmin_NewGenerationGuards(t *testing.T) {
 	wf := parkCharge(t, h, fakeprovider.ModeErrorBeforeEffect)
 	step := h.parkedStep(t, wf).StepID
 
-	_, err := h.admin().NewGeneration(ctx, step, "verified", false)
+	_, err := h.admin().NewGeneration(ctx, step, h.version(t, step), "verified", false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "confirm")
 	require.Equal(t, 1, h.count(t, `SELECT count(*) FROM steps WHERE workflow_id = $1 AND name = 'charge'`, wf))
@@ -172,7 +172,7 @@ func TestAdmin_NewGenerationSendsNewKey(t *testing.T) {
 	wf := parkCharge(t, h, fakeprovider.ModeErrorBeforeEffect) // no money moved
 	old := h.parkedStep(t, wf).StepID
 
-	id, err := h.admin().NewGeneration(ctx, old, "provider confirmed no charge for the old key", true)
+	id, err := h.admin().NewGeneration(ctx, old, h.version(t, old), "provider confirmed no charge for the old key", true)
 	require.NoError(t, err)
 	require.NotEqual(t, old, id)
 	require.Equal(t, 1, scalar[int](t, h.pool, `SELECT generation FROM steps WHERE id = $1`, id))
@@ -200,13 +200,13 @@ func TestAdmin_ConfirmStepPostsOnceAndAdvances(t *testing.T) {
 	require.Len(t, paid, 1, "the merchant really was paid")
 	step := h.parkedStep(t, wf).StepID
 
-	require.NoError(t, h.admin().ConfirmStep(ctx, step, paid[0].ID, "provider dashboard shows the payout"))
+	require.NoError(t, h.admin().ConfirmStep(ctx, step, h.version(t, step), paid[0].ID, "provider dashboard shows the payout"))
 	require.Equal(t, "SUCCEEDED", h.stepStatus(t, wf, "payout"))
 	require.Equal(t, paid[0].ID, scalar[string](t, h.pool, `SELECT provider_ref FROM steps WHERE id = $1`, step))
 	require.Equal(t, 1, h.count(t, `SELECT count(*) FROM ledger_transactions WHERE workflow_id = $1 AND kind = 'payout'`, wf))
 	require.Equal(t, "SUCCEEDED", h.workflowStatus(t, wf))
 
-	require.ErrorIs(t, h.admin().ConfirmStep(ctx, step, paid[0].ID, "again"), engine.ErrNotActionable)
+	require.ErrorIs(t, h.admin().ConfirmStep(ctx, step, h.version(t, step), paid[0].ID, "again"), engine.ErrNotActionable)
 	require.Equal(t, 1, h.count(t, `SELECT count(*) FROM ledger_transactions WHERE workflow_id = $1 AND kind = 'payout'`, wf))
 	h.assertNoViolations(t) // I3 now checks this workflow again
 }
@@ -215,7 +215,7 @@ func TestAdmin_CompensateParkedPayout(t *testing.T) {
 	h := newHarness(t)
 	wf := parkPayoutAfterDoubt(t, h)
 
-	require.NoError(t, h.admin().Compensate(context.Background(), wf, "provider confirms no payout; account closed", true))
+	require.NoError(t, h.admin().Compensate(context.Background(), wf, h.version(t, wf), "provider confirms no payout; account closed", true))
 	require.Equal(t, "COMPENSATING", h.workflowStatus(t, wf))
 	chargeRef := scalar[string](t, h.pool, `SELECT provider_ref FROM steps WHERE workflow_id = $1 AND name = 'charge'`, wf)
 	require.Equal(t, chargeRef, scalar[string](t, h.pool, `SELECT refund_charge_ref FROM steps WHERE workflow_id = $1 AND name = 'refund'`, wf))
@@ -231,7 +231,7 @@ func TestAdmin_CompensateParkedPayout(t *testing.T) {
 func TestAdmin_CompensateRefusesNonPayout(t *testing.T) {
 	h := newHarness(t)
 	wf := parkCharge(t, h, fakeprovider.ModeErrorBeforeEffect)
-	require.ErrorIs(t, h.admin().Compensate(context.Background(), wf, "r", true), engine.ErrNotActionable)
+	require.ErrorIs(t, h.admin().Compensate(context.Background(), wf, h.version(t, wf), "r", true), engine.ErrNotActionable)
 	require.Equal(t, "NEEDS_ATTENTION", h.workflowStatus(t, wf))
 }
 
@@ -239,7 +239,7 @@ func TestAdmin_FailParkedCharge(t *testing.T) {
 	h := newHarness(t)
 	wf := parkCharge(t, h, fakeprovider.ModeErrorBeforeEffect)
 
-	require.NoError(t, h.admin().Fail(context.Background(), wf, "provider confirms the customer was never charged", true))
+	require.NoError(t, h.admin().Fail(context.Background(), wf, h.version(t, wf), "provider confirms the customer was never charged", true))
 	require.Equal(t, "FAILED", h.workflowStatus(t, wf))
 	h.assertNoViolations(t) // I7: FAILED ⇒ no effects
 }
@@ -250,7 +250,7 @@ func TestAdmin_AuditRows(t *testing.T) {
 	wf := parkCharge(t, h, fakeprovider.ModeErrorBeforeEffect)
 	step := h.parkedStep(t, wf).StepID
 
-	require.NoError(t, h.admin().RetryStep(ctx, step, "outage over"))
+	require.NoError(t, h.admin().RetryStep(ctx, step, h.version(t, step), "outage over"))
 	require.Equal(t, 1, h.auditRows(t, wf))
 	var actor, action, reason string
 	var stepID uuid.UUID
@@ -269,17 +269,17 @@ func TestAdmin_CompensateAndFailInDoubtRequireConfirmation(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
 	payoutWF := parkPayoutAfterDoubt(t, h)
-	err := h.admin().Compensate(ctx, payoutWF, "looks unpaid", false)
+	err := h.admin().Compensate(ctx, payoutWF, h.version(t, payoutWF), "looks unpaid", false)
 	require.ErrorIs(t, err, engine.ErrConfirmationRequired)
 	require.Equal(t, "NEEDS_ATTENTION", h.workflowStatus(t, payoutWF))
 	require.Zero(t, h.auditRows(t, payoutWF))
 
 	chargeWF := parkCharge(t, h, fakeprovider.ModeErrorBeforeEffect) // attempts_exhausted_in_doubt
-	require.ErrorIs(t, h.admin().Fail(ctx, chargeWF, "looks uncharged", false), engine.ErrConfirmationRequired)
+	require.ErrorIs(t, h.admin().Fail(ctx, chargeWF, h.version(t, chargeWF), "looks uncharged", false), engine.ErrConfirmationRequired)
 	require.Equal(t, "NEEDS_ATTENTION", h.workflowStatus(t, chargeWF))
 
 	noEffectWF := parkCharge(t, h, fakeprovider.ModeRateLimit) // provably no money moved: no confirmation needed
-	require.NoError(t, h.admin().Fail(ctx, noEffectWF, "giving up", false))
+	require.NoError(t, h.admin().Fail(ctx, noEffectWF, h.version(t, noEffectWF), "giving up", false))
 }
 
 // parkRefusedRefundAfterDoubt parks a refund whose first attempt was ambiguous
@@ -304,7 +304,7 @@ func parkRefusedRefundAfterDoubt(t *testing.T, h harness) uuid.UUID {
 func TestAdmin_RetryRefusedRefundAfterDoubtStaysInDoubt(t *testing.T) {
 	h := newHarness(t)
 	wf := parkRefusedRefundAfterDoubt(t, h)
-	require.NoError(t, h.admin().RetryStep(context.Background(), h.parkedStep(t, wf).StepID, "retry"))
+	require.NoError(t, h.admin().RetryStep(context.Background(), h.parkedStep(t, wf).StepID, h.version(t, wf), "retry"))
 	require.Equal(t, "IN_DOUBT", h.stepStatus(t, wf, "refund"))
 }
 
@@ -321,7 +321,7 @@ func TestAdmin_ConfirmRefusedRefund(t *testing.T) {
 		provider.RefundRequest{AmountCents: 10000, Currency: "EUR", ChargeID: chargeRef, WorkflowID: wf})
 	require.Equal(t, provider.Success, out.Class, "err: %v", out.Err)
 
-	require.NoError(t, h.admin().ConfirmStep(ctx, h.parkedStep(t, wf).StepID, out.ProviderRef, "refunded by support"))
+	require.NoError(t, h.admin().ConfirmStep(ctx, h.parkedStep(t, wf).StepID, h.version(t, wf), out.ProviderRef, "refunded by support"))
 	require.Equal(t, "COMPENSATED", h.workflowStatus(t, wf))
 	for account, total := range h.accountSums(t, wf) {
 		require.Zero(t, total, account)
@@ -339,8 +339,51 @@ func TestAdmin_ConfirmRejectsProviderRefAlreadyUsed(t *testing.T) {
 	otherRef := scalar[string](t, h.pool, `SELECT provider_ref FROM steps WHERE workflow_id = $1 AND name = 'charge'`, other)
 
 	wf := parkCharge(t, h, fakeprovider.ModeErrorBeforeEffect)
-	err := h.admin().ConfirmStep(ctx, h.parkedStep(t, wf).StepID, otherRef, "typo")
+	err := h.admin().ConfirmStep(ctx, h.parkedStep(t, wf).StepID, h.version(t, wf), otherRef, "typo")
 	require.ErrorIs(t, err, engine.ErrNotActionable)
 	require.Contains(t, err.Error(), "already recorded")
 	require.Equal(t, "DEAD", h.stepStatus(t, wf, "charge"))
+}
+
+// version returns the current version of the workflow that id (a workflow or
+// one of its steps) belongs to: what `idem admin list` shows an operator.
+func (h harness) version(t *testing.T, id uuid.UUID) int64 {
+	t.Helper()
+	return scalar[int64](t, h.pool, `SELECT w.version FROM workflows w WHERE w.id = $1
+		OR w.id = (SELECT workflow_id FROM steps WHERE id = $1)`, id)
+}
+
+// Deferred minor 1: an action decided on an old listing must be refused once
+// the parked workflow changed. Operator A sees "no money moved"; operator B
+// retries, the retry really charges the customer and parks again, in doubt.
+// A's --confirm-no-effect was true when A checked, and is now false.
+func TestAdmin_RefusesStaleVersion(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	wf := parkCharge(t, h, fakeprovider.ModeRateLimit)
+	seen := h.parkedStep(t, wf)
+	require.Equal(t, engine.DeadAttemptsExhaustedNoEffect, seen.DeadReason)
+
+	require.NoError(t, h.admin().RetryStep(ctx, seen.StepID, seen.Version, "B: rate limit lifted"))
+	h.setStepMaxAttempts(t, wf, "charge", 3) // one more attempt
+	h.setFaults(fakeprovider.Rule{Endpoint: "charges", Mode: fakeprovider.ModeTimeoutAfterEffect})
+	h.drain(t, h.noRetryAfter())
+	h.setFaults()
+	now := h.parkedStep(t, wf)
+	require.Equal(t, seen.StepID, now.StepID, "the same step, parked again")
+	require.Equal(t, engine.DeadAttemptsExhaustedInDoubt, now.DeadReason)
+	require.Len(t, h.effectsOf(wf, "charge"), 1, "the customer really was charged")
+	require.NotEqual(t, seen.Version, now.Version)
+
+	a := h.admin()
+	require.ErrorIs(t, a.Fail(ctx, wf, seen.Version, "A: provider showed no charge", true), engine.ErrStale)
+	require.ErrorIs(t, a.RetryStep(ctx, seen.StepID, seen.Version, "A"), engine.ErrStale)
+	require.ErrorIs(t, a.ConfirmStep(ctx, seen.StepID, seen.Version, "ch_x", "A"), engine.ErrStale)
+	_, err := a.NewGeneration(ctx, seen.StepID, seen.Version, "A", true)
+	require.ErrorIs(t, err, engine.ErrStale)
+	require.Equal(t, "NEEDS_ATTENTION", h.workflowStatus(t, wf))
+	require.Equal(t, 1, h.auditRows(t, wf), "only B's retry")
+
+	// With the current version, the decision is made on the current facts.
+	require.ErrorIs(t, a.Fail(ctx, wf, now.Version, "A, re-checked", false), engine.ErrConfirmationRequired)
 }
