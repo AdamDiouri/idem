@@ -21,6 +21,8 @@ func NewRefundStep(client *provider.Client) Step {
 
 func (r *refundStep) Name() string { return stepRefund }
 
+func (r *refundStep) Pivot() bool { return false }
+
 var errNoChargeRef = errors.New("refund step has no charge reference")
 
 func (r *refundStep) Execute(ctx context.Context, s ClaimedStep) provider.Outcome {

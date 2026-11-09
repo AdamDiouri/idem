@@ -26,6 +26,8 @@ func NewPayoutStep(client *provider.Client) Step {
 
 func (p *payoutStep) Name() string { return stepPayout }
 
+func (p *payoutStep) Pivot() bool { return true }
+
 func (p *payoutStep) Execute(ctx context.Context, s ClaimedStep) provider.Outcome {
 	return p.client.CreatePayout(ctx, s.IdempotencyKey, payoutRequest(s))
 }

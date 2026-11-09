@@ -198,6 +198,30 @@ func TestFlow_PayoutDeadAfterMoneyMoved(t *testing.T) {
 	h.assertNoViolations(t)
 }
 
+// Pivot safety rule: a payout refused AFTER an ambiguous attempt may still have
+// paid the merchant on that earlier attempt (a real provider might not replay
+// it). Park for a human; never refund automatically.
+func TestFlow_PermanentPayoutAfterDoubtParks(t *testing.T) {
+	h := newHarness(t)
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	h.drain(t, h.workerWith("w1", nil, h.chargeStep()))
+	h.setFaults(
+		fakeprovider.Rule{Endpoint: "payouts", Mode: fakeprovider.ModeErrorBeforeEffect, Times: 1},
+		fakeprovider.Rule{Endpoint: "payouts", Mode: fakeprovider.ModePayoutFail, Times: 1},
+	)
+
+	w := h.workerWith("w1", nil, h.allSteps()...)
+	require.Equal(t, "in_doubt", h.runOnce(t, w).Outcome)
+	require.Equal(t, "dead", h.runOnce(t, w).Outcome)
+
+	require.Equal(t, engine.DeadPermanentAfterInDoubt,
+		scalar[string](t, h.pool, `SELECT dead_reason FROM steps WHERE workflow_id = $1 AND name = 'payout'`, wf))
+	require.Equal(t, "NEEDS_ATTENTION", h.workflowStatus(t, wf))
+	require.Equal(t, 0, h.count(t, `SELECT count(*) FROM steps WHERE workflow_id = $1 AND name = 'refund'`, wf), "no automatic refund")
+	require.True(t, engine.MoneyMayHaveMoved(engine.DeadPermanentAfterInDoubt))
+	h.assertNoViolations(t)
+}
+
 // Review finding: a parked workflow moves no more money.
 func TestFlow_ParkedWorkflowMovesNoMoney(t *testing.T) {
 	h := newHarness(t)
@@ -264,10 +288,17 @@ func TestFlow_ManyWorkflowsUnderFaults(t *testing.T) {
 		return h.count(t, `SELECT count(*) FROM workflows WHERE status IN ('SUCCEEDED','FAILED','COMPENSATED','NEEDS_ATTENTION')`) == n
 	}, 30*time.Second, 50*time.Millisecond)
 	// The outcome mix is fixed by construction (i%7 declines, i%3 invalid
-	// merchants); faults must only delay, never change, an outcome.
+	// merchants). Faults only delay an outcome, with one deliberate exception:
+	// an invalid-merchant payout whose first attempt was ambiguous (refusal
+	// stored, then a 500) is parked by the pivot safety rule instead of refunded.
 	require.Equal(t, 5, h.count(t, `SELECT count(*) FROM workflows WHERE status = 'FAILED'`))
-	require.Equal(t, 8, h.count(t, `SELECT count(*) FROM workflows WHERE status = 'COMPENSATED'`))
 	require.Equal(t, 17, h.count(t, `SELECT count(*) FROM workflows WHERE status = 'SUCCEEDED'`))
-	require.Equal(t, 0, h.count(t, `SELECT count(*) FROM workflows WHERE status = 'NEEDS_ATTENTION'`))
+	require.Equal(t, 8, h.count(t, `SELECT count(*) FROM workflows WHERE status IN ('COMPENSATED', 'NEEDS_ATTENTION')`))
+	require.Equal(t, 0, h.count(t, `
+		SELECT count(*) FROM workflows w
+		WHERE w.status = 'NEEDS_ATTENTION' AND NOT EXISTS (
+			SELECT 1 FROM steps s WHERE s.workflow_id = w.id AND s.name = 'payout'
+			  AND s.dead_reason = 'permanent_after_in_doubt' AND w.input->>'merchant_id' LIKE 'mer_invalid%')`),
+		"every parked workflow must be an invalid-merchant payout refused after an ambiguous attempt")
 	h.assertNoViolations(t)
 }
