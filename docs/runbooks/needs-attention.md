@@ -47,12 +47,21 @@ Worker logs carry `workflow_id`, `step_id`, `attempt` and `lease_epoch` on every
 | Command | Use it when | What it does |
 |---|---|---|
 | `idem admin retry-step <step> --reason …` | The cause was temporary. | Retries with the **same** key, which is always safe because the provider deduplicates. A step that may have moved money stays in doubt. |
-| `idem admin confirm-step <step> --provider-ref <ref> --reason …` | You verified the money **did** move. | Marks the step succeeded, posts it to the ledger, and moves the saga on (e.g. after a charge, the payout runs). |
-| `idem admin compensate <workflow> --reason …` | Parked **payout**, and you verified the merchant was **not** paid. | Refunds the customer in full; the workflow ends `COMPENSATED`. |
-| `idem admin fail <workflow> --reason …` | Parked **charge**, and you verified the customer was **not** charged. | Closes the workflow as `FAILED`. |
+| `idem admin confirm-step <step> --provider-ref <ref> --reason …` | You verified the money **did** move. | Marks the step succeeded, posts it to the ledger, and moves the saga on (e.g. after a charge, the payout runs). The reference must not already be recorded on another step. |
+| `idem admin compensate <workflow> --reason … [--confirm-no-effect]` | Parked **payout**, and you verified the merchant was **not** paid. | Refunds the customer in full; the workflow ends `COMPENSATED`. |
+| `idem admin fail <workflow> --reason … [--confirm-no-effect]` | Parked **charge**, and you verified the customer was **not** charged. | Closes the workflow as `FAILED`. |
 | `idem admin new-generation <step> --reason … --confirm-no-effect` | You verified the old key moved **no** money and want to send the request again. | **Dangerous:** sends under a **new** key, which to the provider is a brand-new payment. The old step stays as history. |
 
-Every command refuses to act on a workflow that isn't parked, or on a step that isn't the parked one. It also refuses any action that doesn't fit the step: `compensate` only applies to a payout, `fail` only to a charge, `confirm-step` only to a `DEAD` step. When refused, nothing changes and the exit code is `1`.
+Every command refuses to act on a workflow that isn't parked, or on a step that isn't the parked one. It also refuses any action that doesn't fit the step: `compensate` only applies to a payout, `fail` only to a charge. When refused, nothing changes and the exit code is `1`.
+
+**`--confirm-no-effect` is required** on `compensate` and `fail` whenever the parked step **may have moved money**: its reason is anything but `attempts_exhausted_no_effect`, or any attempt was ambiguous. Without the flag the command exits `2` and changes nothing.
+- **Why:** compensating a payout that actually paid the merchant pays out twice, and failing a charge that actually charged the customer loses their money.
+- **When to pass it:** only after you have checked with the provider.
+
+**`confirm-step` accepts:**
+- a `DEAD` step
+- a refused (`FAILED_PERMANENT`) step that had an ambiguous attempt (an earlier attempt may have succeeded)
+- a refused refund (the customer may have been refunded outside idem)
 
 ## 3. By reason
 
@@ -72,7 +81,7 @@ At least one attempt was ambiguous (timeout, `5xx`, a crashed worker), so **mone
 2. **The provider shows a success:** run `idem admin confirm-step <step> --provider-ref <id from the provider> --reason …`.
 3. **The provider has no record or shows a refusal:**
    - if the provider is healthy again, run `retry-step`; it's safe, because the same key cannot double-charge
-   - otherwise, for a charge run `fail`, and for a payout run `compensate`
+   - otherwise, for a charge run `fail --confirm-no-effect`, and for a payout run `compensate --confirm-no-effect`
 
 ### key_expired_unknown
 
@@ -81,7 +90,7 @@ The step stayed in doubt so long that its key is near or past the provider's key
 1. Search the provider's records for this payment *without* the key: by workflow ID in the request metadata, amount, customer or merchant, and time.
 2. **Found:** run `confirm-step` with that reference.
 3. **Verified not found:**
-   - for a charge or payout: `new-generation --confirm-no-effect` to send again, or `fail` (charge) / `compensate` (payout) to stop
+   - for a charge or payout: `new-generation --confirm-no-effect` to send again, or `fail --confirm-no-effect` (charge) / `compensate --confirm-no-effect` (payout) to stop
    - for a refund: `new-generation --confirm-no-effect`
 
 ### permanent_after_in_doubt
@@ -90,7 +99,7 @@ The **pivot safety rule**. A payout was refused (e.g. `422 invalid_account`) *af
 
 1. Ask the provider whether **any** payout for this workflow succeeded (search by workflow ID, amount and merchant, not just this key).
 2. **Paid:** run `idem admin confirm-step <step> --provider-ref <po_…> --reason …`. The workflow ends `SUCCEEDED`.
-3. **Not paid, and the merchant account is invalid:** run `idem admin compensate <workflow> --reason "merchant account invalid; no payout made"`. The workflow ends `COMPENSATED`.
+3. **Not paid, and the merchant account is invalid:** run `idem admin compensate <workflow> --confirm-no-effect --reason "merchant account invalid; no payout made"`. The workflow ends `COMPENSATED`.
 4. **Not paid, and the merchant fixed their account:** run `new-generation --confirm-no-effect` on the payout step.
 
 In chaos runs these are the *expected* parkings. The fake provider always replays, so a human would find "not paid" and compensate.
@@ -100,8 +109,8 @@ In chaos runs these are the *expected* parkings. The fake provider always replay
 The customer was charged and the provider **refused** the refund (e.g. `422 invalid_refund`): wrong charge reference, amount above what is left, or the charge already refunded elsewhere.
 
 1. Check the refund's `refund_charge_ref` against the charge's `provider_ref`, and the charge's refund history at the provider.
-2. **Already refunded elsewhere (e.g. by support):** record it outside idem and escalate. A second refund must not be sent.
-3. **The refusal was caused by a fixable provider-side problem:** run `new-generation --confirm-no-effect` on the refund step.
+2. **A refund for this charge exists at the provider:** either an earlier ambiguous attempt succeeded, or support refunded the customer directly. Run `idem admin confirm-step <refund-step> --provider-ref <re_…> --reason …`. That posts the reversal and the workflow ends `COMPENSATED`. **Never send a second refund.**
+3. **No refund exists, and the refusal was caused by a fixable provider-side problem:** run `new-generation --confirm-no-effect` on the refund step. The new refund always targets the workflow's current successful charge.
 
 ## 4. Alerts
 
@@ -126,11 +135,23 @@ The sweeper also logs `stuck workflows count=… oldest=…` with the oldest wor
 
 ### IdemStepsOverAttemptLimit
 
-A step has more attempts than its limit. Steps should go `DEAD` at their limit, so this means a bug, or a step being claimed but failing before its outcome can be recorded. Look at that step's `step_attempts` rows and the worker error logs.
+An unfinished step was claimed more than once past its attempt limit. (One extra attempt is normal after a crash on the final attempt.) Steps should go `DEAD` at their limit, so this means a bug, or a step being claimed but failing before its outcome can be recorded. Look at that step's `step_attempts` rows and the worker error logs.
 
 ### IdemFencedCommitsSpike
 
 Workers keep losing their lease before completing. Their results are discarded safely, but the work is wasted. Usual causes: GC pauses or CPU starvation longer than `IDEM_LEASE_TTL`, a database too slow to commit, or `IDEM_PROVIDER_TIMEOUT` too close to the lease. Raise the lease TTL, or give the workers more resources.
+
+### IdemSweeperDown
+
+No sweeper has been scrape-able for 2 minutes. Consequences:
+- leases of crashed or paused workers are **not reclaimed**, so their steps sit `RUNNING`
+- **every state alert above is blind**, because they all read the sweeper's gauges
+
+Restart the sweeper first, then re-check the other alerts.
+
+### IdemSweeperSnapshotStale
+
+A sweeper is up, but has not refreshed its state gauges for 2 minutes. Its snapshot queries are failing; check the sweeper logs for `metrics snapshot` errors, which usually mean the database is unreachable or slow. Until this clears, treat the parked, stuck and over-limit numbers as unreliable.
 
 ### IdemProviderSlow
 
@@ -153,7 +174,8 @@ curl -s localhost:9091/api/v1/alerts            # IdemWorkflowsNeedAttention, Id
 
 # the provider confirms no payout was made → refund the customer
 docker compose run --rm -e IDEM_ADMIN_ACTOR=oncall --entrypoint /idem worker \
-  admin compensate <workflow-id> --reason "provider: no payout for this workflow; merchant account invalid"
+  admin compensate <workflow-id> --confirm-no-effect \
+  --reason "provider: no payout for this workflow; merchant account invalid"
 
 docker compose run --rm --entrypoint /idem worker check   # 0 violations, 0 need attention
 ```

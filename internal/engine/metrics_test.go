@@ -108,3 +108,24 @@ func TestMetrics_NoUnboundedLabels(t *testing.T) {
 	}
 	require.Positive(t, seen)
 }
+
+// Review finding 5: finished steps never count as over their attempt limit
+// (a crash on the last attempt leaves attempt_count = max + 1 forever).
+func TestSweeper_OverLimitIgnoresFinishedSteps(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	m := metrics.New()
+	done := submitTo(t, h, "cus_1", "mer_1")
+	stuck := submitTo(t, h, "cus_2", "mer_2")
+	_, err := h.pool.Exec(ctx, `UPDATE steps SET status = 'SUCCEEDED', attempt_count = 2, max_attempts = 1 WHERE workflow_id = $1`, done)
+	require.NoError(t, err)
+	_, err = h.pool.Exec(ctx, `UPDATE steps SET status = 'IN_DOUBT', attempt_count = 5, max_attempts = 1 WHERE workflow_id = $1`, stuck)
+	require.NoError(t, err)
+
+	_, _ = runInBackground(t, func(ctx context.Context) error {
+		return engine.RunSweeper(ctx, h.pool, engine.SweeperOptions{Interval: 10 * time.Millisecond, StuckAfter: time.Hour,
+			Logger: slog.New(slog.DiscardHandler), Metrics: m})
+	})
+	require.Eventually(t, func() bool { return testutil.ToFloat64(m.LastSnapshot) > 0 }, 2*time.Second, 10*time.Millisecond)
+	require.Equal(t, 1.0, testutil.ToFloat64(m.StepsOverLimit), "only the unfinished step counts")
+}

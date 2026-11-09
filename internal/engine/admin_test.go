@@ -9,6 +9,7 @@ import (
 
 	"github.com/AdamDiouri/idem/internal/engine"
 	"github.com/AdamDiouri/idem/internal/fakeprovider"
+	"github.com/AdamDiouri/idem/internal/provider"
 	"github.com/AdamDiouri/idem/internal/workflow"
 )
 
@@ -103,8 +104,8 @@ func TestAdmin_RefusesNonParkedWork(t *testing.T) {
 			require.ErrorIs(t, a.ConfirmStep(ctx, step, "po_x", "r"), engine.ErrNotActionable)
 		})
 	}
-	require.ErrorIs(t, a.Compensate(ctx, wf, "r"), engine.ErrNotActionable)
-	require.ErrorIs(t, a.Fail(ctx, wf, "r"), engine.ErrNotActionable)
+	require.ErrorIs(t, a.Compensate(ctx, wf, "r", true), engine.ErrNotActionable)
+	require.ErrorIs(t, a.Fail(ctx, wf, "r", true), engine.ErrNotActionable)
 
 	require.Equal(t, "RUNNING", h.workflowStatus(t, wf))
 	require.Equal(t, "PENDING", h.stepStatus(t, wf, "payout"))
@@ -214,7 +215,7 @@ func TestAdmin_CompensateParkedPayout(t *testing.T) {
 	h := newHarness(t)
 	wf := parkPayoutAfterDoubt(t, h)
 
-	require.NoError(t, h.admin().Compensate(context.Background(), wf, "provider confirms no payout; account closed"))
+	require.NoError(t, h.admin().Compensate(context.Background(), wf, "provider confirms no payout; account closed", true))
 	require.Equal(t, "COMPENSATING", h.workflowStatus(t, wf))
 	chargeRef := scalar[string](t, h.pool, `SELECT provider_ref FROM steps WHERE workflow_id = $1 AND name = 'charge'`, wf)
 	require.Equal(t, chargeRef, scalar[string](t, h.pool, `SELECT refund_charge_ref FROM steps WHERE workflow_id = $1 AND name = 'refund'`, wf))
@@ -230,7 +231,7 @@ func TestAdmin_CompensateParkedPayout(t *testing.T) {
 func TestAdmin_CompensateRefusesNonPayout(t *testing.T) {
 	h := newHarness(t)
 	wf := parkCharge(t, h, fakeprovider.ModeErrorBeforeEffect)
-	require.ErrorIs(t, h.admin().Compensate(context.Background(), wf, "r"), engine.ErrNotActionable)
+	require.ErrorIs(t, h.admin().Compensate(context.Background(), wf, "r", true), engine.ErrNotActionable)
 	require.Equal(t, "NEEDS_ATTENTION", h.workflowStatus(t, wf))
 }
 
@@ -238,7 +239,7 @@ func TestAdmin_FailParkedCharge(t *testing.T) {
 	h := newHarness(t)
 	wf := parkCharge(t, h, fakeprovider.ModeErrorBeforeEffect)
 
-	require.NoError(t, h.admin().Fail(context.Background(), wf, "provider confirms the customer was never charged"))
+	require.NoError(t, h.admin().Fail(context.Background(), wf, "provider confirms the customer was never charged", true))
 	require.Equal(t, "FAILED", h.workflowStatus(t, wf))
 	h.assertNoViolations(t) // I7: FAILED ⇒ no effects
 }
@@ -259,4 +260,87 @@ func TestAdmin_AuditRows(t *testing.T) {
 	require.Equal(t, "retry_step", action)
 	require.Equal(t, step, stepID)
 	require.Equal(t, "outage over", reason)
+}
+
+// Review finding 1: compensating a payout that may have paid the merchant (or
+// failing a charge that may have charged the customer) is irreversible; like
+// new-generation it needs explicit confirmation that no money moved.
+func TestAdmin_CompensateAndFailInDoubtRequireConfirmation(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	payoutWF := parkPayoutAfterDoubt(t, h)
+	err := h.admin().Compensate(ctx, payoutWF, "looks unpaid", false)
+	require.ErrorIs(t, err, engine.ErrConfirmationRequired)
+	require.Equal(t, "NEEDS_ATTENTION", h.workflowStatus(t, payoutWF))
+	require.Zero(t, h.auditRows(t, payoutWF))
+
+	chargeWF := parkCharge(t, h, fakeprovider.ModeErrorBeforeEffect) // attempts_exhausted_in_doubt
+	require.ErrorIs(t, h.admin().Fail(ctx, chargeWF, "looks uncharged", false), engine.ErrConfirmationRequired)
+	require.Equal(t, "NEEDS_ATTENTION", h.workflowStatus(t, chargeWF))
+
+	noEffectWF := parkCharge(t, h, fakeprovider.ModeRateLimit) // provably no money moved: no confirmation needed
+	require.NoError(t, h.admin().Fail(ctx, noEffectWF, "giving up", false))
+}
+
+// parkRefusedRefundAfterDoubt parks a refund whose first attempt was ambiguous
+// and whose retry was refused (a non-pivot step: FAILED_PERMANENT, no dead_reason).
+func parkRefusedRefundAfterDoubt(t *testing.T, h harness) uuid.UUID {
+	t.Helper()
+	wf := submitTo(t, h, "cus_1", "mer_invalid_1")
+	h.drain(t, h.workerWith("w1", nil, h.chargeStep(), h.payoutStep()))
+	h.setFaults(
+		fakeprovider.Rule{Endpoint: "refunds", Mode: fakeprovider.ModeErrorBeforeEffect, Times: 1},
+		fakeprovider.Rule{Endpoint: "refunds", Mode: fakeprovider.ModeDecline, Times: 1},
+	)
+	h.drain(t, h.workerWith("w1", nil, h.refundStep()))
+	require.Equal(t, "FAILED_PERMANENT", h.stepStatus(t, wf, "refund"))
+	require.Equal(t, "NEEDS_ATTENTION", h.workflowStatus(t, wf))
+	h.setFaults()
+	return wf
+}
+
+// Review finding 2: doubt is sticky from the attempt history, not only from
+// dead_reason (a refused refund has none).
+func TestAdmin_RetryRefusedRefundAfterDoubtStaysInDoubt(t *testing.T) {
+	h := newHarness(t)
+	wf := parkRefusedRefundAfterDoubt(t, h)
+	require.NoError(t, h.admin().RetryStep(context.Background(), h.parkedStep(t, wf).StepID, "retry"))
+	require.Equal(t, "IN_DOUBT", h.stepStatus(t, wf, "refund"))
+}
+
+// Review findings 2 and 3: a refused refund can be confirmed when the money
+// was in fact returned (an earlier ambiguous attempt, or a refund made outside
+// idem), which closes the workflow COMPENSATED with a consistent ledger.
+func TestAdmin_ConfirmRefusedRefund(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	wf := parkRefusedRefundAfterDoubt(t, h)
+	chargeRef := scalar[string](t, h.pool, `SELECT provider_ref FROM steps WHERE workflow_id = $1 AND name = 'charge'`, wf)
+	// Support refunded the customer directly at the provider.
+	out := h.client.CreateRefund(ctx, "support-refund-1",
+		provider.RefundRequest{AmountCents: 10000, Currency: "EUR", ChargeID: chargeRef, WorkflowID: wf})
+	require.Equal(t, provider.Success, out.Class, "err: %v", out.Err)
+
+	require.NoError(t, h.admin().ConfirmStep(ctx, h.parkedStep(t, wf).StepID, out.ProviderRef, "refunded by support"))
+	require.Equal(t, "COMPENSATED", h.workflowStatus(t, wf))
+	for account, total := range h.accountSums(t, wf) {
+		require.Zero(t, total, account)
+	}
+	h.assertNoViolations(t)
+}
+
+// Review finding 4: a provider reference already recorded on another step
+// (e.g. another workflow's charge) must be refused.
+func TestAdmin_ConfirmRejectsProviderRefAlreadyUsed(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	other := submitTo(t, h, "cus_9", "mer_9")
+	h.drain(t, h.workerWith("w1", nil, h.chargeStep()))
+	otherRef := scalar[string](t, h.pool, `SELECT provider_ref FROM steps WHERE workflow_id = $1 AND name = 'charge'`, other)
+
+	wf := parkCharge(t, h, fakeprovider.ModeErrorBeforeEffect)
+	err := h.admin().ConfirmStep(ctx, h.parkedStep(t, wf).StepID, otherRef, "typo")
+	require.ErrorIs(t, err, engine.ErrNotActionable)
+	require.Contains(t, err.Error(), "already recorded")
+	require.Equal(t, "DEAD", h.stepStatus(t, wf, "charge"))
 }

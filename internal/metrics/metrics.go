@@ -27,6 +27,7 @@ type Metrics struct {
 	OldestUnsettled  prometheus.Gauge
 	StepsOverLimit   prometheus.Gauge
 	Parked           *prometheus.GaugeVec   // reason
+	LastSnapshot     prometheus.Gauge       // unix time of the last successful sweeper snapshot
 	Submissions      *prometheus.CounterVec // result
 }
 
@@ -71,6 +72,10 @@ func New() *Metrics {
 			Name: "idem_parked_workflows",
 			Help: "Workflows in NEEDS_ATTENTION by the reason their step was parked.",
 		}, []string{"reason"}),
+		LastSnapshot: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "idem_sweeper_last_snapshot_timestamp_seconds",
+			Help: "When the sweeper last refreshed the state gauges (stale gauges must not look healthy).",
+		}),
 		Submissions: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "idem_workflow_submissions_total",
 			Help: "POST /workflows results: created, replayed, validation_failed, key_reused, key_in_use, timeout, error.",
@@ -78,7 +83,7 @@ func New() *Metrics {
 	}
 	for _, c := range []prometheus.Collector{
 		m.StepAttempts, m.ProviderDuration, m.KeyLookups, m.LeasesReclaimed, m.Workflows, m.Steps,
-		m.OldestUnsettled, m.StepsOverLimit, m.Parked, m.Submissions,
+		m.OldestUnsettled, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	} {
 		f(c)
@@ -159,6 +164,7 @@ func (m *Metrics) SetSnapshot(s Snapshot) {
 	for reason, n := range s.Parked {
 		m.Parked.WithLabelValues(reason).Set(float64(n))
 	}
+	m.LastSnapshot.SetToCurrentTime()
 }
 
 // ObserveSubmission counts a POST /workflows result.

@@ -15,7 +15,7 @@ const confirmStepSucceeded = `-- name: ConfirmStepSucceeded :execrows
 UPDATE steps
 SET status = 'SUCCEEDED', provider_ref = $1::text, dead_reason = NULL,
     lease_epoch = lease_epoch + 1, lease_owner = NULL, lease_expires_at = NULL
-WHERE id = $2 AND status = 'DEAD'
+WHERE id = $2 AND status IN ('DEAD', 'FAILED_PERMANENT')
 `
 
 type ConfirmStepSucceededParams struct {
@@ -190,6 +190,17 @@ func (q *Queries) ParkedStepOfWorkflow(ctx context.Context, workflowID uuid.UUID
 	return id, err
 }
 
+const providerRefInUse = `-- name: ProviderRefInUse :one
+SELECT EXISTS (SELECT 1 FROM steps WHERE provider_ref = $1)::bool AS used
+`
+
+func (q *Queries) ProviderRefInUse(ctx context.Context, providerRef *string) (bool, error) {
+	row := q.db.QueryRow(ctx, providerRefInUse, providerRef)
+	var used bool
+	err := row.Scan(&used)
+	return used, err
+}
+
 const resetStepForRetry = `-- name: ResetStepForRetry :execrows
 UPDATE steps
 SET status = $1::text, max_attempts = attempt_count + $2::int,
@@ -213,4 +224,18 @@ func (q *Queries) ResetStepForRetry(ctx context.Context, arg ResetStepForRetryPa
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const stepHadInDoubtAttempt = `-- name: StepHadInDoubtAttempt :one
+SELECT EXISTS (
+  SELECT 1 FROM step_attempts WHERE step_id = $1 AND outcome IN ('IN_DOUBT', 'ABANDONED')
+)::bool AS had
+`
+
+// Whether any attempt of the step may have moved money (ambiguous or abandoned).
+func (q *Queries) StepHadInDoubtAttempt(ctx context.Context, stepID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, stepHadInDoubtAttempt, stepID)
+	var had bool
+	err := row.Scan(&had)
+	return had, err
 }

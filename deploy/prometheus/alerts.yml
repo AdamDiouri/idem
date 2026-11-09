@@ -1,11 +1,13 @@
 # idem alert rules. Every alert links to the runbook section that says what it
-# means and what to do. Gauges come from sweepers (several sweepers export the
-# same values), so they are aggregated with max(), never sum().
+# means and what to do. State gauges are read from sweepers only (job
+# "idem-sweeper"; other processes export them at 0) and aggregated with max(),
+# never sum(), since several sweepers export the same values. Because every
+# state alert depends on a live sweeper, two alerts watch the sweeper itself.
 groups:
   - name: idem
     rules:
       - alert: IdemWorkflowsNeedAttention
-        expr: sum(max by (reason) (idem_parked_workflows)) > 0
+        expr: sum(max by (reason) (idem_parked_workflows{job="idem-sweeper"})) > 0
         for: 1m
         labels:
           severity: page
@@ -14,7 +16,7 @@ groups:
           runbook: docs/runbooks/needs-attention.md#idemworkflowsneedattention
 
       - alert: IdemMoneyMayHaveMoved
-        expr: sum(max by (reason) (idem_parked_workflows{reason!="attempts_exhausted_no_effect"})) > 0
+        expr: sum(max by (reason) (idem_parked_workflows{job="idem-sweeper", reason!="attempts_exhausted_no_effect"})) > 0
         for: 0m
         labels:
           severity: page
@@ -23,7 +25,7 @@ groups:
           runbook: docs/runbooks/needs-attention.md#idemmoneymayhavemoved
 
       - alert: IdemWorkflowsStuck
-        expr: max(idem_oldest_unsettled_workflow_age_seconds) > 900
+        expr: max(idem_oldest_unsettled_workflow_age_seconds{job="idem-sweeper"}) > 900
         for: 5m
         labels:
           severity: page
@@ -32,12 +34,12 @@ groups:
           runbook: docs/runbooks/needs-attention.md#idemworkflowsstuck
 
       - alert: IdemStepsOverAttemptLimit
-        expr: max(idem_steps_over_attempt_limit) > 0
+        expr: max(idem_steps_over_attempt_limit{job="idem-sweeper"}) > 0
         for: 5m
         labels:
           severity: ticket
         annotations:
-          summary: "{{ $value }} steps have more attempts than their limit"
+          summary: "{{ $value }} unfinished steps were claimed more than once past their attempt limit"
           runbook: docs/runbooks/needs-attention.md#idemstepsoverattemptlimit
 
       - alert: IdemFencedCommitsSpike
@@ -57,3 +59,21 @@ groups:
         annotations:
           summary: "Provider p99 latency is {{ $value | humanizeDuration }}"
           runbook: docs/runbooks/needs-attention.md#idemproviderslow
+
+      - alert: IdemSweeperDown
+        expr: absent(up{job="idem-sweeper"} == 1)
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "No sweeper is up: leases are not reclaimed and every state alert is blind"
+          runbook: docs/runbooks/needs-attention.md#idemsweeperdown
+
+      - alert: IdemSweeperSnapshotStale
+        expr: time() - max(idem_sweeper_last_snapshot_timestamp_seconds{job="idem-sweeper"}) > 120
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Sweeper state gauges are {{ $value | humanizeDuration }} old: state alerts may be wrong"
+          runbook: docs/runbooks/needs-attention.md#idemsweepersnapshotstale

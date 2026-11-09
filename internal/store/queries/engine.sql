@@ -118,4 +118,7 @@ SELECT COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000, 0)::bigint
 FROM workflows WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING');
 
 -- name: StepsOverAttemptLimit :one
-SELECT count(*)::int AS n FROM steps WHERE attempt_count > max_attempts;
+-- Unfinished steps claimed more than once past their limit. (A crash or lost
+-- lease on the final attempt legitimately leaves attempt_count = max + 1.)
+SELECT count(*)::int AS n FROM steps
+WHERE status IN ('PENDING', 'IN_DOUBT', 'RUNNING') AND attempt_count > max_attempts + 1;

@@ -44,7 +44,7 @@ WHERE id = sqlc.arg(id) AND status IN ('DEAD', 'FAILED_PERMANENT');
 UPDATE steps
 SET status = 'SUCCEEDED', provider_ref = sqlc.arg(provider_ref)::text, dead_reason = NULL,
     lease_epoch = lease_epoch + 1, lease_owner = NULL, lease_expires_at = NULL
-WHERE id = sqlc.arg(id) AND status = 'DEAD';
+WHERE id = sqlc.arg(id) AND status IN ('DEAD', 'FAILED_PERMANENT');
 
 -- name: NextStepGeneration :one
 SELECT (COALESCE(max(generation), -1) + 1)::int AS generation
@@ -54,3 +54,12 @@ FROM steps WHERE workflow_id = sqlc.arg(workflow_id) AND name = sqlc.arg(name);
 INSERT INTO admin_actions (id, actor, action, workflow_id, step_id, reason, details)
 VALUES (sqlc.arg(id), sqlc.arg(actor), sqlc.arg(action), sqlc.arg(workflow_id), sqlc.narg(step_id),
         sqlc.arg(reason), sqlc.arg(details));
+
+-- name: StepHadInDoubtAttempt :one
+-- Whether any attempt of the step may have moved money (ambiguous or abandoned).
+SELECT EXISTS (
+  SELECT 1 FROM step_attempts WHERE step_id = sqlc.arg(step_id) AND outcome IN ('IN_DOUBT', 'ABANDONED')
+)::bool AS had;
+
+-- name: ProviderRefInUse :one
+SELECT EXISTS (SELECT 1 FROM steps WHERE provider_ref = sqlc.arg(provider_ref))::bool AS used;

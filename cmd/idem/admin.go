@@ -26,6 +26,9 @@ func exitCode(err error) int {
 	if err == nil {
 		return 0
 	}
+	if errors.Is(err, engine.ErrConfirmationRequired) {
+		return 2 // a missing flag, discovered once the step's history is known
+	}
 	var ue usageError
 	msg := err.Error()
 	if errors.As(err, &ue) || strings.Contains(msg, "required flag") || strings.Contains(msg, "unknown flag") ||
@@ -224,17 +227,20 @@ func adminConfirmCmd() *cobra.Command {
 
 func adminCompensateCmd() *cobra.Command {
 	var reason string
+	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "compensate <workflow-id>",
 		Short: "Refund the customer of a parked payout (merchant verified NOT paid)",
-		Args:  cobra.ExactArgs(1),
+		Long: "If the payout may have paid the merchant (an ambiguous attempt), --confirm-no-effect is required:\n" +
+			"refunding a customer whose merchant was paid pays out twice.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id, err := parseID(args[0])
 			if err != nil {
 				return err
 			}
 			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
-				if err := a.Compensate(ctx, id, reason); err != nil {
+				if err := a.Compensate(ctx, id, reason, confirm); err != nil {
 					return err
 				}
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "workflow %s is compensating: refund queued\n", id)
@@ -243,14 +249,18 @@ func adminCompensateCmd() *cobra.Command {
 		},
 	}
 	addReason(cmd, &reason)
+	cmd.Flags().BoolVar(&confirm, "confirm-no-effect", false,
+		"required when money may have moved: I verified with the provider that it did not")
 	return cmd
 }
 
 func adminFailCmd() *cobra.Command {
 	var reason string
+	var confirm bool
 	cmd := &cobra.Command{
 		Use:   "fail <workflow-id>",
 		Short: "Close a workflow whose parked charge never charged the customer",
+		Long:  "If the charge may have happened (an ambiguous attempt), --confirm-no-effect is required.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id, err := parseID(args[0])
@@ -258,7 +268,7 @@ func adminFailCmd() *cobra.Command {
 				return err
 			}
 			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
-				if err := a.Fail(ctx, id, reason); err != nil {
+				if err := a.Fail(ctx, id, reason, confirm); err != nil {
 					return err
 				}
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "workflow %s marked FAILED\n", id)
@@ -267,6 +277,8 @@ func adminFailCmd() *cobra.Command {
 		},
 	}
 	addReason(cmd, &reason)
+	cmd.Flags().BoolVar(&confirm, "confirm-no-effect", false,
+		"required when money may have moved: I verified with the provider that it did not")
 	return cmd
 }
 

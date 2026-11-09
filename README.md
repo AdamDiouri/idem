@@ -108,14 +108,16 @@ export IDEM_DATABASE_URL=postgres://idem:idem@localhost:5432/idem?sslmode=disabl
 idem admin list                                              # what is parked, and why
 idem admin retry-step <step-id> --reason "provider recovered"  # same key: always safe
 idem admin confirm-step <step-id> --provider-ref po_… --reason "provider shows the payout"
-idem admin compensate <workflow-id> --reason "merchant not paid; refund customer"
-idem admin fail <workflow-id> --reason "customer was never charged"
+idem admin compensate <workflow-id> --reason "merchant not paid; refund customer" [--confirm-no-effect]
+idem admin fail <workflow-id> --reason "customer was never charged" [--confirm-no-effect]
 idem admin new-generation <step-id> --reason … --confirm-no-effect   # new key: verify first
 ```
 
 (With compose: `docker compose run --rm --entrypoint /idem worker admin list`.)
 
-Every change needs `--reason`, refuses anything that isn't parked, and is recorded in `admin_actions`.
+Every change needs `--reason`, refuses anything that isn't parked, and is recorded in `admin_actions`. `compensate` and `fail` also need `--confirm-no-effect` when money may have moved. That's because:
+- refunding a customer whose merchant was paid pays out twice
+- failing a charge that happened loses the customer's money
 
 **Metrics:**
 - `/metrics` on the API (`:8080`) and on workers and sweepers (`IDEM_METRICS_ADDR`, default `:9100`).
@@ -127,6 +129,8 @@ Every change needs `--reason`, refuses anything that isn't parked, and is record
   - `IdemStepsOverAttemptLimit`
   - `IdemFencedCommitsSpike`
   - `IdemProviderSlow`
+  - `IdemSweeperDown`
+  - `IdemSweeperSnapshotStale` (every state alert depends on a live sweeper)
 
 ## Run a chaos campaign
 

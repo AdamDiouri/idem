@@ -317,9 +317,12 @@ func (q *Queries) StepStatusCounts(ctx context.Context) ([]StepStatusCountsRow, 
 }
 
 const stepsOverAttemptLimit = `-- name: StepsOverAttemptLimit :one
-SELECT count(*)::int AS n FROM steps WHERE attempt_count > max_attempts
+SELECT count(*)::int AS n FROM steps
+WHERE status IN ('PENDING', 'IN_DOUBT', 'RUNNING') AND attempt_count > max_attempts + 1
 `
 
+// Unfinished steps claimed more than once past their limit. (A crash or lost
+// lease on the final attempt legitimately leaves attempt_count = max + 1.)
 func (q *Queries) StepsOverAttemptLimit(ctx context.Context) (int32, error) {
 	row := q.db.QueryRow(ctx, stepsOverAttemptLimit)
 	var n int32
