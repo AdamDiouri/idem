@@ -62,5 +62,17 @@ services:
     environment: *worker-env
     depends_on: *worker-deps
 
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus:ro
+    ports:
+      - "9091:9090" # 9090 is the fake provider
+    depends_on:
+      - api
+      - worker
+      - sweeper
+
 volumes:
   pgdata:

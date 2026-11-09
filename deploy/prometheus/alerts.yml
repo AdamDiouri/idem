@@ -1,0 +1,59 @@
+# idem alert rules. Every alert links to the runbook section that says what it
+# means and what to do. Gauges come from sweepers (several sweepers export the
+# same values), so they are aggregated with max(), never sum().
+groups:
+  - name: idem
+    rules:
+      - alert: IdemWorkflowsNeedAttention
+        expr: sum(max by (reason) (idem_parked_workflows)) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} workflows are parked and need a human"
+          runbook: docs/runbooks/needs-attention.md#idemworkflowsneedattention
+
+      - alert: IdemMoneyMayHaveMoved
+        expr: sum(max by (reason) (idem_parked_workflows{reason!="attempts_exhausted_no_effect"})) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} parked workflows may have moved money without a ledger record"
+          runbook: docs/runbooks/needs-attention.md#idemmoneymayhavemoved
+
+      - alert: IdemWorkflowsStuck
+        expr: max(idem_oldest_unsettled_workflow_age_seconds) > 900
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "The oldest unsettled workflow is {{ $value | humanizeDuration }} old"
+          runbook: docs/runbooks/needs-attention.md#idemworkflowsstuck
+
+      - alert: IdemStepsOverAttemptLimit
+        expr: max(idem_steps_over_attempt_limit) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} steps have more attempts than their limit"
+          runbook: docs/runbooks/needs-attention.md#idemstepsoverattemptlimit
+
+      - alert: IdemFencedCommitsSpike
+        expr: sum(rate(idem_step_attempts_total{outcome="fenced"}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Workers keep losing leases mid-step ({{ $value | humanize }}/s)"
+          runbook: docs/runbooks/needs-attention.md#idemfencedcommitsspike
+
+      - alert: IdemProviderSlow
+        expr: histogram_quantile(0.99, sum by (le) (rate(idem_provider_request_duration_seconds_bucket[5m]))) > 2
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Provider p99 latency is {{ $value | humanizeDuration }}"
+          runbook: docs/runbooks/needs-attention.md#idemproviderslow

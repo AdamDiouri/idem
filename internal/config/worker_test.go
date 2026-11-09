@@ -16,7 +16,7 @@ func setWorkerRequired(t *testing.T) {
 	for _, k := range []string{
 		"IDEM_API_TOKENS", "IDEM_PROVIDER_TIMEOUT", "IDEM_LEASE_TTL", "IDEM_POLL_INTERVAL",
 		"IDEM_RETRY_BASE", "IDEM_RETRY_CAP", "IDEM_PROVIDER_KEY_RETENTION", "IDEM_KEY_RETENTION_MARGIN",
-		"IDEM_SHUTDOWN_GRACE", "IDEM_STUCK_AFTER",
+		"IDEM_SHUTDOWN_GRACE", "IDEM_STUCK_AFTER", "IDEM_METRICS_ADDR",
 		"IDEM_SWEEP_INTERVAL", "IDEM_WORKER_ID", "IDEM_FAILPOINTS", "IDEM_LOG_LEVEL",
 	} {
 		t.Setenv(k, "")
@@ -41,6 +41,15 @@ func TestLoadWorker_Defaults(t *testing.T) {
 	require.Equal(t, "", cfg.WorkerID)
 	require.Equal(t, "", cfg.Failpoints)
 	require.Equal(t, "info", cfg.LogLevel)
+	require.Equal(t, ":9100", cfg.MetricsAddr)
+}
+
+func TestLoadWorker_MetricsCanBeDisabled(t *testing.T) {
+	setWorkerRequired(t)
+	t.Setenv("IDEM_METRICS_ADDR", "off")
+	cfg, err := config.LoadWorker()
+	require.NoError(t, err)
+	require.Equal(t, "off", cfg.MetricsAddr)
 }
 
 func TestLoadWorker_Invalid(t *testing.T) {
@@ -64,6 +73,7 @@ func TestLoadWorker_Invalid(t *testing.T) {
 		{"bad failpoints", "IDEM_FAILPOINTS", "x=fly", "IDEM_FAILPOINTS"},
 		{"unknown failpoint name", "IDEM_FAILPOINTS", "after_provider_cal=exit", "IDEM_FAILPOINTS"},
 		{"unknown log level", "IDEM_LOG_LEVEL", "loud", "IDEM_LOG_LEVEL"},
+		{"bad metrics address", "IDEM_METRICS_ADDR", "nope", "IDEM_METRICS_ADDR"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

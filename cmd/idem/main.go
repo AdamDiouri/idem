@@ -16,6 +16,7 @@ import (
 
 	"github.com/AdamDiouri/idem/internal/api"
 	"github.com/AdamDiouri/idem/internal/config"
+	"github.com/AdamDiouri/idem/internal/metrics"
 	"github.com/AdamDiouri/idem/internal/store"
 	"github.com/AdamDiouri/idem/internal/workflow"
 )
@@ -86,7 +87,9 @@ func apiCmd() *cobra.Command {
 			defer pool.Close()
 
 			fees := workflow.FeeConfig{RateBps: cfg.FeeRateBps, FixedCents: cfg.FeeFixedCents}
+			m := metrics.New() // served on the API's own address at /metrics
 			handler := api.NewServer(api.Options{
+				Metrics:        m,
 				Tokens:         cfg.TokenToClient(),
 				Logger:         logger,
 				RequestTimeout: cfg.RequestTimeout,

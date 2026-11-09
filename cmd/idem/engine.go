@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
@@ -16,6 +19,7 @@ import (
 	"github.com/AdamDiouri/idem/internal/failpoint"
 	"github.com/AdamDiouri/idem/internal/fakeprovider"
 	"github.com/AdamDiouri/idem/internal/invariants"
+	"github.com/AdamDiouri/idem/internal/metrics"
 	"github.com/AdamDiouri/idem/internal/provider"
 	"github.com/AdamDiouri/idem/internal/store"
 )
@@ -27,6 +31,31 @@ type workerEnv struct {
 	logger *slog.Logger
 	ctx    context.Context
 	pool   *pgxpool.Pool
+}
+
+// serveMetrics serves fresh metrics on cfg.MetricsAddr until the context ends.
+// It returns nil (metrics disabled) when the address is "off".
+func (e *workerEnv) serveMetrics() *metrics.Metrics {
+	if e.cfg.MetricsAddr == "off" {
+		return nil
+	}
+	m := metrics.New()
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", m.Handler())
+	srv := &http.Server{Addr: e.cfg.MetricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		e.logger.Info("metrics listening", "addr", e.cfg.MetricsAddr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			e.logger.Error("metrics server", "error", err)
+		}
+	}()
+	go func() {
+		<-e.ctx.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+	return m
 }
 
 func setupWorkerEnv(cmd *cobra.Command) (*workerEnv, func(), error) {
@@ -77,6 +106,7 @@ func workerCmd() *cobra.Command {
 					engine.NewPayoutStep(client),
 					engine.NewRefundStep(client),
 				},
+				Metrics:            e.serveMetrics(),
 				LeaseTTL:           e.cfg.LeaseTTL,
 				PollInterval:       e.cfg.PollInterval,
 				Backoff:            engine.Backoff{Base: e.cfg.RetryBase, Cap: e.cfg.RetryCap},
@@ -101,7 +131,7 @@ func sweeperCmd() *cobra.Command {
 			defer cleanup()
 			e.logger.Info("sweeper started", "interval", e.cfg.SweepInterval.String())
 			return engine.RunSweeper(e.ctx, e.pool, engine.SweeperOptions{
-				Interval: e.cfg.SweepInterval, StuckAfter: e.cfg.StuckAfter, Logger: e.logger,
+				Interval: e.cfg.SweepInterval, StuckAfter: e.cfg.StuckAfter, Logger: e.logger, Metrics: e.serveMetrics(),
 			})
 		},
 	}
