@@ -77,3 +77,40 @@ groups:
         annotations:
           summary: "Sweeper state gauges are {{ $value | humanizeDuration }} old: state alerts may be wrong"
           runbook: docs/runbooks/needs-attention.md#idemsweepersnapshotstale
+
+      # Slice 2.2: provider webhooks.
+      - alert: IdemWebhookConflict
+        expr: max(idem_webhook_conflicts_open{job="idem-sweeper"}) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} provider events contradict idem: money may have moved both ways"
+          runbook: docs/runbooks/needs-attention.md#idemwebhookconflict
+
+      - alert: IdemInboxBacklog
+        expr: max(idem_inbox_oldest_pending_age_seconds{job="idem-sweeper"}) > 600
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "The oldest unprocessed provider webhook is {{ $value | humanizeDuration }} old"
+          runbook: docs/runbooks/needs-attention.md#ideminboxbacklog
+
+      - alert: IdemCallbacksOverdue
+        expr: max(idem_callbacks_overdue{job="idem-sweeper"}) > 0
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} waiting payouts are overdue for a poll: polling is not keeping up"
+          runbook: docs/runbooks/needs-attention.md#idemcallbacksoverdue
+
+      - alert: IdemWebhookSignatureFailures
+        expr: sum(rate(idem_webhooks_received_total{result=~"bad_signature|stale"}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Provider webhooks keep failing verification: a wrong secret, a clock problem, or forged requests"
+          runbook: docs/runbooks/needs-attention.md#idemwebhooksignaturefailures

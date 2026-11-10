@@ -51,6 +51,7 @@ type ParkedWorkflow struct {
 	CustomerID  string        `json:"customer_id"`
 	MerchantID  string        `json:"merchant_id"`
 	ParkedFor   time.Duration `json:"parked_for"`
+	Evidence    string        `json:"provider_says,omitempty"` // the provider's latest news about the step (D18)
 }
 
 // Admin performs audited human interventions on parked workflows (design
@@ -86,7 +87,7 @@ func (a *Admin) ListParked(ctx context.Context, reason string) ([]ParkedWorkflow
 		p := ParkedWorkflow{
 			WorkflowID: r.WorkflowID, Version: r.Version, StepID: r.StepID, Step: r.Name, StepStatus: r.Status,
 			DeadReason: deref(r.DeadReason), LastError: deref(r.LastError), Attempts: r.AttemptCount, Polls: r.PollCount,
-			ParkedFor: time.Duration(r.ParkedMs) * time.Millisecond,
+			ParkedFor: time.Duration(r.ParkedMs) * time.Millisecond, Evidence: r.Evidence,
 		}
 		var in workflow.PaymentInput
 		if err := json.Unmarshal(r.Input, &in); err == nil {
@@ -256,6 +257,68 @@ func (a *Admin) Fail(ctx context.Context, workflowID uuid.UUID, version int64, r
 		}
 		return "fail", map[string]any{"charge_step": st.ID, "dead_reason": deref(st.DeadReason)}, nil
 	})
+}
+
+// Conflict is provider news that truly contradicts what idem recorded (D16):
+// money may have moved both ways. It pages until a human resolves it.
+type Conflict struct {
+	EventID    string    `json:"event_id"`
+	Type       string    `json:"type"`
+	Note       string    `json:"note"`
+	WorkflowID uuid.UUID `json:"workflow_id"`
+	StepID     uuid.UUID `json:"step_id"`
+	ReceivedAt time.Time `json:"received_at"`
+}
+
+// ListConflicts lists the open conflicts, oldest first.
+func (a *Admin) ListConflicts(ctx context.Context) ([]Conflict, error) {
+	rows, err := db.New(a.pool).ListConflicts(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list conflicts: %w", err)
+	}
+	out := make([]Conflict, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, Conflict{EventID: r.ProviderEventID, Type: r.Type, Note: r.Note,
+			WorkflowID: r.WorkflowID, StepID: r.StepID, ReceivedAt: r.ReceivedAt.Time})
+	}
+	return out, nil
+}
+
+// ResolveConflict records that a human resolved a conflict outside idem (for
+// example, recovered the money), with an audit row. Nothing else changes:
+// idem never flips a decided result.
+func (a *Admin) ResolveConflict(ctx context.Context, eventID, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		return errors.New("a reason is required for every admin action")
+	}
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := db.New(tx)
+	row, err := q.ResolveConflict(ctx, eventID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: no open conflict %s", ErrNotActionable, eventID)
+	}
+	if err != nil {
+		return fmt.Errorf("resolve conflict: %w", err)
+	}
+	details, err := json.Marshal(map[string]any{"event_id": eventID, "note": row.Note})
+	if err != nil {
+		return err
+	}
+	auditID, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+	if err := q.InsertAdminAction(ctx, db.InsertAdminActionParams{
+		ID: auditID, Actor: a.actor, Action: "resolve_conflict", WorkflowID: row.WorkflowID, StepID: &row.StepID,
+		Reason: strings.TrimSpace(reason), Details: details,
+	}); err != nil {
+		return fmt.Errorf("audit: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 type parkedAction func(ctx context.Context, q *db.Queries, st db.LockParkedStepRow) (action string, details map[string]any, err error)

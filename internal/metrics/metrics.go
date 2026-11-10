@@ -18,20 +18,24 @@ import (
 type Metrics struct {
 	reg *prometheus.Registry
 
-	StepAttempts     *prometheus.CounterVec   // step, outcome
-	ProviderDuration *prometheus.HistogramVec // step, class
-	KeyLookups       *prometheus.CounterVec   // step, found
-	LeasesReclaimed  prometheus.Counter
-	Workflows        *prometheus.GaugeVec // status
-	Steps            *prometheus.GaugeVec // step, status
-	UnsettledIdle    prometheus.Gauge
-	StepsOverLimit   prometheus.Gauge
-	Parked           *prometheus.GaugeVec   // reason
-	LastSnapshot     prometheus.Gauge       // unix time of the last successful sweeper snapshot
-	Submissions      *prometheus.CounterVec // result
-	CallbackPolls    *prometheus.CounterVec // step, result
-	WebhooksReceived *prometheus.CounterVec // result
-	WebhooksApplied  *prometheus.CounterVec // outcome
+	StepAttempts       *prometheus.CounterVec   // step, outcome
+	ProviderDuration   *prometheus.HistogramVec // step, class
+	KeyLookups         *prometheus.CounterVec   // step, found
+	LeasesReclaimed    prometheus.Counter
+	Workflows          *prometheus.GaugeVec // status
+	Steps              *prometheus.GaugeVec // step, status
+	UnsettledIdle      prometheus.Gauge
+	StepsOverLimit     prometheus.Gauge
+	Parked             *prometheus.GaugeVec   // reason
+	LastSnapshot       prometheus.Gauge       // unix time of the last successful sweeper snapshot
+	Submissions        *prometheus.CounterVec // result
+	CallbackPolls      *prometheus.CounterVec // step, result
+	WebhooksReceived   *prometheus.CounterVec // result
+	WebhooksApplied    *prometheus.CounterVec // outcome
+	InboxPending       prometheus.Gauge
+	InboxOldestPending prometheus.Gauge
+	ConflictsOpen      prometheus.Gauge
+	CallbacksOverdue   prometheus.Gauge
 }
 
 // New registers every metric, plus the Go runtime and process collectors.
@@ -87,6 +91,18 @@ func New() *Metrics {
 			Name: "idem_webhooks_received_total",
 			Help: "POST /webhooks/provider results: accepted, duplicate, bad_signature, stale, malformed, too_large, store_error.",
 		}, []string{"result"}),
+		InboxPending: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "idem_inbox_pending", Help: "Provider webhook events not processed yet.",
+		}),
+		InboxOldestPending: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "idem_inbox_oldest_pending_age_seconds", Help: "Age of the oldest unprocessed provider webhook event (0 if none).",
+		}),
+		ConflictsOpen: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "idem_webhook_conflicts_open", Help: "Provider news that truly contradicts idem, not yet resolved by a human.",
+		}),
+		CallbacksOverdue: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "idem_callbacks_overdue", Help: "Waiting payouts whose poll is more than 5 minutes overdue.",
+		}),
 		WebhooksApplied: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "idem_webhooks_applied_total",
 			Help: "Inbox events processed by outcome: applied, noop, deferred, orphaned, stale, evidence, conflict, malformed, fenced.",
@@ -99,6 +115,7 @@ func New() *Metrics {
 	for _, c := range []prometheus.Collector{
 		m.StepAttempts, m.ProviderDuration, m.KeyLookups, m.LeasesReclaimed, m.Workflows, m.Steps,
 		m.UnsettledIdle, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions, m.CallbackPolls, m.WebhooksReceived, m.WebhooksApplied,
+		m.InboxPending, m.InboxOldestPending, m.ConflictsOpen, m.CallbacksOverdue,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	} {
 		f(c)
@@ -157,6 +174,11 @@ type Snapshot struct {
 	UnsettledIdle  time.Duration
 	StepsOverLimit int
 	Parked         map[string]int // reason → count
+
+	InboxPending       int
+	InboxOldestPending time.Duration
+	ConflictsOpen      int
+	CallbacksOverdue   int
 }
 
 // SetSnapshot replaces every state gauge, so label values that disappeared
@@ -179,6 +201,10 @@ func (m *Metrics) SetSnapshot(s Snapshot) {
 	for reason, n := range s.Parked {
 		m.Parked.WithLabelValues(reason).Set(float64(n))
 	}
+	m.InboxPending.Set(float64(s.InboxPending))
+	m.InboxOldestPending.Set(s.InboxOldestPending.Seconds())
+	m.ConflictsOpen.Set(float64(s.ConflictsOpen))
+	m.CallbacksOverdue.Set(float64(s.CallbacksOverdue))
 	m.LastSnapshot.SetToCurrentTime()
 }
 

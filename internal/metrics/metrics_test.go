@@ -33,6 +33,7 @@ func TestMetrics_HandlerExposesRegistered(t *testing.T) {
 		"idem_step_attempts_total", "idem_provider_request_duration_seconds", "idem_key_retention_lookups_total",
 		"idem_leases_reclaimed_total", "idem_workflows", "idem_steps", "idem_unsettled_workflow_max_idle_seconds",
 		"idem_steps_over_attempt_limit", "idem_parked_workflows", "idem_workflow_submissions_total", "go_goroutines",
+		"idem_inbox_pending", "idem_inbox_oldest_pending_age_seconds", "idem_webhook_conflicts_open", "idem_callbacks_overdue",
 	} {
 		require.Contains(t, string(body), name)
 	}

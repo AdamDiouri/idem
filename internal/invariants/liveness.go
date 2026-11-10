@@ -38,6 +38,17 @@ func CheckLiveness(ctx context.Context, pool *pgxpool.Pool) ([]Violation, error)
 			Detail:     fmt.Sprintf("step %s is still %s", st.Name, st.Status),
 		})
 	}
+
+	pending, err := db.New(pool).PendingInboxEvents(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query pending inbox events: %w", err)
+	}
+	for _, e := range pending {
+		violations = append(violations, Violation{
+			Invariant: "I4",
+			Detail:    fmt.Sprintf("provider event %s still unprocessed since %s", e.ProviderEventID, e.ReceivedAt.Time.UTC().Format(time.RFC3339)),
+		})
+	}
 	return violations, nil
 }
 

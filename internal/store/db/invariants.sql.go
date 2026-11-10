@@ -12,6 +12,38 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const conflictEvents = `-- name: ConflictEvents :many
+SELECT i.provider_event_id, s.workflow_id, COALESCE(i.note, '')::text AS note
+FROM webhook_inbox i JOIN steps s ON s.id = i.step_id
+WHERE i.status = 'CONFLICT' ORDER BY i.received_at
+`
+
+type ConflictEventsRow struct {
+	ProviderEventID string
+	WorkflowID      uuid.UUID
+	Note            string
+}
+
+func (q *Queries) ConflictEvents(ctx context.Context) ([]ConflictEventsRow, error) {
+	rows, err := q.db.Query(ctx, conflictEvents)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ConflictEventsRow
+	for rows.Next() {
+		var i ConflictEventsRow
+		if err := rows.Scan(&i.ProviderEventID, &i.WorkflowID, &i.Note); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const keysWithoutWorkflow = `-- name: KeysWithoutWorkflow :many
 SELECT client_id, key FROM api_idempotency_keys
 WHERE workflow_id IS NULL OR response_body IS NULL
@@ -135,6 +167,35 @@ func (q *Queries) NonTerminalWorkflows(ctx context.Context) ([]NonTerminalWorkfl
 	for rows.Next() {
 		var i NonTerminalWorkflowsRow
 		if err := rows.Scan(&i.ID, &i.Status, &i.UpdatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const pendingInboxEvents = `-- name: PendingInboxEvents :many
+SELECT provider_event_id, received_at FROM webhook_inbox WHERE status = 'PENDING' ORDER BY received_at
+`
+
+type PendingInboxEventsRow struct {
+	ProviderEventID string
+	ReceivedAt      pgtype.Timestamptz
+}
+
+func (q *Queries) PendingInboxEvents(ctx context.Context) ([]PendingInboxEventsRow, error) {
+	rows, err := q.db.Query(ctx, pendingInboxEvents)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PendingInboxEventsRow
+	for rows.Next() {
+		var i PendingInboxEventsRow
+		if err := rows.Scan(&i.ProviderEventID, &i.ReceivedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

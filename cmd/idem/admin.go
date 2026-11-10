@@ -85,7 +85,8 @@ func adminCmd() *cobra.Command {
 		Long: "Every change requires --reason and is recorded in admin_actions.\n" +
 			"See docs/runbooks/needs-attention.md for which action fits which situation.",
 	}
-	cmd.AddCommand(adminListCmd(), adminRetryCmd(), adminNewGenerationCmd(), adminConfirmCmd(), adminCompensateCmd(), adminFailCmd())
+	cmd.AddCommand(adminListCmd(), adminRetryCmd(), adminNewGenerationCmd(), adminConfirmCmd(), adminCompensateCmd(), adminFailCmd(),
+		adminConflictCmd())
 	return cmd
 }
 
@@ -156,14 +157,14 @@ func adminListCmd() *cobra.Command {
 					return enc.Encode(parked)
 				}
 				tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-				_, _ = fmt.Fprintln(tw, "WORKFLOW\tVERSION\tSTEP\tSTATUS\tREASON\tATTEMPTS\tPOLLS\tPARKED FOR\tLAST ERROR")
+				_, _ = fmt.Fprintln(tw, "WORKFLOW\tVERSION\tSTEP\tSTATUS\tREASON\tATTEMPTS\tPOLLS\tPARKED FOR\tLAST ERROR\tPROVIDER SAYS")
 				for _, p := range parked {
 					why := p.DeadReason
 					if why == "" {
 						why = "refused"
 					}
-					_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n", p.WorkflowID, p.Version, p.Step, p.StepStatus, why,
-						p.Attempts, p.Polls, p.ParkedFor.Round(time.Second), truncate(p.LastError, 60))
+					_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n", p.WorkflowID, p.Version, p.Step, p.StepStatus, why,
+						p.Attempts, p.Polls, p.ParkedFor.Round(time.Second), truncate(p.LastError, 60), p.Evidence)
 				}
 				return tw.Flush()
 			})
@@ -315,6 +316,62 @@ func adminFailCmd() *cobra.Command {
 	addMutationFlags(cmd, &reason, &version)
 	cmd.Flags().BoolVar(&confirm, "confirm-no-effect", false,
 		"required when money may have moved: I verified with the provider that it did not")
+	return cmd
+}
+
+// adminConflictCmd groups the commands for real provider conflicts (D16).
+func adminConflictCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "conflict",
+		Short: "Provider news that contradicts idem: money may have moved both ways",
+	}
+	var asJSON bool
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List open conflicts",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
+				conflicts, err := a.ListConflicts(ctx)
+				if err != nil {
+					return err
+				}
+				out := cmd.OutOrStdout()
+				if asJSON {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(conflicts)
+				}
+				tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+				_, _ = fmt.Fprintln(tw, "EVENT\tWORKFLOW\tTYPE\tRECEIVED\tNOTE")
+				for _, c := range conflicts {
+					_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", c.EventID, c.WorkflowID, c.Type,
+						c.ReceivedAt.UTC().Format(time.RFC3339), c.Note)
+				}
+				return tw.Flush()
+			})
+		},
+	}
+	list.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+
+	var reason string
+	resolve := &cobra.Command{
+		Use:   "resolve <event-id>",
+		Short: "Record that a conflict was resolved outside idem (audited)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
+				if err := a.ResolveConflict(ctx, args[0], reason); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "conflict %s resolved\n", args[0])
+				return nil
+			})
+		},
+	}
+	resolve.Flags().StringVar(&reason, "reason", "", "what was done (recorded in the audit log)")
+	_ = resolve.MarkFlagRequired("reason")
+	cmd.AddCommand(list, resolve)
 	return cmd
 }
 

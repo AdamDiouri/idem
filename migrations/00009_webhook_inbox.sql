@@ -31,7 +31,16 @@ CREATE INDEX webhook_inbox_due ON webhook_inbox (next_attempt_at) WHERE status =
 ALTER TABLE step_attempts DROP CONSTRAINT step_attempts_kind_check;
 ALTER TABLE step_attempts ADD CONSTRAINT step_attempts_kind_check CHECK (kind IN ('send', 'poll', 'webhook'));
 
+-- Resolving a conflict is an audited admin action.
+ALTER TABLE admin_actions DROP CONSTRAINT admin_actions_action_check;
+ALTER TABLE admin_actions ADD CONSTRAINT admin_actions_action_check
+  CHECK (action IN ('retry_step', 'new_generation', 'confirm_step', 'compensate', 'fail', 'resolve_conflict'));
+
 -- +goose Down
+-- Audit rows are never deleted: the narrower rule only applies to new rows.
+ALTER TABLE admin_actions DROP CONSTRAINT admin_actions_action_check;
+ALTER TABLE admin_actions ADD CONSTRAINT admin_actions_action_check
+  CHECK (action IN ('retry_step', 'new_generation', 'confirm_step', 'compensate', 'fail')) NOT VALID;
 UPDATE step_attempts SET kind = 'poll' WHERE kind = 'webhook';
 ALTER TABLE step_attempts DROP CONSTRAINT step_attempts_kind_check;
 ALTER TABLE step_attempts ADD CONSTRAINT step_attempts_kind_check CHECK (kind IN ('send', 'poll'));

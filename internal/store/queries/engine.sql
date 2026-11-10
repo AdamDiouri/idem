@@ -180,3 +180,12 @@ WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING');
 -- lease on the final attempt legitimately leaves attempt_count = max + 1.)
 SELECT count(*)::int AS n FROM steps
 WHERE status IN ('PENDING', 'IN_DOUBT', 'RUNNING') AND attempt_count > max_attempts + 1;
+
+-- name: InboxStats :one
+-- For the sweeper's gauges: the inbox backlog, open conflicts, and waiting
+-- steps whose poll is more than 5 minutes overdue (polls are not keeping up).
+SELECT
+  (SELECT count(*) FROM webhook_inbox WHERE status = 'PENDING')::int AS pending,
+  COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(received_at))) * 1000 FROM webhook_inbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms,
+  (SELECT count(*) FROM webhook_inbox WHERE status = 'CONFLICT')::int AS conflicts_open,
+  (SELECT count(*) FROM steps WHERE status = 'AWAITING_CALLBACK' AND callback_deadline < now() - interval '5 minutes')::int AS callbacks_overdue;

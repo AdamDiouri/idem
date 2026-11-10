@@ -39,3 +39,11 @@ WHERE NOT EXISTS (SELECT 1 FROM api_idempotency_keys k WHERE k.workflow_id = w.i
 -- name: UnsettledSteps :many
 SELECT workflow_id, name, status FROM steps
 WHERE status IN ('RUNNING', 'IN_DOUBT', 'AWAITING_CALLBACK') ORDER BY created_at;
+
+-- name: ConflictEvents :many
+SELECT i.provider_event_id, s.workflow_id, COALESCE(i.note, '')::text AS note
+FROM webhook_inbox i JOIN steps s ON s.id = i.step_id
+WHERE i.status = 'CONFLICT' ORDER BY i.received_at;
+
+-- name: PendingInboxEvents :many
+SELECT provider_event_id, received_at FROM webhook_inbox WHERE status = 'PENDING' ORDER BY received_at;

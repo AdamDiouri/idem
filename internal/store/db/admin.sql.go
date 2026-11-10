@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const confirmStepSucceeded = `-- name: ConfirmStepSucceeded :execrows
@@ -60,10 +61,57 @@ func (q *Queries) InsertAdminAction(ctx context.Context, arg InsertAdminActionPa
 	return err
 }
 
+const listConflicts = `-- name: ListConflicts :many
+SELECT i.provider_event_id, i.type, COALESCE(i.note, '')::text AS note, i.received_at, s.id AS step_id, s.workflow_id
+FROM webhook_inbox i JOIN steps s ON s.id = i.step_id
+WHERE i.status = 'CONFLICT'
+ORDER BY i.received_at
+`
+
+type ListConflictsRow struct {
+	ProviderEventID string
+	Type            string
+	Note            string
+	ReceivedAt      pgtype.Timestamptz
+	StepID          uuid.UUID
+	WorkflowID      uuid.UUID
+}
+
+// Provider news that truly contradicts idem (D16): money may have moved both ways.
+func (q *Queries) ListConflicts(ctx context.Context) ([]ListConflictsRow, error) {
+	rows, err := q.db.Query(ctx, listConflicts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListConflictsRow
+	for rows.Next() {
+		var i ListConflictsRow
+		if err := rows.Scan(
+			&i.ProviderEventID,
+			&i.Type,
+			&i.Note,
+			&i.ReceivedAt,
+			&i.StepID,
+			&i.WorkflowID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listParkedSteps = `-- name: ListParkedSteps :many
 SELECT DISTINCT ON (w.id)
   w.id AS workflow_id, w.version, s.id AS step_id, s.name, s.status, s.dead_reason, s.last_error, s.attempt_count, s.poll_count, w.input,
-  (EXTRACT(EPOCH FROM (now() - w.updated_at)) * 1000)::bigint AS parked_ms
+  (EXTRACT(EPOCH FROM (now() - w.updated_at)) * 1000)::bigint AS parked_ms,
+  -- The provider's latest news about this step (D18), if any.
+  COALESCE((SELECT i.note FROM webhook_inbox i WHERE i.step_id = s.id AND i.status = 'EVIDENCE'
+            ORDER BY i.processed_at DESC LIMIT 1), '')::text AS evidence
 FROM workflows w
 JOIN steps s ON s.workflow_id = w.id AND s.status IN ('DEAD', 'FAILED_PERMANENT')
 WHERE w.status = 'NEEDS_ATTENTION'
@@ -82,6 +130,7 @@ type ListParkedStepsRow struct {
 	PollCount    int32
 	Input        []byte
 	ParkedMs     int64
+	Evidence     string
 }
 
 // Each parked workflow with the step that parked it (its most recent step).
@@ -108,6 +157,7 @@ func (q *Queries) ListParkedSteps(ctx context.Context) ([]ListParkedStepsRow, er
 			&i.PollCount,
 			&i.Input,
 			&i.ParkedMs,
+			&i.Evidence,
 		); err != nil {
 			return nil, err
 		}
@@ -243,6 +293,28 @@ func (q *Queries) ResetStepForRetry(ctx context.Context, arg ResetStepForRetryPa
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const resolveConflict = `-- name: ResolveConflict :one
+UPDATE webhook_inbox i
+SET status = 'CONFLICT_RESOLVED'
+FROM steps s
+WHERE i.provider_event_id = $1 AND i.status = 'CONFLICT' AND s.id = i.step_id
+RETURNING s.workflow_id, s.id AS step_id, COALESCE(i.note, '')::text AS note
+`
+
+type ResolveConflictRow struct {
+	WorkflowID uuid.UUID
+	StepID     uuid.UUID
+	Note       string
+}
+
+// A human resolved a conflict outside idem (e.g. clawed money back).
+func (q *Queries) ResolveConflict(ctx context.Context, providerEventID string) (ResolveConflictRow, error) {
+	row := q.db.QueryRow(ctx, resolveConflict, providerEventID)
+	var i ResolveConflictRow
+	err := row.Scan(&i.WorkflowID, &i.StepID, &i.Note)
+	return i, err
 }
 
 const stepHadInDoubtAttempt = `-- name: StepHadInDoubtAttempt :one

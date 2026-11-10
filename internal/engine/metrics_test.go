@@ -186,6 +186,32 @@ func TestSweeper_ScheduledCallbackWaitIsNotIdle(t *testing.T) {
 	}
 }
 
+// Slice 2.2: the sweeper exports the inbox backlog, open conflicts and
+// overdue callbacks.
+func TestSweeper_ExportsInboxAndCallbackGauges(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	step := scalar[uuid.UUID](t, h.pool, `SELECT id FROM steps WHERE workflow_id = $1`, wf)
+	_, err := h.pool.Exec(ctx, `UPDATE workflows SET status = 'RUNNING' WHERE id = $1`, wf)
+	require.NoError(t, err)
+	_, err = h.pool.Exec(ctx, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_x',
+		callback_deadline = now() - interval '10 minutes', run_after = now() + interval '1 hour' WHERE id = $1`, step)
+	require.NoError(t, err)
+	_, err = h.pool.Exec(ctx, `INSERT INTO webhook_inbox (provider_event_id, type, payload, received_at) VALUES
+		('evt_pending', 'payout.paid', '{}', now() - interval '1 hour')`)
+	require.NoError(t, err)
+	_, err = h.pool.Exec(ctx, `INSERT INTO webhook_inbox (provider_event_id, type, payload, status, step_id) VALUES
+		('evt_conflict', 'payout.paid', '{}', 'CONFLICT', $1)`, step)
+	require.NoError(t, err)
+
+	m := sweepOnce(t, h)
+	require.Equal(t, 1.0, testutil.ToFloat64(m.InboxPending))
+	require.GreaterOrEqual(t, testutil.ToFloat64(m.InboxOldestPending), 3500.0)
+	require.Equal(t, 1.0, testutil.ToFloat64(m.ConflictsOpen))
+	require.Equal(t, 1.0, testutil.ToFloat64(m.CallbacksOverdue))
+}
+
 // Review focus: labels must stay bounded — no IDs, keys or error text.
 func TestMetrics_NoUnboundedLabels(t *testing.T) {
 	h := newHarness(t)

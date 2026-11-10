@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -10,6 +11,7 @@ import (
 	"github.com/AdamDiouri/idem/internal/engine"
 	"github.com/AdamDiouri/idem/internal/fakeprovider"
 	"github.com/AdamDiouri/idem/internal/provider"
+	"github.com/AdamDiouri/idem/internal/webhook"
 	"github.com/AdamDiouri/idem/internal/workflow"
 )
 
@@ -386,4 +388,47 @@ func TestAdmin_RefusesStaleVersion(t *testing.T) {
 
 	// With the current version, the decision is made on the current facts.
 	require.ErrorIs(t, a.Fail(ctx, wf, now.Version, "A, re-checked", false), engine.ErrConfirmationRequired)
+}
+
+// Slice 2.2 (D18): provider news about a parked step is shown to the operator.
+func TestAdmin_ListShowsProviderEvidence(t *testing.T) {
+	h := asyncHarness(t, time.Hour)
+	wf := parkUnresolvedPayout(t, h)
+	h.fake.SettleNow()
+	ref := scalar[string](t, h.pool, `SELECT provider_ref FROM steps WHERE workflow_id = $1 AND name = 'payout'`, wf)
+	h.storeEvent(t, wf, webhook.EventPayoutPaid, "")
+	require.Equal(t, "evidence", h.inboxOnce(t, h.inboxProcessor()))
+
+	require.Equal(t, "provider says paid "+ref, h.parkedStep(t, wf).Evidence)
+}
+
+// Slice 2.2 (D16): a real conflict pages until a human resolves it, audited.
+func TestAdmin_ResolveConflict(t *testing.T) {
+	ctx := context.Background()
+	h := asyncHarness(t, time.Hour)
+	wf := parkUnresolvedPayout(t, h)
+	p := h.parkedStep(t, wf)
+	require.NoError(t, h.admin().Compensate(ctx, wf, p.Version, "provider shows no payout", true))
+	h.fake.SettleNow()
+	id := h.storeEvent(t, wf, webhook.EventPayoutPaid, "")
+	require.Equal(t, "conflict", h.inboxOnce(t, h.inboxProcessor()))
+
+	conflicts, err := h.admin().ListConflicts(ctx)
+	require.NoError(t, err)
+	require.Len(t, conflicts, 1)
+	require.Equal(t, id, conflicts[0].EventID)
+	require.Equal(t, wf, conflicts[0].WorkflowID)
+	require.Contains(t, conflicts[0].Note, "provider says paid")
+
+	require.Error(t, h.admin().ResolveConflict(ctx, id, "  "), "a reason is required")
+	before := h.auditRows(t, wf)
+	require.NoError(t, h.admin().ResolveConflict(ctx, id, "clawed back from the merchant"))
+	require.Equal(t, before+1, h.auditRows(t, wf))
+	require.Equal(t, "resolve_conflict", scalar[string](t, h.pool, `SELECT action FROM admin_actions WHERE workflow_id = $1 ORDER BY at DESC LIMIT 1`, wf))
+	status, _ := h.inboxRow(t, id)
+	require.Equal(t, "CONFLICT_RESOLVED", status)
+	require.ErrorIs(t, h.admin().ResolveConflict(ctx, id, "again"), engine.ErrNotActionable)
+	conflicts, err = h.admin().ListConflicts(ctx)
+	require.NoError(t, err)
+	require.Empty(t, conflicts)
 }
