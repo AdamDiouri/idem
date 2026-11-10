@@ -152,7 +152,7 @@ What the system must tolerate in M1, and what it explicitly doesn't.
 
 - The webhook arrow (provider → API) is live since **M2 slice 2.2**: `POST /webhooks/provider` verifies and stores events in `webhook_inbox`, and an inbox processor in each worker applies them. Polling (slice 2.1) stays as the safety net.
 - **Local runtime:** `docker compose` in M1; `minikube` from M4.
-- **One binary** `idem` with subcommands `api | worker | sweeper | all`. Each role is stateless; all state lives in Postgres. Running several of each must be safe.
+- **One binary** `idem` with subcommands `api | worker | sweeper` (plus `migrate`, `check` and `admin`). Each role runs as its own process; there is no all-in-one mode, because compose and Kubernetes already run one process per role. Each role is stateless; all state lives in Postgres. Running several of each must be safe.
 - **`fakeprovider`** — a separate Go HTTP service imitating a Stripe-like provider, with fault injection and an "effects oracle" (§14.1).
 - **`chaos`** — orchestrates processes, injects faults, then runs the invariant checker (§14).
 
@@ -170,7 +170,8 @@ internal/failpoint/
 internal/invariants/
 migrations/
 docs/design.md
-docs/adr/
+docs/adr/            # one file per decision (§16)
+docs/journal/        # one write-up per delivery slice (§15)
 ```
 
 ### Tech stack (confirmed 2026-11-09)
@@ -296,7 +297,7 @@ INSERT INTO ledger_transactions ...;   -- UNIQUE (step_id, kind)
 INSERT INTO ledger_entries ...;        -- balanced, checked at COMMIT
 INSERT INTO steps (...next step...);   -- or update workflow to terminal
 UPDATE workflows SET status = ..., version = version + 1 WHERE id = $wf;
-INSERT INTO outbox ...;
+INSERT INTO outbox ...;               -- not built yet: M2 slice 2.4 (D13)
 UPDATE step_attempts SET outcome = ..., finished_at = now() WHERE ...;
 COMMIT;
 ```
@@ -397,7 +398,9 @@ After a fully successful workflow, `provider_receivable` holds exactly the fee a
 `SIGTERM` → stop claiming → let in-flight steps finish within `shutdown_grace` → exit. Anything not finished falls through to the lease-expiry path; that's correct, just slower.
 
 ### 11.3 Outbox
-Workflow lifecycle events (`workflow.succeeded`, `workflow.compensated`, …) are written to `outbox` in the same transaction as the transition. M1 only writes them; a relay that publishes and marks `published_at` comes in M2.
+> **Not built in M1.** The outbox and its relay arrive in M2 slices 2.4 and 2.5; see the [M2 design](superpowers/specs/2026-11-10-milestone-2-design.md) §5.2–5.3 (D13, D14, D19).
+
+Workflow lifecycle events (`workflow.succeeded`, `workflow.compensated`, …) are written to `outbox` in the same transaction as the transition.
 
 ### 11.4 Admin actions (CLI, audited)
 As built in slice 1.6.
@@ -518,7 +521,7 @@ Initial set: `after_claim`, `before_provider_call`, `after_provider_call`, `befo
 
 ## 15. Milestone 1 delivery slices
 
-Each slice ends with passing tests and a short write-up in `docs/journal/`.
+Each slice ends with passing tests and a short write-up in [`docs/journal/`](journal/README.md) (entries up to slice 2.3b were written retrospectively on 2026-11-10).
 
 | Slice | Delivers | Failure work in the same slice |
 |---|---|---|
@@ -559,26 +562,34 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 
 ---
 
-## 16. Decisions (to become ADRs in `docs/adr/`)
+## 16. Decisions
+
+Each decision has an architecture decision record in [`docs/adr/`](adr/README.md) with its context, consequences and status. The table is the summary.
 
 | ID | Decision | Why | Alternative rejected |
 |---|---|---|---|
-| D1 | Postgres as the single state store | Core invariants need multi-row atomic transactions and unique constraints; matches real payment systems | Distributed KV (etcd/Redis): would require rebuilding transactions; moves the project away from the payments problem |
-| D2 | Ledger posting inside the external step's success transaction | Removes the "provider succeeded, ledger not updated" window | Separate ledger step: adds a crash window and a step to recover |
-| D3 | All lease timing from DB `now()` | Immune to worker clock skew | Worker-side timestamps |
-| D4 | Dead-letter = `DEAD` status, not a separate table | One source of truth; no move-between-tables crash window | DLQ table |
-| D5 | Ambiguous outcomes → `IN_DOUBT`, never `FAILED` | Assuming failure is how double payments happen | Treat timeouts as failures |
-| D6 | Outbound keys stored at step creation; new keys only by audited admin action | Prevents silent double payment from code changes or bugs | Recompute key on each attempt |
-| D7 | Every ownership change bumps `lease_epoch` | One fencing rule with no special cases | Bump only on claim |
-| D8 | Hand-written SQL, `sqlc`-generated Go on `pgx/v5`, no ORM | Learning goal; locking clauses stay visible; type safety without row-scanning boilerplate | ORM (GORM, ent): hides transactions and locking — the very things this project is about |
-| D9 | Payouts synchronous in M1; async + webhooks first thing in M2 | Reach a complete, chaos-tested flow sooner; M1 schema/state machine already leave room | Async in M1 |
-| D10 | Single currency (EUR) in M1, `currency` column kept | Simplicity now, cheap to extend later | Multi-currency from day one |
-| D11 | Platform fees kept; integer cents, half-to-even rounding, fixed at workflow creation | Realism; fee rounding is a classic source of ledger drift | No fees |
-| D12 | (M2) Workers poll waiting payouts, not the sweeper | Workers already own every provider call, leases and fencing; the sweeper stays database-only | Sweeper polls |
-| D16 | (M2) Contradictory provider news never flips a terminal state; it is re-checked with the provider, and only a real disagreement pages | Late and reordered webhooks are normal; flipping on them is how money moves twice | Last event wins |
-| D18 | (M2) Provider news about a parked step is evidence for a human, never an automatic resolution | Money decisions made under doubt end with a human, who sees the answer | Auto-resolve parked steps |
-| D20 | (M3) Tracing with the trace context stored in the rows that hand work between processes | Work moves through database rows, not RPC calls, so headers alone cannot carry a trace; storing it keeps one payment one trace | Trace each process separately; header-only propagation |
-| D17 | (M2) Polls are attempts of kind `poll` and never create doubt; the pivot rule reads the history of send attempts | A `GET` cannot move money; counting a crashed poll as doubt would park clean failures | Treat every attempt alike |
+| [D1](adr/0001-postgres-single-state-store.md) | Postgres as the single state store | Core invariants need multi-row atomic transactions and unique constraints; matches real payment systems | Distributed KV (etcd/Redis): would require rebuilding transactions; moves the project away from the payments problem |
+| [D2](adr/0002-ledger-posting-in-success-transaction.md) | Ledger posting inside the external step's success transaction | Removes the "provider succeeded, ledger not updated" window | Separate ledger step: adds a crash window and a step to recover |
+| [D3](adr/0003-lease-timing-from-database-clock.md) | All lease timing from DB `now()` | Immune to worker clock skew | Worker-side timestamps |
+| [D4](adr/0004-dead-letter-is-a-status.md) | Dead-letter = `DEAD` status, not a separate table | One source of truth; no move-between-tables crash window | DLQ table |
+| [D5](adr/0005-ambiguous-outcomes-are-in-doubt.md) | Ambiguous outcomes → `IN_DOUBT`, never `FAILED` | Assuming failure is how double payments happen | Treat timeouts as failures |
+| [D6](adr/0006-outbound-keys-stored-at-step-creation.md) | Outbound keys stored at step creation; new keys only by audited admin action | Prevents silent double payment from code changes or bugs | Recompute key on each attempt |
+| [D7](adr/0007-every-ownership-change-bumps-lease-epoch.md) | Every ownership change bumps `lease_epoch` | One fencing rule with no special cases | Bump only on claim |
+| [D8](adr/0008-hand-written-sql-with-sqlc.md) | Hand-written SQL, `sqlc`-generated Go on `pgx/v5`, no ORM | Learning goal; locking clauses stay visible; type safety without row-scanning boilerplate | ORM (GORM, ent): hides transactions and locking — the very things this project is about |
+| [D9](adr/0009-sync-payouts-first.md) | Payouts synchronous in M1; async + webhooks first thing in M2 | Reach a complete, chaos-tested flow sooner; M1 schema/state machine already leave room | Async in M1 |
+| [D10](adr/0010-single-currency.md) | Single currency (EUR) in M1, `currency` column kept | Simplicity now, cheap to extend later | Multi-currency from day one |
+| [D11](adr/0011-platform-fees-in-integer-cents.md) | Platform fees kept; integer cents, half-to-even rounding, fixed at workflow creation | Realism; fee rounding is a classic source of ledger drift | No fees |
+| [D12](adr/0012-workers-poll-waiting-payouts.md) | (M2) Workers poll waiting payouts, not the sweeper | Workers already own every provider call, leases and fencing; the sweeper stays database-only | Sweeper polls |
+| [D13](adr/0013-outbox-written-in-transition.md) | (M2, planned 2.4) The outbox is written inside `transitionWorkflow`, in the transaction of the terminal transition | Every path that ends a workflow emits exactly one event, and none can forget | Publish from each code path (dual write) |
+| [D14](adr/0014-at-least-once-outbound-delivery.md) | (M2, planned 2.5) Outbound delivery is at least once, with a stable event ID the shop deduplicates on | Exactly-once over HTTP is impossible without the receiver; this is how real providers do it | At most once; claiming exactly once |
+| [D15](adr/0015-reconciliation-only-reports.md) | (M2, planned 2.6) Reconciliation only reports | When ledger and provider disagree, idem cannot know which is right; humans resolve with evidence | Auto-correct the ledger |
+| [D16](adr/0016-contradictory-news-never-flips-terminal-state.md) | (M2) Contradictory provider news never flips a terminal state; it is re-checked with the provider, and only a real disagreement pages | Late and reordered webhooks are normal; flipping on them is how money moves twice | Last event wins |
+| [D17](adr/0017-polls-never-create-doubt.md) | (M2) Polls are attempts of kind `poll` and never create doubt; the pivot rule reads the history of send attempts | A `GET` cannot move money; counting a crashed poll as doubt would park clean failures | Treat every attempt alike |
+| [D18](adr/0018-news-about-parked-steps-is-evidence.md) | (M2) Provider news about a parked step is evidence for a human, never an automatic resolution | Money decisions made under doubt end with a human, who sees the answer | Auto-resolve parked steps |
+| [D19](adr/0019-outbox-rows-for-every-client.md) | (M2, planned 2.5) Outbox rows are written for every client; without a webhook URL they are marked `NO_ENDPOINT`, not delivered and not alerted | No special case in I8; polling `GET /workflows/{id}` is a legitimate integration | Skip those rows; mark them delivered |
+| [D20](adr/0020-trace-context-stored-in-work-rows.md) | (M3) Tracing with the trace context stored in the rows that hand work between processes | Work moves through database rows, not RPC calls, so headers alone cannot carry a trace; storing it keeps one payment one trace | Trace each process separately; header-only propagation |
+| [D21](adr/0021-append-only-by-privilege-logins-are-infrastructure.md) | (2.3b) The ledger and audit trail are append-only by privilege (role `idem_app`); database logins are infrastructure, never created by idem | The owner could drop the triggers; an application should not manage credentials | Triggers only; `idem migrate` creates the login |
+| [D22](adr/0022-toolchain-pinned-in-go-mod.md) | The Go toolchain is pinned in `go.mod` and kept on a supported release; govulncheck runs in CI | Go 1.25 had left support with reachable, unpatched vulnerabilities; one version everywhere | Whatever Go is installed locally |
 
 **Calls made by Claude while drafting (please check):** D2, D4, D7, D8; fee defaults and rounding rule; retry defaults; one hard-coded workflow type; static API token; in-memory fake provider; `generation` mechanism for deliberate new keys.
 
