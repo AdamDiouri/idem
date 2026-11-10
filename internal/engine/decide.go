@@ -42,6 +42,7 @@ func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay, callb
 	case provider.NoEffect:
 		if !attemptsLeft {
 			r.Kind, r.DeadReason = ResultDead, DeadAttemptsExhaustedNoEffect
+			r.AttemptOutcome = ResultRetryNoEffect // this attempt moved nothing
 			if s.PriorStatus == string(ResultInDoubt) {
 				r.DeadReason = DeadAttemptsExhaustedInDoubt
 			}

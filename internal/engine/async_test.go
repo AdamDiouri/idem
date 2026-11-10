@@ -259,3 +259,25 @@ func TestFlow_InDoubtAcceptedPayoutNearRetentionPollsByRef(t *testing.T) {
 		"failed, after the operator's doubt: parked with the true reason, not attempts_exhausted_in_doubt")
 	require.Zero(t, h.fake.Calls()["GET /payouts"], "no lookup by key: the payout reference is known")
 }
+
+// Fix before merge: a payout that ran out of attempts with provably no effect
+// (rate limited every time) moved no money. After an operator's retry, a clean
+// async failure must refund the customer, as in M1, not park as doubt.
+func TestFlow_NoEffectExhaustionIsNotDoubt(t *testing.T) {
+	ctx := context.Background()
+	h := asyncHarness(t, 0)
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	h.drain(t, h.workerWith("w1", nil, h.chargeStep()))
+	h.setStepMaxAttempts(t, wf, "payout", 2)
+	h.setFaults(fakeprovider.Rule{Endpoint: "payouts", Mode: fakeprovider.ModeRateLimit})
+	h.drain(t, h.noRetryAfter())
+	p := h.parkedStep(t, wf)
+	require.Equal(t, engine.DeadAttemptsExhaustedNoEffect, p.DeadReason)
+
+	h.setFaults(fakeprovider.Rule{Endpoint: "payouts", Mode: fakeprovider.ModePayoutFail, Times: 1})
+	require.NoError(t, h.admin().RetryStep(ctx, p.StepID, p.Version, "rate limit lifted"))
+	h.drain(t, h.workerWith("w1", nil, h.allSteps()...))
+
+	require.Equal(t, "COMPENSATED", h.workflowStatus(t, wf), "no attempt ever moved money: a clean failure refunds")
+	h.assertNoViolations(t)
+}

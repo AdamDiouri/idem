@@ -101,6 +101,11 @@ type Result struct {
 	Error       string
 	RetryDelay  time.Duration // IN_DOUBT and RETRY_NO_EFFECT
 	DeadReason  string        // DEAD only
+	// AttemptOutcome, when set, is what this attempt itself learned, recorded
+	// instead of Kind on its step_attempts row: a provably no-effect attempt
+	// that exhausted the budget is DEAD for the step but not doubt in the
+	// history the pivot rule reads.
+	AttemptOutcome ResultKind
 }
 
 // Step is one kind of workflow step. Execute runs with no transaction open; the

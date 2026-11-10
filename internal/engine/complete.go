@@ -63,8 +63,12 @@ func Complete(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, r Result, 
 		v := int32(r.HTTPStatus) //nolint:gosec // HTTP status codes fit in int32
 		httpStatus = &v
 	}
+	outcome := r.Kind
+	if r.AttemptOutcome != "" {
+		outcome = r.AttemptOutcome
+	}
 	if err := q.FinishStepAttempt(ctx, db.FinishStepAttemptParams{
-		Outcome:    string(r.Kind),
+		Outcome:    string(outcome),
 		HttpStatus: httpStatus,
 		Error:      optional(r.Error),
 		StepID:     s.ID,
