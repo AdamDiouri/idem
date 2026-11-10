@@ -203,7 +203,7 @@ The columns `callback_deadline` and status `AWAITING_CALLBACK` already exist fro
 | F15 | Duplicate provider webhook | Inbox primary key | Applied once | `dup_webhook`; exercised in chaos (2.3) |
 | F16 | Webhook before our `AWAITING_CALLBACK` commit | Row stays pending, retried | Applied once the step is ready | `fast_webhook`; exercised in chaos (2.3) |
 | F17 | Contradictory / reordered webhook | Never flip; `CONFLICT` + alert | Loud, not wrong | `reorder`; exercised in chaos (2.3) |
-| F18 | Webhook never arrives | Deadline → worker polls | Resolved by polling; bounded, then `callback_unresolved` | `drop_webhook` |
+| F18 | Webhook never arrives | Deadline → worker polls | Resolved by polling; bounded, then `callback_unresolved` | `drop_webhook`; exercised in chaos (2.3) |
 | F19 | Forged or replayed webhook | Signature + timestamp | `400`, nothing stored | `bad_signature`, unit tests; exercised in chaos (2.3) |
 | F28 | Crash after storing a webhook, before `200` | Provider retries; dedup | Applied once | failpoint `webhook_after_insert`; exercised in chaos (2.3) |
 | F29 | Crash while applying a webhook | Transaction rolls back; row still pending | Applied once later | failpoint `inbox_before_commit`, kills; exercised in chaos (2.3) |

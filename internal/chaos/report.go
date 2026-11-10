@@ -168,7 +168,7 @@ func (r *Report) Evaluate() {
 	if effective[SetProviderFaults] > 0 && hits == 0 {
 		add("vacuous: provider faults were set but never fired")
 	}
-	if r.Config.Failpoints != "" && r.FailpointExits == 0 {
+	if (r.Config.Failpoints != "" || r.Config.APIFailpoints != "") && r.FailpointExits == 0 {
 		add("vacuous: failpoints were armed but none fired (binary built with -tags nofailpoint?)")
 	}
 	if r.Config.APIs > 1 {
@@ -205,8 +205,8 @@ func (r *Report) Evaluate() {
 // Reproduce returns the command that replays this run's fault plan.
 func (r *Report) Reproduce() string {
 	c := r.Config
-	return fmt.Sprintf("bin/chaos --seed %d --duration %s --workflows %d --workers %d --sweepers %d",
-		r.Seed, c.Duration, c.Workflows, c.Workers, c.Sweepers)
+	return fmt.Sprintf("bin/chaos --seed %d --duration %s --workflows %d --workers %d --apis %d --sweepers %d",
+		r.Seed, c.Duration, c.Workflows, c.Workers, max(c.APIs, 1), c.Sweepers)
 }
 
 // Text renders a human-readable summary.
@@ -253,6 +253,13 @@ func (r *Report) Text() string {
 		fmt.Fprintf(&b, "api replicas: %d (requests %s; webhooks accepted %s, duplicates %s)\n", r.Config.APIs,
 			strings.Join(reqs, " "), strings.Join(accepted, " "), strings.Join(dups, " "))
 	}
+	conflicts := 0
+	for _, v := range r.Violations {
+		if v.Invariant == "I10" {
+			conflicts++
+		}
+	}
+	fmt.Fprintf(&b, "conflicts: %d (provider webhooks contradicting idem; any is an I10 violation)\n", conflicts)
 	fmt.Fprintf(&b, "failpoint exits: %d\n", r.FailpointExits)
 	if len(r.FailpointFires) > 0 {
 		var fires []string

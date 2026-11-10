@@ -1,6 +1,9 @@
 package chaos
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -240,4 +243,15 @@ func TestPlan_WebhookFaultBlock(t *testing.T) {
 			require.Len(t, kinds, len(AllKinds), "%s seed %d: every disruption kind still occurs", d, seed)
 		}
 	}
+}
+
+// Minor fix: a process that never becomes ready shows why, from its own log
+// (e.g. a release binary refusing failpoints).
+func TestWithLogTail_ShowsTheProcessLog(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "api-0.log")
+	require.NoError(t, os.WriteFile(log, []byte("starting\nfailpoints requested but this binary was built with -tags nofailpoint\n"), 0o600))
+	err := withLogTail(errors.New("api-0: not ready"), log)
+	require.ErrorContains(t, err, "api-0: not ready")
+	require.ErrorContains(t, err, "built with -tags nofailpoint")
+	require.Equal(t, "boom", withLogTail(errors.New("boom"), filepath.Join(t.TempDir(), "missing.log")).Error())
 }

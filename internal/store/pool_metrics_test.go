@@ -83,3 +83,12 @@ func TestWatchPool_CountsWaits(t *testing.T) {
 	require.GreaterOrEqual(t, gauge(t, m, "idem_db_pool_empty_acquires_total"), 1.0)
 	require.Greater(t, gauge(t, m, "idem_db_pool_acquire_wait_seconds_total"), 0.0)
 }
+
+// Minor fix: watching the same pool twice is a no-op, not a panic.
+func TestWatchPool_TwiceIsNoop(t *testing.T) {
+	pool := openPool(t)
+	m := metrics.New()
+	m.WatchPool(pool)
+	require.NotPanics(t, func() { m.WatchPool(pool) })
+	require.Equal(t, 20.0, gauge(t, m, "idem_db_pool_max_conns"))
+}

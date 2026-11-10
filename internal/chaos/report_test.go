@@ -115,7 +115,7 @@ func TestReport_TextIncludesSeedAndReproduceCommand(t *testing.T) {
 	text := r.Text()
 	require.Contains(t, text, "seed 42")
 	require.Contains(t, text, "PASSED")
-	require.Contains(t, text, "bin/chaos --seed 42 --duration 30s --workflows 10 --workers 4 --sweepers 2")
+	require.Contains(t, text, "bin/chaos --seed 42 --duration 30s --workflows 10 --workers 4 --apis 1 --sweepers 2")
 }
 
 func TestReport_TextShowsRecoveryCounts(t *testing.T) {
@@ -280,4 +280,26 @@ func TestReport_WebhookWindowEffectiveOverTheWindow(t *testing.T) {
 	r.Reasons = nil
 	r.Evaluate()
 	require.Contains(t, strings.Join(r.Reasons, "\n"), "webhook fault fast_webhook never had a real window")
+}
+
+// Minor fixes (slice 2.3 review).
+func TestReport_ReproduceIncludesAPIs(t *testing.T) {
+	r := healthy()
+	r.Config.APIs = 2
+	require.Contains(t, r.Reproduce(), "--apis 2")
+}
+
+func TestReport_ShortRunWithOnlyAPIFailpointsIsJudged(t *testing.T) {
+	r := healthy()
+	r.Config.APIFailpoints = "webhook_after_insert=exit@0.1"
+	r.FailpointExits = 0
+	r.Evaluate()
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "failpoints were armed but none fired")
+}
+
+func TestReport_TextShowsConflicts(t *testing.T) {
+	r := healthy()
+	require.Contains(t, r.Text(), "conflicts: 0")
+	r.Violations = []invariants.Violation{{Invariant: "I10", WorkflowID: "wf"}, {Invariant: "I1", WorkflowID: "wf"}}
+	require.Contains(t, r.Text(), "conflicts: 1")
 }

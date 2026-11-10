@@ -182,7 +182,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		return rep, err
 	}
 	if err := waitHTTP(ctx, providerURL+"/_effects"); err != nil {
-		return rep, fmt.Errorf("fake provider: %w", err)
+		return rep, withLogTail(fmt.Errorf("fake provider: %w", err), logPath("fakeprovider"))
 	}
 
 	apis := make([]*Proc, nAPIs)
@@ -193,7 +193,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 			return rep, err
 		}
 		if err := waitHTTP(ctx, apiURLs[i]+"/readyz"); err != nil {
-			return rep, fmt.Errorf("%s: %w", name, err)
+			return rep, withLogTail(fmt.Errorf("%s: %w", name, err), logPath(name))
 		}
 	}
 
@@ -289,7 +289,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 			return rep, err
 		}
 		if err := waitHTTP(ctx, apiURLs[i]+"/readyz"); err != nil {
-			return rep, fmt.Errorf("%s (settle): %w", name, err)
+			return rep, withLogTail(fmt.Errorf("%s (settle): %w", name, err), logPath(name))
 		}
 	}
 
@@ -552,4 +552,16 @@ func countMatchingLines(file string, needles ...string) int {
 		}
 	}
 	return n
+}
+
+// withLogTail adds the last lines of a process's log to err, so a process
+// that never became ready says why (e.g. a release binary, built with
+// -tags nofailpoint, refusing the failpoints chaos arms).
+func withLogTail(err error, logFile string) error {
+	data, readErr := os.ReadFile(logFile) //nolint:gosec // harness-owned log file
+	if readErr != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return err
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	return fmt.Errorf("%w\nlast lines of %s:\n%s", err, filepath.Base(logFile), strings.Join(lines[max(0, len(lines)-5):], "\n"))
 }

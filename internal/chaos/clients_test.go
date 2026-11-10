@@ -209,3 +209,13 @@ func TestClients_SurviveOneReplicaDown(t *testing.T) {
 	require.Zero(t, res.PerReplica[b], "a replica that is down answers nothing")
 	require.Equal(t, len(res.Accepted), workflowCount(t, pool))
 }
+
+// Minor fix: no replica to send to is a reported failure, not a panic.
+func TestClients_NoReplicaIsReportedNotPanic(t *testing.T) {
+	cfg := clientConfig("", 3, 1)
+	cfg.BaseURLs = nil
+	var res ClientResult
+	require.NotPanics(t, func() { res = RunClients(context.Background(), cfg) })
+	require.NotEmpty(t, res.Unexpected)
+	require.Contains(t, res.Unexpected[0], "no API replica")
+}

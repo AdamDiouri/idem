@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"errors"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -8,12 +10,18 @@ import (
 // WatchPool exports pool's connection statistics, read from pgx at each
 // scrape. They answer "is the database pool a bottleneck?": how many
 // connections are in use, and how often and how long requests waited for one.
-// A nil Metrics (metrics off) makes it a no-op.
+// A nil Metrics (metrics off) makes it a no-op. A process has one pool: once
+// a pool is watched, later calls are no-ops.
 func (m *Metrics) WatchPool(pool *pgxpool.Pool) {
 	if m == nil || pool == nil {
 		return
 	}
-	m.reg.MustRegister(&poolCollector{pool: pool})
+	if err := m.reg.Register(&poolCollector{pool: pool}); err != nil {
+		var already prometheus.AlreadyRegisteredError
+		if !errors.As(err, &already) {
+			panic(err) // a programming error, like MustRegister
+		}
+	}
 }
 
 var (

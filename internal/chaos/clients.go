@@ -140,8 +140,12 @@ func pickBehavior(rng *rand.Rand) Behavior {
 // RunClients submits cfg.Workflows workflows with a seeded mix of behaviors and
 // returns what was observed. It returns when every client is done or ctx ends.
 func RunClients(ctx context.Context, cfg ClientConfig) ClientResult {
-	cfg.replicas = &replicas{urls: cfg.BaseURLs, answered: map[string]int{}}
 	jobs := planJobs(cfg.Seed, cfg.Workflows)
+	if len(cfg.BaseURLs) == 0 {
+		return ClientResult{Submitted: len(jobs), Accepted: map[string]string{}, Behaviors: map[Behavior]int{},
+			Unexpected: []string{"no API replica to send to (empty BaseURLs)"}}
+	}
+	cfg.replicas = &replicas{urls: cfg.BaseURLs, answered: map[string]int{}}
 	res := ClientResult{Submitted: len(jobs), Accepted: map[string]string{}, Behaviors: map[Behavior]int{}}
 	var mu sync.Mutex
 	var retries atomic.Int64
