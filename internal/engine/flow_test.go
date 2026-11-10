@@ -110,6 +110,18 @@ func TestFlow_HappyPath(t *testing.T) {
 	h.assertNoViolations(t)
 }
 
+// Slice 2.4: a declined charge keeps the provider's code on its step; the
+// shop's view reports it as the failure reason.
+func TestFlow_DeclinedChargeRecordsFailureCode(t *testing.T) {
+	h := newHarness(t)
+	wf := submitTo(t, h, "cus_decline_1", "mer_1")
+	h.drain(t, h.workerWith("w1", nil, h.allSteps()...))
+
+	require.Equal(t, "FAILED", h.workflowStatus(t, wf))
+	require.Equal(t, "card_declined", scalar[string](t, h.pool,
+		`SELECT failure_code FROM steps WHERE workflow_id = $1 AND name = 'charge'`, wf))
+}
+
 func TestFlow_PayoutFailsRefundCompensates_F20(t *testing.T) {
 	h := newHarness(t)
 	wf := submitTo(t, h, "cus_1", "mer_invalid_1")

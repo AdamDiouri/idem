@@ -142,14 +142,15 @@ SET status           = $1::text,
     provider_ref     = COALESCE($2::text, provider_ref),
     last_error       = $3::text,
     dead_reason      = $4::text,
+    failure_code     = $5::text,
     run_after        = CASE WHEN $1::text IN ('IN_DOUBT', 'PENDING', 'AWAITING_CALLBACK')
-                            THEN now() + ($5::bigint * interval '1 millisecond')
+                            THEN now() + ($6::bigint * interval '1 millisecond')
                             ELSE run_after END,
     -- A waiting step is polled at its callback deadline (run_after, same instant).
     callback_deadline = CASE WHEN $1::text = 'AWAITING_CALLBACK'
-                             THEN now() + ($5::bigint * interval '1 millisecond')
+                             THEN now() + ($6::bigint * interval '1 millisecond')
                              ELSE NULL END
-WHERE id = $6 AND lease_epoch = $7 AND status = 'RUNNING'
+WHERE id = $7 AND lease_epoch = $8 AND status = 'RUNNING'
 `
 
 type CompleteStepParams struct {
@@ -157,6 +158,7 @@ type CompleteStepParams struct {
 	ProviderRef *string
 	LastError   *string
 	DeadReason  *string
+	FailureCode *string
 	RetryMs     int64
 	ID          uuid.UUID
 	LeaseEpoch  int64
@@ -169,6 +171,7 @@ func (q *Queries) CompleteStep(ctx context.Context, arg CompleteStepParams) (int
 		arg.ProviderRef,
 		arg.LastError,
 		arg.DeadReason,
+		arg.FailureCode,
 		arg.RetryMs,
 		arg.ID,
 		arg.LeaseEpoch,

@@ -32,7 +32,7 @@ func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay, callb
 	case provider.Accepted:
 		r.Kind, r.RetryDelay = ResultAwaitingCallback, callbackDeadline
 	case provider.Permanent:
-		r.Kind = ResultFailedPermanent
+		r.Kind, r.FailureCode = ResultFailedPermanent, out.Code
 		if pivot && (s.PriorStatus == string(ResultInDoubt) || s.SendDoubt) {
 			// An earlier attempt may have succeeded even though this one is
 			// refused (a provider that does not replay). Compensating on that
@@ -104,7 +104,7 @@ func decidePoll(s ClaimedStep, out provider.Outcome, pb Backoff, lim PollLimits,
 		r.Kind = ResultSucceeded
 		return r
 	case provider.Permanent:
-		r.Kind = ResultFailedPermanent
+		r.Kind, r.FailureCode = ResultFailedPermanent, out.Code
 		if pivot && (s.SendDoubt || s.PriorStatus == string(ResultInDoubt)) {
 			r.Kind, r.DeadReason = ResultDead, DeadPermanentAfterInDoubt
 		}

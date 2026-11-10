@@ -65,6 +65,7 @@ SET status           = sqlc.arg(status)::text,
     provider_ref     = COALESCE(sqlc.narg(provider_ref)::text, provider_ref),
     last_error       = sqlc.narg(last_error)::text,
     dead_reason      = sqlc.narg(dead_reason)::text,
+    failure_code     = sqlc.narg(failure_code)::text,
     run_after        = CASE WHEN sqlc.arg(status)::text IN ('IN_DOUBT', 'PENDING', 'AWAITING_CALLBACK')
                             THEN now() + (sqlc.arg(retry_ms)::bigint * interval '1 millisecond')
                             ELSE run_after END,
