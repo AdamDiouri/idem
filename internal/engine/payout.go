@@ -36,6 +36,11 @@ func (p *payoutStep) Lookup(ctx context.Context, s ClaimedStep) (provider.Outcom
 	return p.client.LookupPayout(ctx, s.IdempotencyKey, payoutRequest(s))
 }
 
+// Poll asks the provider for the accepted payout's current state.
+func (p *payoutStep) Poll(ctx context.Context, s ClaimedStep) provider.Outcome {
+	return p.client.GetPayout(ctx, s.ProviderRef, payoutRequest(s))
+}
+
 func payoutRequest(s ClaimedStep) provider.PayoutRequest {
 	return provider.PayoutRequest{
 		AmountCents: s.Input.AmountCents - s.Input.FeeCents,

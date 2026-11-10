@@ -117,3 +117,10 @@ type Step interface {
 	OnSuccess(ctx context.Context, q *db.Queries, s ClaimedStep, providerRef string) error
 	OnPermanentFailure(ctx context.Context, q *db.Queries, s ClaimedStep) error
 }
+
+// Poller is a Step whose provider accepts requests asynchronously (the payout).
+// Poll asks for the current state of the request identified by s.ProviderRef;
+// it sends nothing, so its answer never creates doubt (design D17).
+type Poller interface {
+	Poll(ctx context.Context, s ClaimedStep) provider.Outcome
+}

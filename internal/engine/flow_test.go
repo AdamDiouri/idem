@@ -219,7 +219,8 @@ func TestFlow_PermanentPayoutAfterDoubtParks(t *testing.T) {
 
 	w := h.workerWith("w1", nil, h.allSteps()...)
 	require.Equal(t, "in_doubt", h.runOnce(t, w).Outcome)
-	require.Equal(t, "dead", h.runOnce(t, w).Outcome)
+	require.Equal(t, "awaiting_callback", h.runOnce(t, w).Outcome, "accepted on the retry")
+	require.Equal(t, "dead", h.runOnce(t, w).Outcome, "the poll finds it failed, after an ambiguous send")
 
 	require.Equal(t, engine.DeadPermanentAfterInDoubt,
 		scalar[string](t, h.pool, `SELECT dead_reason FROM steps WHERE workflow_id = $1 AND name = 'payout'`, wf))

@@ -33,10 +33,14 @@ type WorkerConfig struct {
 	KeyRetentionMargin   time.Duration `env:"IDEM_KEY_RETENTION_MARGIN" envDefault:"1h"`
 	ShutdownGrace        time.Duration `env:"IDEM_SHUTDOWN_GRACE" envDefault:"15s"`
 	StuckAfter           time.Duration `env:"IDEM_STUCK_AFTER" envDefault:"15m"`
-	SweepInterval        time.Duration `env:"IDEM_SWEEP_INTERVAL" envDefault:"5s"`
-	WorkerID             string        `env:"IDEM_WORKER_ID"`  // empty → hostname-pid
-	Failpoints           string        `env:"IDEM_FAILPOINTS"` // see failpoint.EnableFromEnv
-	LogLevel             string        `env:"IDEM_LOG_LEVEL" envDefault:"info"`
+	// CallbackDeadline: how long an accepted payout waits before workers poll
+	// it; CallbackMaxPolls: how many polls before it is callback_unresolved.
+	CallbackDeadline time.Duration `env:"IDEM_CALLBACK_DEADLINE" envDefault:"10m"`
+	CallbackMaxPolls int32         `env:"IDEM_CALLBACK_MAX_POLLS" envDefault:"8"`
+	SweepInterval    time.Duration `env:"IDEM_SWEEP_INTERVAL" envDefault:"5s"`
+	WorkerID         string        `env:"IDEM_WORKER_ID"`  // empty → hostname-pid
+	Failpoints       string        `env:"IDEM_FAILPOINTS"` // see failpoint.EnableFromEnv
+	LogLevel         string        `env:"IDEM_LOG_LEVEL" envDefault:"info"`
 	// MetricsAddr is where worker and sweeper serve /metrics ("off" disables). The
 	// default stays outside 9100-9999, which Prometheus allocates to exporters
 	// (node_exporter is 9100 and runs on most monitored hosts).
@@ -92,6 +96,12 @@ func (c WorkerConfig) validate() error {
 	}
 	if c.StuckAfter <= 0 {
 		return fmt.Errorf("IDEM_STUCK_AFTER must be positive")
+	}
+	if c.CallbackDeadline <= 0 {
+		return fmt.Errorf("IDEM_CALLBACK_DEADLINE must be positive")
+	}
+	if c.CallbackMaxPolls < 1 {
+		return fmt.Errorf("IDEM_CALLBACK_MAX_POLLS must be at least 1")
 	}
 	if err := failpoint.ValidateSpec(c.Failpoints, engine.FailpointNames...); err != nil {
 		return fmt.Errorf("IDEM_FAILPOINTS: %w", err)

@@ -76,6 +76,20 @@ func TestSweeper_ExportsGauges(t *testing.T) {
 	require.Equal(t, 0.0, testutil.ToFloat64(m.StepsOverLimit))
 }
 
+// Slice 2.1: polls are counted by result.
+func TestWorker_CountsPolls(t *testing.T) {
+	h := asyncHarness(t, 200*time.Millisecond)
+	m := metrics.New()
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	h.runUntil(t, h.workerWith("w1", func(o *engine.WorkerOptions) {
+		o.Metrics, o.CallbackDeadline, o.MaxPolls = m, 0, 1000
+	}, h.allSteps()...), wf, "SUCCEEDED")
+	require.GreaterOrEqual(t, testutil.ToFloat64(m.CallbackPolls.WithLabelValues("payout", "pending")), 1.0)
+	require.Equal(t, 1.0, testutil.ToFloat64(m.CallbackPolls.WithLabelValues("payout", "paid")))
+	// The send and every pending poll end awaiting the callback.
+	require.GreaterOrEqual(t, testutil.ToFloat64(m.StepAttempts.WithLabelValues("payout", "awaiting_callback")), 2.0)
+}
+
 // sweepOnce runs a sweeper until it has exported one snapshot.
 func sweepOnce(t *testing.T, h harness) *metrics.Metrics {
 	t.Helper()

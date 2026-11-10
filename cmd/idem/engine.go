@@ -112,6 +112,8 @@ func workerCmd() *cobra.Command {
 				Backoff:            engine.Backoff{Base: e.cfg.RetryBase, Cap: e.cfg.RetryCap},
 				KeyRetention:       e.cfg.ProviderKeyRetention,
 				KeyRetentionMargin: e.cfg.KeyRetentionMargin,
+				CallbackDeadline:   e.cfg.CallbackDeadline,
+				MaxPolls:           e.cfg.CallbackMaxPolls,
 				ShutdownGrace:      e.cfg.ShutdownGrace,
 				Logger:             e.logger,
 			}).Run(e.ctx)
