@@ -336,9 +336,9 @@ func armedFailpoints(specs string) []string {
 	return slices.Sorted(maps.Keys(seen))
 }
 
-// realWebhookWindows reports which webhook faults were in an effective fault
-// set that stayed in force for minFaultWindow, measured on the executed
-// timeline (wall times), not the plan: a slow event in between shortens a
+// realWebhookWindows reports which webhook faults were in a fault set that
+// stayed in force for minFaultWindow while work was in flight, measured on the
+// executed timeline (wall times), not the plan: a slow event in between shortens a
 // window, a late fault change lengthens it.
 func (r *Report) realWebhookWindows() map[string]bool {
 	out := map[string]bool{}
@@ -353,7 +353,7 @@ func (r *Report) realWebhookWindows() map[string]bool {
 	}
 	end := start.Add(r.Config.Duration)
 	for i, e := range r.Events {
-		if e.Kind != SetProviderFaults || !e.effective() {
+		if e.Kind != SetProviderFaults || e.Err != "" || e.Skipped != "" {
 			continue
 		}
 		until := end
@@ -364,6 +364,19 @@ func (r *Report) realWebhookWindows() map[string]bool {
 			}
 		}
 		if until.Sub(e.WallTime) < minFaultWindow {
+			continue
+		}
+		// Work in flight during the window, not only at its first instant:
+		// in-flight is sampled when an event fires, and a window opened right
+		// after a database restart samples 0 while traffic flows through it.
+		busy := e.InFlight > 0
+		for _, n := range r.Events[i+1:] {
+			if !n.WallTime.Before(until) {
+				break
+			}
+			busy = busy || n.InFlight > 0
+		}
+		if !busy {
 			continue
 		}
 		for _, rule := range e.Faults.Rules {

@@ -257,3 +257,27 @@ func TestReport_EveryWebhookModeNeedsARealWindow(t *testing.T) {
 	r.Evaluate()
 	require.Contains(t, strings.Join(r.Reasons, "\n"), "webhook fault reorder never had a real window")
 }
+
+// Found by campaigns (seed 2): in-flight is sampled at the instant an event
+// fires; a window opened right after a database restart sampled 0 while
+// traffic flowed through the whole window. Effectiveness of a webhook window
+// is judged over the window: any event during it that saw work in flight.
+func TestReport_WebhookWindowEffectiveOverTheWindow(t *testing.T) {
+	t0 := time.Now()
+	r := healthy()
+	r.Config.Duration = 90 * time.Second
+	r.Events = append(r.Events,
+		ExecutedEvent{InFlight: 0, WallTime: t0.Add(22800 * time.Millisecond), Event: Event{At: 22580 * time.Millisecond, Kind: SetProviderFaults,
+			Faults: fakeprovider.Faults{Rules: []fakeprovider.Rule{{Endpoint: "webhooks", Mode: fakeprovider.ModeFastWebhook, Probability: 0.3}}}}},
+		ExecutedEvent{InFlight: 16, WallTime: t0.Add(23470 * time.Millisecond), Event: Event{At: 22650 * time.Millisecond, Kind: RestartPostgres}},
+		ExecutedEvent{InFlight: 9, WallTime: t0.Add(30590 * time.Millisecond), Event: Event{At: 30580 * time.Millisecond, Kind: ClearProviderFaults}})
+	r.FaultHits["webhooks/fast_webhook"] = 19
+	r.Evaluate()
+	require.NotContains(t, strings.Join(r.Reasons, "\n"), "webhook fault fast_webhook never had a real window")
+
+	// A window during which nothing at all saw work in flight still does not count.
+	r.Events[len(r.Events)-2].InFlight = 0
+	r.Reasons = nil
+	r.Evaluate()
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "webhook fault fast_webhook never had a real window")
+}
