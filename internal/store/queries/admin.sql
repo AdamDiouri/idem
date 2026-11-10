@@ -58,10 +58,16 @@ VALUES (sqlc.arg(id), sqlc.arg(actor), sqlc.arg(action), sqlc.arg(workflow_id), 
         sqlc.arg(reason), sqlc.arg(details));
 
 -- name: StepHadInDoubtAttempt :one
--- Whether any attempt of the step may have moved money (ambiguous or abandoned).
+-- Whether any SEND attempt of the step may have moved money (ambiguous or
+-- abandoned). Polls send nothing, so they never count (design D17).
 SELECT EXISTS (
-  SELECT 1 FROM step_attempts WHERE step_id = sqlc.arg(step_id) AND outcome IN ('IN_DOUBT', 'ABANDONED')
+  SELECT 1 FROM step_attempts
+  WHERE step_id = sqlc.arg(step_id) AND kind = 'send' AND outcome IN ('IN_DOUBT', 'ABANDONED')
 )::bool AS had;
 
 -- name: ProviderRefInUse :one
-SELECT EXISTS (SELECT 1 FROM steps WHERE provider_ref = sqlc.arg(provider_ref))::bool AS used;
+-- Whether another step already records this provider reference. The step's own
+-- reference (e.g. the payout ID it was waiting on) is not a reuse.
+SELECT EXISTS (
+  SELECT 1 FROM steps WHERE provider_ref = sqlc.arg(provider_ref) AND id <> sqlc.arg(step_id)
+)::bool AS used;

@@ -4,10 +4,14 @@
 -- the fencing token of the new owner. All times come from the database clock.
 -- Only steps of active workflows are claimable: a parked (NEEDS_ATTENTION) or
 -- finished workflow must not move money it could no longer record.
+-- An AWAITING_CALLBACK step past its deadline is claimed for a poll: poll_count
+-- grows instead of attempt_count (the send budget). send_doubt reports whether
+-- any earlier SEND attempt may have moved money (the pivot rule reads it);
+-- DEAD counts too, because an exhausted ambiguous attempt is recorded as DEAD.
 WITH next AS (
   SELECT st.id FROM steps st
   JOIN workflows wf ON wf.id = st.workflow_id
-  WHERE st.status IN ('PENDING', 'IN_DOUBT')
+  WHERE st.status IN ('PENDING', 'IN_DOUBT', 'AWAITING_CALLBACK')
     AND st.run_after <= now()
     AND st.name = ANY(sqlc.arg(names)::text[])
     AND wf.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
@@ -21,18 +25,21 @@ SET status             = 'RUNNING',
     lease_owner        = sqlc.arg(worker_id)::text,
     lease_epoch        = s.lease_epoch + 1,
     lease_expires_at   = now() + (sqlc.arg(lease_ms)::bigint * interval '1 millisecond'),
-    attempt_count      = s.attempt_count + 1,
+    attempt_count      = s.attempt_count + CASE WHEN s.status = 'AWAITING_CALLBACK' THEN 0 ELSE 1 END,
+    poll_count         = s.poll_count + CASE WHEN s.status = 'AWAITING_CALLBACK' THEN 1 ELSE 0 END,
     first_attempted_at = COALESCE(s.first_attempted_at, now())
 FROM next, workflows w
 WHERE s.id = next.id AND w.id = s.workflow_id
-RETURNING s.id, s.workflow_id, s.name, s.idempotency_key, s.lease_epoch, s.attempt_count, s.prior_status,
-          s.max_attempts, s.refund_charge_ref,
+RETURNING s.id, s.workflow_id, s.name, s.idempotency_key, s.lease_epoch, s.attempt_count, s.poll_count, s.prior_status,
+          s.max_attempts, s.refund_charge_ref, s.provider_ref,
           (EXTRACT(EPOCH FROM (now() - s.first_attempted_at)) * 1000)::bigint AS key_age_ms,
-          w.input;
+          w.input,
+          EXISTS (SELECT 1 FROM step_attempts a
+                  WHERE a.step_id = s.id AND a.kind = 'send' AND a.outcome IN ('IN_DOUBT', 'ABANDONED', 'DEAD'))::bool AS send_doubt;
 
 -- name: InsertStepAttempt :exec
-INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id)
-VALUES (sqlc.arg(step_id), sqlc.arg(attempt_no), sqlc.arg(lease_epoch), sqlc.arg(worker_id));
+INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id, kind)
+VALUES (sqlc.arg(step_id), sqlc.arg(attempt_no), sqlc.arg(lease_epoch), sqlc.arg(worker_id), sqlc.arg(kind));
 
 -- name: MarkWorkflowRunning :exec
 UPDATE workflows
@@ -48,9 +55,13 @@ SET status           = sqlc.arg(status)::text,
     provider_ref     = COALESCE(sqlc.narg(provider_ref)::text, provider_ref),
     last_error       = sqlc.narg(last_error)::text,
     dead_reason      = sqlc.narg(dead_reason)::text,
-    run_after        = CASE WHEN sqlc.arg(status)::text IN ('IN_DOUBT', 'PENDING')
+    run_after        = CASE WHEN sqlc.arg(status)::text IN ('IN_DOUBT', 'PENDING', 'AWAITING_CALLBACK')
                             THEN now() + (sqlc.arg(retry_ms)::bigint * interval '1 millisecond')
-                            ELSE run_after END
+                            ELSE run_after END,
+    -- A waiting step is polled at its callback deadline (run_after, same instant).
+    callback_deadline = CASE WHEN sqlc.arg(status)::text = 'AWAITING_CALLBACK'
+                             THEN now() + (sqlc.arg(retry_ms)::bigint * interval '1 millisecond')
+                             ELSE NULL END
 WHERE id = sqlc.arg(id) AND lease_epoch = sqlc.arg(lease_epoch) AND status = 'RUNNING';
 
 -- name: FinishStepAttempt :exec
@@ -66,20 +77,23 @@ WHERE step_id = sqlc.arg(step_id) AND attempt_no = sqlc.arg(attempt_no) AND outc
 -- know whether it called the provider, so the step becomes IN_DOUBT. Bumping
 -- lease_epoch fences the old holder. Concurrent sweepers serialise on the row
 -- lock and the loser no longer matches status = 'RUNNING'.
+-- Exception: a step claimed for a poll (prior_status AWAITING_CALLBACK) sent
+-- nothing, so it goes back to waiting, due now (design D17).
 WITH reclaimed AS (
   UPDATE steps
-  SET status           = 'IN_DOUBT',
-      lease_epoch      = lease_epoch + 1,
-      lease_owner      = NULL,
-      lease_expires_at = NULL,
-      run_after        = now()
+  SET status            = CASE WHEN prior_status = 'AWAITING_CALLBACK' THEN 'AWAITING_CALLBACK' ELSE 'IN_DOUBT' END,
+      callback_deadline = CASE WHEN prior_status = 'AWAITING_CALLBACK' THEN now() ELSE NULL END,
+      lease_epoch       = lease_epoch + 1,
+      lease_owner       = NULL,
+      lease_expires_at  = NULL,
+      run_after         = now()
   WHERE status = 'RUNNING' AND lease_expires_at < now()
-  RETURNING id, attempt_count
+  RETURNING id, attempt_count + poll_count AS attempt_no
 ), abandoned AS (
   UPDATE step_attempts a
   SET outcome = 'ABANDONED', finished_at = now()
   FROM reclaimed r
-  WHERE a.step_id = r.id AND a.attempt_no = r.attempt_count AND a.outcome IS NULL
+  WHERE a.step_id = r.id AND a.attempt_no = r.attempt_no AND a.outcome IS NULL
   RETURNING a.step_id
 )
 SELECT count(*)::bigint AS reclaimed FROM reclaimed;

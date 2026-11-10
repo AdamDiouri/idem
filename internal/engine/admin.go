@@ -178,7 +178,7 @@ func (a *Admin) ConfirmStep(ctx context.Context, stepID uuid.UUID, version int64
 				return "", nil, fmt.Errorf("%w: step %s was definitively refused and never in doubt", ErrNotActionable, st.Name)
 			}
 		}
-		used, err := q.ProviderRefInUse(ctx, &providerRef)
+		used, err := q.ProviderRefInUse(ctx, db.ProviderRefInUseParams{ProviderRef: &providerRef, StepID: st.ID})
 		if err != nil {
 			return "", nil, err
 		}

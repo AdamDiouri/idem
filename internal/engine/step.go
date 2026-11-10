@@ -34,14 +34,20 @@ var ErrFenced = errors.New("lease lost: completion fenced")
 
 // ClaimedStep is a step owned by this worker until its lease expires.
 type ClaimedStep struct {
-	ID              uuid.UUID
-	WorkflowID      uuid.UUID
-	Name            string
-	IdempotencyKey  string // stored at step creation; never recomputed (D6)
-	LeaseEpoch      int64  // fencing token
-	Attempt         int32
-	PriorStatus     string // PENDING or IN_DOUBT
-	MaxAttempts     int32
+	ID             uuid.UUID
+	WorkflowID     uuid.UUID
+	Name           string
+	IdempotencyKey string // stored at step creation; never recomputed (D6)
+	LeaseEpoch     int64  // fencing token
+	Attempt        int32  // send attempts so far, this one included (the retry budget)
+	AttemptNo      int32  // this attempt's number in step_attempts: sends + polls
+	PollCount      int32  // polls so far, this one included
+	PriorStatus    string // PENDING, IN_DOUBT, or AWAITING_CALLBACK for a poll
+	MaxAttempts    int32
+	ProviderRef    string // set once the provider accepted or performed the request
+	// SendDoubt: an earlier SEND attempt may have moved money (ambiguous,
+	// abandoned or exhausted). The pivot rule reads it; polls never set it.
+	SendDoubt       bool
 	KeyAge          time.Duration // since the first attempt, by the DB clock
 	RefundChargeRef string        // refunds only: the charge being reversed
 	Input           workflow.PaymentInput
@@ -60,6 +66,9 @@ const (
 	ResultRetryNoEffect ResultKind = "RETRY_NO_EFFECT"
 	// ResultDead: give up; the workflow needs a human (dead-letter state).
 	ResultDead ResultKind = "DEAD"
+	// ResultAwaitingCallback: the provider accepted the request and will settle
+	// it later; poll at RetryDelay (the callback deadline). Async payouts.
+	ResultAwaitingCallback ResultKind = "AWAITING_CALLBACK"
 )
 
 // Dead reasons, stored in steps.dead_reason.
@@ -70,6 +79,9 @@ const (
 	// DeadPermanentAfterInDoubt: a pivot step was refused after an earlier
 	// attempt was ambiguous; that earlier attempt may have moved the money.
 	DeadPermanentAfterInDoubt = "permanent_after_in_doubt"
+	// DeadCallbackUnresolved: an accepted request was still unsettled (or
+	// unpollable) after every allowed poll. It may have moved money.
+	DeadCallbackUnresolved = "callback_unresolved"
 )
 
 // MoneyMayHaveMoved reports whether a dead reason leaves the external effect unknown.

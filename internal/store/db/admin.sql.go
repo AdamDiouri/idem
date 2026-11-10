@@ -197,11 +197,20 @@ func (q *Queries) ParkedStepOfWorkflow(ctx context.Context, workflowID uuid.UUID
 }
 
 const providerRefInUse = `-- name: ProviderRefInUse :one
-SELECT EXISTS (SELECT 1 FROM steps WHERE provider_ref = $1)::bool AS used
+SELECT EXISTS (
+  SELECT 1 FROM steps WHERE provider_ref = $1 AND id <> $2
+)::bool AS used
 `
 
-func (q *Queries) ProviderRefInUse(ctx context.Context, providerRef *string) (bool, error) {
-	row := q.db.QueryRow(ctx, providerRefInUse, providerRef)
+type ProviderRefInUseParams struct {
+	ProviderRef *string
+	StepID      uuid.UUID
+}
+
+// Whether another step already records this provider reference. The step's own
+// reference (e.g. the payout ID it was waiting on) is not a reuse.
+func (q *Queries) ProviderRefInUse(ctx context.Context, arg ProviderRefInUseParams) (bool, error) {
+	row := q.db.QueryRow(ctx, providerRefInUse, arg.ProviderRef, arg.StepID)
 	var used bool
 	err := row.Scan(&used)
 	return used, err
@@ -234,11 +243,13 @@ func (q *Queries) ResetStepForRetry(ctx context.Context, arg ResetStepForRetryPa
 
 const stepHadInDoubtAttempt = `-- name: StepHadInDoubtAttempt :one
 SELECT EXISTS (
-  SELECT 1 FROM step_attempts WHERE step_id = $1 AND outcome IN ('IN_DOUBT', 'ABANDONED')
+  SELECT 1 FROM step_attempts
+  WHERE step_id = $1 AND kind = 'send' AND outcome IN ('IN_DOUBT', 'ABANDONED')
 )::bool AS had
 `
 
-// Whether any attempt of the step may have moved money (ambiguous or abandoned).
+// Whether any SEND attempt of the step may have moved money (ambiguous or
+// abandoned). Polls send nothing, so they never count (design D17).
 func (q *Queries) StepHadInDoubtAttempt(ctx context.Context, stepID uuid.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, stepHadInDoubtAttempt, stepID)
 	var had bool

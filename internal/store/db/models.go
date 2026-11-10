@@ -71,6 +71,7 @@ type Step struct {
 	CreatedAt        pgtype.Timestamptz
 	DeadReason       *string
 	RefundChargeRef  *string
+	PollCount        int32
 }
 
 type StepAttempt struct {
@@ -83,6 +84,7 @@ type StepAttempt struct {
 	Outcome    *string
 	HttpStatus *int32
 	Error      *string
+	Kind       string
 }
 
 type Workflow struct {
