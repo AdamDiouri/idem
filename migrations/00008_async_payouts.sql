@@ -25,6 +25,12 @@ DROP INDEX steps_claimable;
 CREATE INDEX steps_claimable ON steps (run_after) WHERE status IN ('PENDING', 'IN_DOUBT', 'AWAITING_CALLBACK');
 
 -- +goose Down
+-- Map what only 00008 can express to its conservative pre-00008 meaning, so a
+-- rollback works on a database that already ran async payouts: a waiting or
+-- unresolved payout may have moved money, i.e. it is in doubt.
+UPDATE step_attempts SET outcome = 'IN_DOUBT' WHERE outcome = 'AWAITING_CALLBACK';
+UPDATE steps SET status = 'IN_DOUBT', callback_deadline = NULL, run_after = now() WHERE status = 'AWAITING_CALLBACK';
+UPDATE steps SET dead_reason = 'attempts_exhausted_in_doubt' WHERE dead_reason = 'callback_unresolved';
 DROP INDEX steps_claimable;
 CREATE INDEX steps_claimable ON steps (run_after) WHERE status IN ('PENDING', 'IN_DOUBT');
 ALTER TABLE steps DROP CONSTRAINT steps_awaiting_has_ref;
