@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -49,10 +50,29 @@ func Load() (Config, error) {
 	for i, s := range cfg.ProviderWebhookSecrets {
 		cfg.ProviderWebhookSecrets[i] = strings.TrimSpace(s) // "a, b" must not keep " b"
 	}
+	// The map loses a repeated client ID silently (the last token wins).
+	if dups := duplicateClientIDs(os.Getenv("IDEM_API_TOKENS")); len(dups) > 0 {
+		return Config{}, fmt.Errorf("load config: IDEM_API_TOKENS: client %q appears more than once", dups[0])
+	}
 	if err := cfg.validate(); err != nil {
 		return Config{}, fmt.Errorf("load config: %w", err)
 	}
 	return cfg, nil
+}
+
+// duplicateClientIDs returns the client IDs that appear more than once in a
+// raw "client=token,..." list, in order of their second appearance.
+func duplicateClientIDs(raw string) []string {
+	seen := map[string]bool{}
+	var dups []string
+	for pair := range strings.SplitSeq(raw, ",") {
+		client, _, _ := strings.Cut(pair, "=")
+		if seen[client] {
+			dups = append(dups, client)
+		}
+		seen[client] = true
+	}
+	return dups
 }
 
 func (c Config) validate() error {
@@ -70,8 +90,10 @@ func (c Config) validate() error {
 		seen[token] = true
 	}
 
-	if c.IdempotencyLockTimeout <= 0 {
-		return fmt.Errorf("IDEM_IDEMPOTENCY_LOCK_TIMEOUT must be positive")
+	// Postgres takes lock_timeout in whole milliseconds, and 0 means no limit:
+	// anything below 1ms would silently wait forever.
+	if c.IdempotencyLockTimeout < time.Millisecond {
+		return fmt.Errorf("IDEM_IDEMPOTENCY_LOCK_TIMEOUT must be at least 1ms")
 	}
 	// lock wait < whole-request deadline < server write deadline, so a client
 	// always gets a status (409 or 503) instead of a dropped connection.

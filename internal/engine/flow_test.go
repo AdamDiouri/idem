@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AdamDiouri/idem/internal/engine"
-	"github.com/AdamDiouri/idem/internal/testutil"
 	"github.com/AdamDiouri/idem/internal/failpoint"
 	"github.com/AdamDiouri/idem/internal/fakeprovider"
+	"github.com/AdamDiouri/idem/internal/testutil"
 	"github.com/AdamDiouri/idem/internal/workflow"
 )
 

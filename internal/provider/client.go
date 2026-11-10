@@ -70,7 +70,7 @@ type Outcome struct {
 	ProviderRef string
 	HTTPStatus  int
 	InFlight    bool          // 409: the same key is being processed right now
-	RetryAfter  time.Duration // from a Retry-After header (seconds form), capped at 1h
+	RetryAfter  time.Duration // from a Retry-After header (seconds or HTTP date), capped at 1h
 	Err         error         // set for every non-success outcome
 }
 
@@ -244,7 +244,9 @@ func (c *Client) lookup(ctx context.Context, path, idempotencyKey string, want e
 	default:
 		out := classify(status, header, respBody, want)
 		if out.Class != Ambiguous {
-			out = Outcome{Class: Ambiguous, HTTPStatus: status, Err: fmt.Errorf("lookup returned %d", status)}
+			// Keep Retry-After: a rate-limited lookup must still slow the retry.
+			out = Outcome{Class: Ambiguous, HTTPStatus: status, RetryAfter: out.RetryAfter,
+				Err: fmt.Errorf("lookup returned %d", status)}
 		}
 		return out, false
 	}
@@ -348,17 +350,21 @@ func classify(status int, header http.Header, body []byte, want expect) Outcome 
 	return out
 }
 
-// retryAfter parses the delta-seconds form of Retry-After. Anything else
-// (absent, negative, HTTP-date) yields 0; large values are capped.
+// retryAfter parses Retry-After in either form (RFC 9110): delta-seconds or
+// an HTTP date. Absent, invalid, negative or past values yield 0; large values
+// are capped at maxRetryAfter.
 func retryAfter(h http.Header) time.Duration {
-	secs, err := strconv.ParseInt(h.Get("Retry-After"), 10, 64)
-	if err != nil || secs <= 0 {
-		return 0
+	v := h.Get("Retry-After")
+	var d time.Duration
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if secs > int64(maxRetryAfter/time.Second) {
+			return maxRetryAfter
+		}
+		d = time.Duration(secs) * time.Second
+	} else if t, err := http.ParseTime(v); err == nil {
+		d = time.Until(t)
 	}
-	if secs > int64(maxRetryAfter/time.Second) {
-		return maxRetryAfter
-	}
-	return time.Duration(secs) * time.Second
+	return min(max(d, 0), maxRetryAfter)
 }
 
 func failureCode(body []byte) string {

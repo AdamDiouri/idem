@@ -63,6 +63,8 @@ func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay, callb
 			// provider can't burn the attempt budget in a second.
 			r.RetryDelay = Backoff{Base: inFlightDelay, Cap: b.Cap, Rand: b.Rand}.EqualJitter(s.Attempt)
 		}
+		// A rate-limited lookup is ambiguous but still says when to come back.
+		r.RetryDelay = max(r.RetryDelay, min(out.RetryAfter, b.Cap))
 	}
 	return r
 }

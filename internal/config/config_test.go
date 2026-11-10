@@ -72,6 +72,8 @@ func TestLoad_Invalid(t *testing.T) {
 		{"fixed fee above max amount", "IDEM_FEE_FIXED_CENTS", "100000001", "IDEM_FEE_FIXED_CENTS"},
 		{"fixed fee near int64 max", "IDEM_FEE_FIXED_CENTS", "9223372036854775807", "IDEM_FEE_FIXED_CENTS"},
 		{"unknown log level", "IDEM_LOG_LEVEL", "loud", "IDEM_LOG_LEVEL"},
+		{"lock timeout below 1ms (Postgres reads 0 as no limit)", "IDEM_IDEMPOTENCY_LOCK_TIMEOUT", "500us", "IDEM_IDEMPOTENCY_LOCK_TIMEOUT"},
+		{"duplicate client id", "IDEM_API_TOKENS", "shop=" + tokA + ",shop=" + tokB, "IDEM_API_TOKENS"},
 		{"shutdown grace not above write timeout", "IDEM_SHUTDOWN_GRACE", "15s", "IDEM_SHUTDOWN_GRACE"},
 	}
 	for _, c := range cases {
