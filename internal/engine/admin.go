@@ -45,7 +45,8 @@ type ParkedWorkflow struct {
 	StepStatus  string        `json:"step_status"`
 	DeadReason  string        `json:"dead_reason"`
 	LastError   string        `json:"last_error"`
-	Attempts    int32         `json:"attempts"`
+	Attempts    int32         `json:"attempts"` // sends
+	Polls       int32         `json:"polls"`    // status polls of an accepted request
 	AmountCents int64         `json:"amount_cents"`
 	CustomerID  string        `json:"customer_id"`
 	MerchantID  string        `json:"merchant_id"`
@@ -84,7 +85,7 @@ func (a *Admin) ListParked(ctx context.Context, reason string) ([]ParkedWorkflow
 	for _, r := range rows {
 		p := ParkedWorkflow{
 			WorkflowID: r.WorkflowID, Version: r.Version, StepID: r.StepID, Step: r.Name, StepStatus: r.Status,
-			DeadReason: deref(r.DeadReason), LastError: deref(r.LastError), Attempts: r.AttemptCount,
+			DeadReason: deref(r.DeadReason), LastError: deref(r.LastError), Attempts: r.AttemptCount, Polls: r.PollCount,
 			ParkedFor: time.Duration(r.ParkedMs) * time.Millisecond,
 		}
 		var in workflow.PaymentInput

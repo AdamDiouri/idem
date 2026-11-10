@@ -164,6 +164,10 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 		log.Error("step is DEAD; workflow needs attention",
 			"dead_reason", r.DeadReason, "money_may_have_moved", MoneyMayHaveMoved(r.DeadReason),
 			"http_status", r.HTTPStatus, "error", r.Error)
+	case ResultAwaitingCallback:
+		log.Info("waiting for the provider's result", "provider_ref", r.ProviderRef,
+			"next_poll_in", r.RetryDelay.String(), "poll_count", s.PollCount, "polls_since_send", s.PollsSinceSend,
+			"waited", s.WaitedFor.Round(time.Second).String(), "error", r.Error)
 	case ResultInDoubt, ResultRetryNoEffect:
 		log.Warn("step will be retried", "outcome", outcome, "retry_in", r.RetryDelay.String(),
 			"http_status", r.HTTPStatus, "error", r.Error)

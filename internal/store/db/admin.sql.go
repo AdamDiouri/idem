@@ -62,7 +62,7 @@ func (q *Queries) InsertAdminAction(ctx context.Context, arg InsertAdminActionPa
 
 const listParkedSteps = `-- name: ListParkedSteps :many
 SELECT DISTINCT ON (w.id)
-  w.id AS workflow_id, w.version, s.id AS step_id, s.name, s.status, s.dead_reason, s.last_error, s.attempt_count, w.input,
+  w.id AS workflow_id, w.version, s.id AS step_id, s.name, s.status, s.dead_reason, s.last_error, s.attempt_count, s.poll_count, w.input,
   (EXTRACT(EPOCH FROM (now() - w.updated_at)) * 1000)::bigint AS parked_ms
 FROM workflows w
 JOIN steps s ON s.workflow_id = w.id AND s.status IN ('DEAD', 'FAILED_PERMANENT')
@@ -79,6 +79,7 @@ type ListParkedStepsRow struct {
 	DeadReason   *string
 	LastError    *string
 	AttemptCount int32
+	PollCount    int32
 	Input        []byte
 	ParkedMs     int64
 }
@@ -104,6 +105,7 @@ func (q *Queries) ListParkedSteps(ctx context.Context) ([]ListParkedStepsRow, er
 			&i.DeadReason,
 			&i.LastError,
 			&i.AttemptCount,
+			&i.PollCount,
 			&i.Input,
 			&i.ParkedMs,
 		); err != nil {

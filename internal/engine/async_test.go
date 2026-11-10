@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -297,4 +298,27 @@ func TestAdmin_ConfirmRefusesAnotherRefForAcceptedPayout(t *testing.T) {
 	require.ErrorContains(t, err, own, "the message names the reference to use")
 	require.Equal(t, "DEAD", h.stepStatus(t, wf, "payout"))
 	require.Zero(t, h.auditRows(t, wf))
+}
+
+// Fix before merge: an operator looking at callback_unresolved needs to see
+// how many polls ran, not only sends.
+func TestAdmin_ListShowsPolls(t *testing.T) {
+	h := asyncHarness(t, time.Hour)
+	wf := parkUnresolvedPayout(t, h) // 1 send, 2 polls
+	p := h.parkedStep(t, wf)
+	require.Equal(t, int32(1), p.Attempts)
+	require.Equal(t, int32(2), p.Polls)
+}
+
+// Fix before merge: poll logs say which poll it was and when the next one is.
+func TestWorker_LogsPollProgress(t *testing.T) {
+	h := asyncHarness(t, time.Hour)
+	rec := &recordingHandler{}
+	submitTo(t, h, "cus_1", "mer_1")
+	w := h.workerWith("w1", func(o *engine.WorkerOptions) { o.Logger = slog.New(rec) }, h.allSteps()...)
+	h.runOnce(t, w) // charge
+	h.runOnce(t, w) // payout accepted
+	h.runOnce(t, w) // first poll: still pending
+	require.True(t, rec.find("waiting for the provider's result", "poll_count", "1"))
+	require.True(t, rec.find("waiting for the provider's result", "polls_since_send", "1"))
 }
