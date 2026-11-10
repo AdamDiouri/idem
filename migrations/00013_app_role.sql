@@ -19,6 +19,9 @@ GRANT USAGE ON SCHEMA public TO idem_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO idem_app;
 REVOKE UPDATE, DELETE ON ledger_transactions, ledger_entries FROM idem_app;
 REVOKE INSERT, UPDATE, DELETE ON accounts FROM idem_app;
+-- The audit trail is append-only like the ledger; migrations are the owner's.
+REVOKE UPDATE, DELETE ON admin_actions FROM idem_app;
+REVOKE ALL ON goose_db_version FROM idem_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO idem_app;
 -- Tables later migrations create are usable too (a new ledger table must
 -- revoke UPDATE and DELETE itself). TRUNCATE is never granted.
@@ -47,6 +50,11 @@ CREATE CONSTRAINT TRIGGER ledger_transactions_has_entries
 -- +goose Down
 DROP TRIGGER ledger_transactions_has_entries ON ledger_transactions;
 DROP FUNCTION ledger_check_has_entries();
--- Revokes this database's grants and default privileges; the role itself is
--- cluster-wide and its login users may belong to it, so it is kept.
-DROP OWNED BY idem_app;
+-- Plain REVOKEs, which the table owner may run (dropping what the role owns
+-- needs its own privileges, which a managed-Postgres owner may lack). The role
+-- itself is cluster-wide and its login users belong to it, so it is kept.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE USAGE, SELECT ON SEQUENCES FROM idem_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM idem_app;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM idem_app;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM idem_app;
+REVOKE USAGE ON SCHEMA public FROM idem_app;

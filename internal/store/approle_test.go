@@ -3,6 +3,8 @@ package store_test
 import (
 	"context"
 	"net/url"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -38,6 +40,11 @@ func TestAppRole_LedgerIsAppendOnly(t *testing.T) {
 		`DELETE FROM ledger_transactions`,
 		`TRUNCATE ledger_entries`,
 		`UPDATE accounts SET code = code`,
+		// The audit trail is append-only too, and migrations belong to the owner.
+		`UPDATE admin_actions SET reason = 'rewritten'`,
+		`DELETE FROM admin_actions`,
+		`SELECT version_id FROM goose_db_version`,
+		`DELETE FROM goose_db_version`,
 	} {
 		_, err := conn.Exec(ctx, stmt)
 		require.Error(t, err, stmt)
@@ -98,4 +105,28 @@ func TestEnsureAppUser_RefusesPrivilegedRoles(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = owner.Exec(ctx, `DROP TABLE IF EXISTS approle_owned; DROP ROLE IF EXISTS approle_owner`) })
 	require.ErrorContains(t, store.EnsureAppUser(ctx, owner, "approle_owner", "pw-pw-pw"), "owns")
+}
+
+// Final review, minor 9: rolling back 00013 takes every right away from
+// idem_app with plain REVOKEs the table owner may run (DROP OWNED BY needs the
+// role's own privileges, which a managed-Postgres owner may lack).
+func TestMigrate_DownFrom00013RevokesEverything(t *testing.T) {
+	ctx := context.Background()
+	testutil.NewPool(t, dsn)
+	owner := testutil.NewOwnerPool(t, dsn)
+	t.Cleanup(func() { require.NoError(t, store.Migrate(ctx, owner)) })
+	require.NoError(t, store.MigrateDownTo(ctx, owner, 12))
+
+	var n int
+	require.NoError(t, owner.QueryRow(ctx, `SELECT count(*) FROM information_schema.role_table_grants
+		WHERE grantee = 'idem_app'`).Scan(&n))
+	require.Zero(t, n, "no table grants left")
+	require.NoError(t, owner.QueryRow(ctx, `SELECT count(*) FROM pg_default_acl d
+		WHERE array_to_string(d.defaclacl, ',') LIKE '%idem_app=%'`).Scan(&n))
+	require.Zero(t, n, "no default privileges left")
+
+	b, err := os.ReadFile("../../migrations/00013_app_role.sql")
+	require.NoError(t, err)
+	_, down, _ := strings.Cut(string(b), "-- +goose Down")
+	require.NotContains(t, down, "DROP OWNED", "the owner may lack the rights DROP OWNED needs")
 }
