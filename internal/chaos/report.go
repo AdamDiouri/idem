@@ -55,6 +55,7 @@ type Report struct {
 	FaultHits      map[string]int  `json:"fault_hits"`     // provider faults that actually fired
 	FailpointExits int             `json:"failpoint_exits"`
 	FailpointFires map[string]int  `json:"failpoint_fires"` // name → times it fired (from process logs)
+	WebhooksStored map[string]int  `json:"webhooks_stored"` // API replica → provider webhooks it stored
 	// Recovery evidence (informational): completions discarded because the
 	// worker had lost its lease, and steps that succeeded after being IN_DOUBT.
 	FencedCommits   int                    `json:"fenced_commits"`
@@ -171,6 +172,17 @@ func (r *Report) Evaluate() {
 	if r.Config.Failpoints != "" && r.FailpointExits == 0 {
 		add("vacuous: failpoints were armed but none fired (binary built with -tags nofailpoint?)")
 	}
+	if r.Config.APIs > 1 {
+		for i := range r.Config.APIs {
+			name := fmt.Sprintf("api-%d", i)
+			if r.Clients.PerReplica[name] == 0 {
+				add("vacuous: API replica %s answered no client request", name)
+			}
+			if r.WebhooksStored[name] == 0 {
+				add("vacuous: API replica %s stored no webhook", name)
+			}
+		}
+	}
 	if r.Config.Duration >= time.Minute {
 		for _, name := range armedFailpoints(r.Config.Failpoints + "," + r.Config.APIFailpoints) {
 			if r.FailpointFires[name] == 0 {
@@ -228,6 +240,16 @@ func (r *Report) Text() string {
 		fmt.Fprintf(&b, "  %-22s %d (effective %d)\n", k, kinds[k], effective[k])
 	}
 	fmt.Fprintf(&b, "provider fault hits: %v\n", r.FaultHits)
+	if r.Config.APIs > 1 {
+		var reqs, stored []string
+		for i := range r.Config.APIs {
+			name := fmt.Sprintf("api-%d", i)
+			reqs = append(reqs, fmt.Sprintf("%s=%d", name, r.Clients.PerReplica[name]))
+			stored = append(stored, fmt.Sprintf("%s=%d", name, r.WebhooksStored[name]))
+		}
+		fmt.Fprintf(&b, "api replicas: %d (requests %s; webhooks stored %s)\n", r.Config.APIs,
+			strings.Join(reqs, " "), strings.Join(stored, " "))
+	}
 	fmt.Fprintf(&b, "failpoint exits: %d\n", r.FailpointExits)
 	if len(r.FailpointFires) > 0 {
 		var fires []string

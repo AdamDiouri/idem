@@ -178,3 +178,21 @@ func TestReport_WebhookFaultArmedButNeverFiredIsVacuous(t *testing.T) {
 	r.Evaluate()
 	require.NotContains(t, strings.Join(r.Reasons, "\n"), "webhook fault")
 }
+
+// Slice 2.3: with two replicas, each must have served clients and stored
+// webhooks, or the run proves nothing about replicas.
+func TestReport_ReplicaWithoutTrafficIsVacuous(t *testing.T) {
+	r := healthy()
+	r.Config.APIs = 2
+	r.Clients.PerReplica = map[string]int{"api-0": 5}
+	r.WebhooksStored = map[string]int{"api-0": 3}
+	r.Evaluate()
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "API replica api-1 answered no client request")
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "API replica api-1 stored no webhook")
+
+	r.Clients.PerReplica["api-1"], r.WebhooksStored["api-1"] = 4, 2
+	r.Reasons = nil
+	r.Evaluate()
+	require.NotContains(t, strings.Join(r.Reasons, "\n"), "replica")
+	require.Contains(t, r.Text(), "api replicas: 2 (requests api-0=5 api-1=4; webhooks stored api-0=3 api-1=2)")
+}

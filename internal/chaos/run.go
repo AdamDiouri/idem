@@ -29,6 +29,7 @@ type Config struct {
 	SettleTimeout time.Duration `json:"settle_timeout"` // how long the system may take to settle afterwards
 	Workflows     int           `json:"workflows"`
 	Workers       int           `json:"workers"`
+	APIs          int           `json:"apis"` // API replicas (slice 2.3)
 	Sweepers      int           `json:"sweepers"`
 	BinDir        string        `json:"bin_dir"`
 	RunDir        string        `json:"run_dir"`
@@ -43,9 +44,11 @@ func DefaultConfig() Config {
 		SettleTimeout: 120 * time.Second,
 		Workflows:     1000,
 		Workers:       4,
+		APIs:          2,
 		Sweepers:      2,
 		BinDir:        "bin",
-		Failpoints:    "after_claim=exit@0.01,after_provider_call=exit@0.02,before_commit=exit@0.02",
+		Failpoints:    "after_claim=exit@0.01,after_provider_call=exit@0.02,before_commit=exit@0.02,inbox_before_commit=exit@0.02",
+		APIFailpoints: "webhook_after_insert=exit@0.02",
 	}
 }
 
@@ -61,18 +64,24 @@ const webhookSecret = "whsec_chaos_0123456789" //nolint:gosec // throwaway secre
 // settle in 300ms, and a timeout fault hangs 3s (with a 1s client timeout)
 // instead of 30s, which no real provider holds a key for. Settled payouts are
 // announced by signed webhook to the API (slice 2.2); polling stays the net.
-func providerEnv(port, apiPort int) []string {
+// Webhooks rotate across every API replica (slice 2.3).
+func providerEnv(port int, apiPorts []int) []string {
+	urls := make([]string, len(apiPorts))
+	for i, p := range apiPorts {
+		urls[i] = fmt.Sprintf("http://127.0.0.1:%d/webhooks/provider", p)
+	}
 	return []string{
 		fmt.Sprintf("FAKEPROVIDER_ADDR=127.0.0.1:%d", port), "FAKEPROVIDER_PAYOUT_SETTLE=300ms", "FAKEPROVIDER_HANG=3s",
-		fmt.Sprintf("FAKEPROVIDER_WEBHOOK_URL=http://127.0.0.1:%d/webhooks/provider", apiPort),
+		"FAKEPROVIDER_WEBHOOK_URL=" + strings.Join(urls, ","),
 		"FAKEPROVIDER_WEBHOOK_SECRET=" + webhookSecret,
 	}
 }
 
-// apiEnv configures the chaos API, which receives the provider's webhooks.
-func apiEnv(dsn string, port int) []string {
+// apiEnv configures one chaos API replica, which also receives webhooks.
+func apiEnv(dsn string, port int, failpoints string) []string {
 	return []string{"IDEM_DATABASE_URL=" + dsn, "IDEM_API_TOKENS=chaos=" + apiToken,
-		fmt.Sprintf("IDEM_HTTP_ADDR=127.0.0.1:%d", port), "IDEM_PROVIDER_WEBHOOK_SECRETS=" + webhookSecret}
+		fmt.Sprintf("IDEM_HTTP_ADDR=127.0.0.1:%d", port), "IDEM_PROVIDER_WEBHOOK_SECRETS=" + webhookSecret,
+		"IDEM_FAILPOINTS=" + failpoints}
 }
 
 // workerEnv tunes the engine for chaos: short leases and retries so a short
@@ -158,27 +167,34 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	if err != nil {
 		return rep, err
 	}
-	apiPort, err := FreePort()
-	if err != nil {
-		return rep, err
+	nAPIs := max(cfg.APIs, 1)
+	apiPorts := make([]int, nAPIs)
+	apiURLs := make([]string, nAPIs)
+	for i := range apiPorts {
+		if apiPorts[i], err = FreePort(); err != nil {
+			return rep, err
+		}
+		apiURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", apiPorts[i])
 	}
 	providerURL := fmt.Sprintf("http://127.0.0.1:%d", providerPort)
 	if _, err := sup.Start(ProcSpec{Name: "fakeprovider", Path: provider, LogPath: logPath("fakeprovider"),
-		Env: providerEnv(providerPort, apiPort)}); err != nil {
+		Env: providerEnv(providerPort, apiPorts)}); err != nil {
 		return rep, err
 	}
 	if err := waitHTTP(ctx, providerURL+"/_effects"); err != nil {
 		return rep, fmt.Errorf("fake provider: %w", err)
 	}
 
-	apiURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
-	apiProc, err := sup.Start(ProcSpec{Name: "api", Path: idem, Args: []string{"api"}, LogPath: logPath("api"),
-		Env: apiEnv(pg.DSN(), apiPort)})
-	if err != nil {
-		return rep, err
-	}
-	if err := waitHTTP(ctx, apiURL+"/readyz"); err != nil {
-		return rep, fmt.Errorf("api: %w", err)
+	apis := make([]*Proc, nAPIs)
+	for i := range apis {
+		name := fmt.Sprintf("api-%d", i)
+		if apis[i], err = sup.Start(ProcSpec{Name: name, Path: idem, Args: []string{"api"}, LogPath: logPath(name),
+			Env: apiEnv(pg.DSN(), apiPorts[i], cfg.APIFailpoints)}); err != nil {
+			return rep, err
+		}
+		if err := waitHTTP(ctx, apiURLs[i]+"/readyz"); err != nil {
+			return rep, fmt.Errorf("%s: %w", name, err)
+		}
 	}
 
 	env := workerEnv(pg.DSN(), providerURL)
@@ -205,14 +221,14 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	var outstanding atomic.Int64
 	go func() {
 		clientsDone <- RunClients(clientCtx, ClientConfig{
-			BaseURL: apiURL, Token: apiToken, Workflows: cfg.Workflows, Seed: cfg.Seed,
+			BaseURLs: apiURLs, Token: apiToken, Workflows: cfg.Workflows, Seed: cfg.Seed,
 			// Open-loop arrivals over the whole campaign, so faults meet work in flight.
 			Spread:      cfg.Duration,
 			Outstanding: &outstanding,
 		})
 	}()
 
-	plan := NewPlan(PlanConfig{Seed: cfg.Seed, Duration: cfg.Duration, Workers: cfg.Workers, LeaseTTL: leaseTTL})
+	plan := NewPlan(PlanConfig{Seed: cfg.Seed, Duration: cfg.Duration, Workers: cfg.Workers, APIs: nAPIs, LeaseTTL: leaseTTL})
 	var pauses sync.WaitGroup
 	start := time.Now()
 	for _, ev := range plan {
@@ -222,7 +238,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		case <-time.After(time.Until(start.Add(ev.At))):
 		}
 		inFlight := unsettled(ctx, pool) + int(outstanding.Load())
-		err := apply(ctx, ev, workers, apiProc, pg, providerURL, &pauses)
+		err := apply(ctx, ev, workers, apis, pg, providerURL, &pauses)
 		ex := ExecutedEvent{Event: ev, WallTime: time.Now(), InFlight: inFlight}
 		switch {
 		case errors.Is(err, ErrNotRunning):
@@ -243,7 +259,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	}
 
 	// --- Settle --------------------------------------------------------------
-	logger.Info("settling: faults off, workers restarted without failpoints")
+	logger.Info("settling: faults off, workers and APIs restarted without failpoints")
 	settleStart := time.Now()
 	if err := fakeprovider.PutFaults(ctx, providerURL, fakeprovider.Faults{}); err != nil {
 		return rep, fmt.Errorf("clear faults: %w", err)
@@ -260,9 +276,29 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 			return rep, err
 		}
 	}
-	rep.Restarts[apiProc.Name()] = apiProc.Restarts()
+	for i, a := range apis {
+		// One replica at a time, so clients always have one to retry on.
+		if err := a.Stop(ctx); err != nil {
+			return rep, err
+		}
+		rep.Restarts[a.Name()] = a.Restarts()
+		rep.FailpointExits += a.FailpointExits()
+		name := fmt.Sprintf("api-%d", i)
+		if _, err := sup.Start(ProcSpec{Name: name + "-settle", Path: idem, Args: []string{"api"}, LogPath: logPath(name),
+			Env: apiEnv(pg.DSN(), apiPorts[i], "")}); err != nil {
+			return rep, err
+		}
+		if err := waitHTTP(ctx, apiURLs[i]+"/readyz"); err != nil {
+			return rep, fmt.Errorf("%s (settle): %w", name, err)
+		}
+	}
 
 	rep.Clients = <-clientsDone
+	perReplica := map[string]int{}
+	for i, u := range apiURLs {
+		perReplica[fmt.Sprintf("api-%d", i)] = rep.Clients.PerReplica[u]
+	}
+	rep.Clients.PerReplica = perReplica
 
 	deadline := settleStart.Add(cfg.SettleTimeout)
 	for {
@@ -321,6 +357,11 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		return rep, err
 	}
 	rep.FencedCommits = countLogLines(cfg.RunDir, "worker-", "lease lost before completion")
+	rep.WebhooksStored = map[string]int{}
+	for i := range apiURLs {
+		name := fmt.Sprintf("api-%d", i)
+		rep.WebhooksStored[name] = countLogLines(cfg.RunDir, name, "provider webhook stored") // api-<i>.log
+	}
 	rep.FailpointFires = map[string]int{}
 	for _, name := range armedFailpoints(cfg.Failpoints + "," + cfg.APIFailpoints) {
 		if n := countLogLines(cfg.RunDir, "", "failpoint "+name+" fired"); n > 0 {
@@ -437,7 +478,7 @@ func ackMismatches(ctx context.Context, pool *pgxpool.Pool, accepted map[string]
 	return out, nil
 }
 
-func apply(ctx context.Context, ev Event, workers []*Proc, api *Proc, pg *Postgres, providerURL string, pauses *sync.WaitGroup) error {
+func apply(ctx context.Context, ev Event, workers []*Proc, apis []*Proc, pg *Postgres, providerURL string, pauses *sync.WaitGroup) error {
 	switch ev.Kind {
 	case KillWorker:
 		return workers[ev.Target].Kill()
@@ -454,7 +495,7 @@ func apply(ctx context.Context, ev Event, workers []*Proc, api *Proc, pg *Postgr
 		}()
 		return nil
 	case RestartAPI:
-		return api.Restart(ctx)
+		return apis[ev.Target%len(apis)].Restart(ctx)
 	case RestartPostgres:
 		return pg.Restart(ctx)
 	case SetProviderFaults:

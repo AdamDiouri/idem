@@ -107,7 +107,7 @@ func TestWorkerEnv_SetsCallbackTimings(t *testing.T) {
 // the client gives up after 1s is harsher than any real provider and parked
 // healthy payouts. The hang is compressed too.
 func TestProviderEnv_CompressesHang(t *testing.T) {
-	env := providerEnv(9999, 8888)
+	env := providerEnv(9999, []int{8888})
 	require.Contains(t, env, "FAKEPROVIDER_ADDR=127.0.0.1:9999")
 	require.Contains(t, env, "FAKEPROVIDER_PAYOUT_SETTLE=300ms")
 	require.Contains(t, env, "FAKEPROVIDER_HANG=3s")
@@ -116,10 +116,11 @@ func TestProviderEnv_CompressesHang(t *testing.T) {
 // Slice 2.2: the chaos provider sends signed webhooks to the chaos API, which
 // shares the secret.
 func TestProviderEnv_SendsWebhooksToAPI(t *testing.T) {
-	env := providerEnv(1, 2)
-	require.Contains(t, env, "FAKEPROVIDER_WEBHOOK_URL=http://127.0.0.1:2/webhooks/provider")
+	env := providerEnv(1, []int{2, 3})
+	require.Contains(t, env, "FAKEPROVIDER_WEBHOOK_URL=http://127.0.0.1:2/webhooks/provider,http://127.0.0.1:3/webhooks/provider")
 	require.Contains(t, env, "FAKEPROVIDER_WEBHOOK_SECRET="+webhookSecret)
-	require.Contains(t, apiEnv("postgres://x", 2), "IDEM_PROVIDER_WEBHOOK_SECRETS="+webhookSecret)
+	require.Contains(t, apiEnv("postgres://x", 2, "webhook_after_insert=exit@0.02"), "IDEM_PROVIDER_WEBHOOK_SECRETS="+webhookSecret)
+	require.Contains(t, apiEnv("postgres://x", 2, "webhook_after_insert=exit@0.02"), "IDEM_FAILPOINTS=webhook_after_insert=exit@0.02")
 	require.GreaterOrEqual(t, len(webhookSecret), 16)
 }
 
@@ -149,4 +150,19 @@ func TestPlan_WebhookRulesTargetWebhooksOnly(t *testing.T) {
 			require.NoError(t, e.Faults.Validate(), "seed %d", seed)
 		}
 	}
+}
+
+// Slice 2.3: an API restart hits one replica, and over many seeds both.
+func TestPlan_RestartAPITargetsOneReplica(t *testing.T) {
+	targets := map[int]bool{}
+	for seed := int64(1); seed <= 20; seed++ {
+		for _, e := range NewPlan(PlanConfig{Seed: seed, Duration: 90 * time.Second, Workers: 4, APIs: 2, LeaseTTL: 4 * time.Second}) {
+			if e.Kind == RestartAPI {
+				require.GreaterOrEqual(t, e.Target, 0)
+				require.Less(t, e.Target, 2)
+				targets[e.Target] = true
+			}
+		}
+	}
+	require.Len(t, targets, 2)
 }

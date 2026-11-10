@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"slices"
@@ -29,7 +30,10 @@ const (
 
 // ClientConfig configures RunClients.
 type ClientConfig struct {
-	BaseURL     string
+	// BaseURLs are the API replicas. Every request (first try, retry, double
+	// click) goes to the next one in turn, so one key's requests usually
+	// reach several replicas.
+	BaseURLs    []string
 	Token       string
 	Workflows   int
 	Concurrency int // used when Spread is 0
@@ -41,6 +45,8 @@ type ClientConfig struct {
 	// Outstanding, if set, holds the number of workflows a client is still
 	// working on (submitting or retrying) at any moment.
 	Outstanding *atomic.Int64
+
+	replicas *replicas // set by RunClients
 }
 
 // ClientResult is what the clients observed.
@@ -53,6 +59,25 @@ type ClientResult struct {
 	Unexpected []string          `json:"unexpected"` // responses no correct server should give
 	Retries    int64             `json:"retries"`    // attempts that hit an error, 5xx, 409 or 429
 	Behaviors  map[Behavior]int  `json:"behaviors"`
+	PerReplica map[string]int    `json:"per_replica"` // base URL → requests it answered (any status)
+}
+
+// replicas hands out base URLs in turn and counts the answers each gave.
+type replicas struct {
+	urls     []string
+	next     atomic.Uint64
+	mu       sync.Mutex
+	answered map[string]int
+}
+
+func (r *replicas) pick() string {
+	return r.urls[(r.next.Add(1)-1)%uint64(len(r.urls))]
+}
+
+func (r *replicas) answer(url string) {
+	r.mu.Lock()
+	r.answered[url]++
+	r.mu.Unlock()
 }
 
 type job struct {
@@ -115,6 +140,7 @@ func pickBehavior(rng *rand.Rand) Behavior {
 // RunClients submits cfg.Workflows workflows with a seeded mix of behaviors and
 // returns what was observed. It returns when every client is done or ctx ends.
 func RunClients(ctx context.Context, cfg ClientConfig) ClientResult {
+	cfg.replicas = &replicas{urls: cfg.BaseURLs, answered: map[string]int{}}
 	jobs := planJobs(cfg.Seed, cfg.Workflows)
 	res := ClientResult{Submitted: len(jobs), Accepted: map[string]string{}, Behaviors: map[Behavior]int{}}
 	var mu sync.Mutex
@@ -173,6 +199,9 @@ func RunClients(ctx context.Context, cfg ClientConfig) ClientResult {
 	}
 	wg.Wait()
 	res.Retries = retries.Load()
+	cfg.replicas.mu.Lock()
+	res.PerReplica = maps.Clone(cfg.replicas.answered)
+	cfg.replicas.mu.Unlock()
 	return res
 }
 
@@ -301,7 +330,8 @@ func submitUntilAnswered(ctx context.Context, cfg ClientConfig, retries *atomic.
 func post(ctx context.Context, cfg ClientConfig, key string, body []byte, timeout time.Duration) (int, []byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.BaseURL+"/workflows", bytes.NewReader(body))
+	url := cfg.replicas.pick()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url+"/workflows", bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -312,6 +342,7 @@ func post(ctx context.Context, cfg ClientConfig, key string, body []byte, timeou
 		return 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	cfg.replicas.answer(url)
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return resp.StatusCode, b, err
 }

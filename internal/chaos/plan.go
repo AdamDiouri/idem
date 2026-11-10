@@ -32,7 +32,7 @@ var AllKinds = []EventKind{KillWorker, PauseWorker, RestartAPI, RestartPostgres,
 type Event struct {
 	At       time.Duration       `json:"at"`
 	Kind     EventKind           `json:"kind"`
-	Target   int                 `json:"target"`             // worker index
+	Target   int                 `json:"target"`             // worker index, or API replica for restart_api
 	Duration time.Duration       `json:"duration,omitempty"` // pauses
 	Faults   fakeprovider.Faults `json:"faults,omitzero"`
 }
@@ -42,6 +42,7 @@ type PlanConfig struct {
 	Seed     int64
 	Duration time.Duration
 	Workers  int
+	APIs     int // API replicas; a RestartAPI event targets one of them
 	LeaseTTL time.Duration
 }
 
@@ -139,6 +140,8 @@ func newEvent(rng *rand.Rand, cfg PlanConfig, at time.Duration, kind EventKind) 
 	switch kind {
 	case KillWorker:
 		e.Target = rng.IntN(max(cfg.Workers, 1))
+	case RestartAPI:
+		e.Target = rng.IntN(max(cfg.APIs, 1)) // one replica at a time
 	case PauseWorker:
 		e.Target = rng.IntN(max(cfg.Workers, 1))
 		// 1.5–2.5 lease TTLs: the lease always expires while the worker is frozen.

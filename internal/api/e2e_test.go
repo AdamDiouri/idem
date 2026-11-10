@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
 	"github.com/AdamDiouri/idem/internal/api"
+	"github.com/AdamDiouri/idem/internal/store"
 	"github.com/AdamDiouri/idem/internal/testutil"
 	"github.com/AdamDiouri/idem/internal/workflow"
 )
@@ -136,4 +139,45 @@ func TestE2E_F3_ConcurrentPosts(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, fresh, "exactly one response must be the original")
+}
+
+// Review focus 2 (slice 2.3): the same Idempotency-Key, at the same moment, on
+// two replicas (separate processes' pools on one database) → one workflow,
+// one answer. The API keeps no state; Postgres enforces it (I6).
+func TestE2E_SameKeyOnTwoReplicasIsOneWorkflow(t *testing.T) {
+	poolA := testutil.NewPool(t, dsn)
+	poolB, err := store.Open(context.Background(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(poolB.Close)
+	replica := func(pool *pgxpool.Pool) *httptest.Server {
+		srv := httptest.NewServer(api.NewServer(options(), workflow.NewSubmitter(pool, 5*time.Second, defaultFees), pool))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	a, b := replica(poolA), replica(poolB)
+	body := `{"amount_cents":10000,"currency":"EUR","customer_id":"cus_1","merchant_id":"mer_1"}`
+
+	var wg sync.WaitGroup
+	results := make([]response, 10)
+	for i := range results {
+		url := a.URL
+		if i%2 == 1 {
+			url = b.URL
+		}
+		wg.Go(func() { results[i] = postHTTP(t, url, "same-key-two-replicas", body) })
+	}
+	wg.Wait()
+	for i, r := range results {
+		require.Contains(t, []int{http.StatusCreated, http.StatusConflict}, r.status, "request %d: %s", i, r.body)
+	}
+	ids := map[string]bool{}
+	for _, r := range results {
+		if r.status == http.StatusCreated {
+			ids[workflowID(t, r.body)] = true
+		}
+	}
+	require.Len(t, ids, 1, "every successful answer names the same workflow")
+	var n int
+	require.NoError(t, poolA.QueryRow(context.Background(), `SELECT count(*) FROM workflows`).Scan(&n))
+	require.Equal(t, 1, n)
 }
