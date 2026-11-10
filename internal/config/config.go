@@ -25,9 +25,12 @@ type Config struct {
 	IdempotencyLockTimeout time.Duration     `env:"IDEM_IDEMPOTENCY_LOCK_TIMEOUT" envDefault:"5s"`
 	RequestTimeout         time.Duration     `env:"IDEM_REQUEST_TIMEOUT" envDefault:"10s"`
 	HTTPWriteTimeout       time.Duration     `env:"IDEM_HTTP_WRITE_TIMEOUT" envDefault:"15s"`
-	FeeRateBps             int64             `env:"IDEM_FEE_RATE_BPS" envDefault:"150"`
-	FeeFixedCents          int64             `env:"IDEM_FEE_FIXED_CENTS" envDefault:"25"`
-	LogLevel               string            `env:"IDEM_LOG_LEVEL" envDefault:"info"`
+	// ShutdownGrace is how long the API drains in-flight requests after
+	// SIGTERM. It must exceed HTTPWriteTimeout, the longest a request may run.
+	ShutdownGrace time.Duration `env:"IDEM_SHUTDOWN_GRACE" envDefault:"20s"`
+	FeeRateBps    int64         `env:"IDEM_FEE_RATE_BPS" envDefault:"150"`
+	FeeFixedCents int64         `env:"IDEM_FEE_FIXED_CENTS" envDefault:"25"`
+	LogLevel      string        `env:"IDEM_LOG_LEVEL" envDefault:"info"`
 	// ProviderWebhookSecrets verify provider webhooks: the current secret
 	// first, then the previous one during a rotation. Empty: endpoint off.
 	ProviderWebhookSecrets []string `env:"IDEM_PROVIDER_WEBHOOK_SECRETS"`
@@ -79,6 +82,11 @@ func (c Config) validate() error {
 	if c.RequestTimeout >= c.HTTPWriteTimeout {
 		return fmt.Errorf("IDEM_REQUEST_TIMEOUT (%s) must be less than IDEM_HTTP_WRITE_TIMEOUT (%s)",
 			c.RequestTimeout, c.HTTPWriteTimeout)
+	}
+
+	if c.ShutdownGrace <= c.HTTPWriteTimeout {
+		return fmt.Errorf("IDEM_SHUTDOWN_GRACE (%s) must be greater than IDEM_HTTP_WRITE_TIMEOUT (%s)",
+			c.ShutdownGrace, c.HTTPWriteTimeout)
 	}
 
 	if c.FeeRateBps < 0 || c.FeeRateBps > workflow.MaxFeeRateBps {

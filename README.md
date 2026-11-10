@@ -233,6 +233,7 @@ go test -tags chaos ./internal/chaos/   # 30s chaos campaign as a test (after ma
 | `IDEM_IDEMPOTENCY_LOCK_TIMEOUT` | `5s` | Max wait on a concurrent duplicate request before `409`; must be below the request timeout |
 | `IDEM_REQUEST_TIMEOUT` | `10s` | Deadline for all work in one request before `503 request_timeout`; must be below the write timeout |
 | `IDEM_HTTP_WRITE_TIMEOUT` | `15s` | |
+| `IDEM_SHUTDOWN_GRACE` (API) | `20s` | How long the API drains in-flight requests after SIGTERM; must be greater than the write timeout |
 | `IDEM_FEE_RATE_BPS` | `150` | Fee rate in basis points (0 to 10000) |
 | `IDEM_FEE_FIXED_CENTS` | `25` | Fixed fee in cents |
 | `IDEM_PROVIDER_WEBHOOK_SECRETS` | (none: endpoint off) | Secrets that verify `POST /webhooks/provider`: the current one first, then the previous one while rotating; each at least 16 characters, spaces trimmed |
@@ -252,7 +253,7 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_RETRY_CAP` | `5m` | Maximum retry delay; also caps a provider's `Retry-After` |
 | `IDEM_PROVIDER_KEY_RETENTION` | `24h` | How long the provider remembers idempotency keys |
 | `IDEM_KEY_RETENTION_MARGIN` | `1h` | In-doubt steps older than retention − margin are resolved by lookup, never by a new key |
-| `IDEM_SHUTDOWN_GRACE` | `15s` | How long an in-flight step may finish after SIGTERM; at least provider timeout + 2s |
+| `IDEM_SHUTDOWN_GRACE` (worker) | `15s` | How long an in-flight step may finish after SIGTERM; at least provider timeout + 2s |
 | `IDEM_STUCK_AFTER` | `15m` | Sweeper logs non-terminal workflows unchanged for this long |
 | `IDEM_SWEEP_INTERVAL` | `5s` | How often the sweeper reclaims expired leases |
 | `IDEM_CALLBACK_DEADLINE` | `10m` | How long an accepted payout waits for its result before workers poll it |

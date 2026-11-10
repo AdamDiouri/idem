@@ -32,6 +32,7 @@ services:
   api:
     build: .
     command: ["api"]
+    stop_grace_period: 25s # > IDEM_SHUTDOWN_GRACE (20s) so in-flight requests drain
     environment:
       IDEM_DATABASE_URL: *database-url
       IDEM_API_TOKENS: demo=${IDEM_DEMO_TOKEN:?set IDEM_DEMO_TOKEN in .env (see .env.example)}
