@@ -49,7 +49,9 @@ func (c *poolCollector) Describe(ch chan<- *prometheus.Desc) {
 func (c *poolCollector) Collect(ch chan<- prometheus.Metric) {
 	s := c.pool.Stat()
 	g := func(d *prometheus.Desc, v float64) { ch <- prometheus.MustNewConstMetric(d, prometheus.GaugeValue, v) }
-	n := func(d *prometheus.Desc, v float64) { ch <- prometheus.MustNewConstMetric(d, prometheus.CounterValue, v) }
+	n := func(d *prometheus.Desc, v float64) {
+		ch <- prometheus.MustNewConstMetric(d, prometheus.CounterValue, v)
+	}
 	g(poolMaxConns, float64(s.MaxConns()))
 	g(poolTotalConns, float64(s.TotalConns()))
 	g(poolAcquiredConns, float64(s.AcquiredConns()))

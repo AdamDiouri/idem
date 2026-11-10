@@ -54,6 +54,7 @@ type Report struct {
 	AckMismatches  []string        `json:"ack_mismatches"` // accepted IDs the database disagrees with
 	FaultHits      map[string]int  `json:"fault_hits"`     // provider faults that actually fired
 	FailpointExits int             `json:"failpoint_exits"`
+	FailpointFires map[string]int  `json:"failpoint_fires"` // name → times it fired (from process logs)
 	// Recovery evidence (informational): completions discarded because the
 	// worker had lost its lease, and steps that succeeded after being IN_DOUBT.
 	FencedCommits   int                    `json:"fenced_commits"`
@@ -154,6 +155,13 @@ func (r *Report) Evaluate() {
 		add("vacuous: failpoints were armed but none fired (binary built with -tags nofailpoint?)")
 	}
 	if r.Config.Duration >= time.Minute {
+		for _, name := range armedFailpoints(r.Config.Failpoints + "," + r.Config.APIFailpoints) {
+			if r.FailpointFires[name] == 0 {
+				add("vacuous: failpoint %s was armed but never fired", name)
+			}
+		}
+	}
+	if r.Config.Duration >= time.Minute {
 		for _, k := range AllKinds {
 			if effective[k] == 0 {
 				add("vacuous: no %s event overlapped work in flight", k)
@@ -204,6 +212,13 @@ func (r *Report) Text() string {
 	}
 	fmt.Fprintf(&b, "provider fault hits: %v\n", r.FaultHits)
 	fmt.Fprintf(&b, "failpoint exits: %d\n", r.FailpointExits)
+	if len(r.FailpointFires) > 0 {
+		var fires []string
+		for _, name := range slices.Sorted(maps.Keys(r.FailpointFires)) {
+			fires = append(fires, fmt.Sprintf("%s=%d", name, r.FailpointFires[name]))
+		}
+		fmt.Fprintf(&b, "failpoints fired: %s\n", strings.Join(fires, " "))
+	}
 	fmt.Fprintf(&b, "fenced commits: %d\nin-doubt resolved: %d\n", r.FencedCommits, r.InDoubtResolved)
 	fmt.Fprintf(&b, "callback polls: %d (payouts that waited: %d)\n", r.CallbackPolls, r.PayoutsWaited)
 	fmt.Fprintf(&b, "webhooks: %d applied, %d duplicates, %d deferred\n", r.Webhooks.Applied, r.Webhooks.Duplicates, r.Webhooks.Deferred)
@@ -265,4 +280,16 @@ type WebhookCounts struct {
 	Applied    int `json:"applied"`
 	Duplicates int `json:"duplicates"`
 	Deferred   int `json:"deferred"`
+}
+
+// armedFailpoints lists the failpoint names in comma-separated specs
+// ("name=action[@p],..."), sorted and without duplicates.
+func armedFailpoints(specs string) []string {
+	seen := map[string]bool{}
+	for entry := range strings.SplitSeq(specs, ",") {
+		if name, _, ok := strings.Cut(strings.TrimSpace(entry), "="); ok && name != "" {
+			seen[name] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(seen))
 }

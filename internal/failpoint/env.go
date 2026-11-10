@@ -79,7 +79,10 @@ func parseEntry(entry string) (string, Action, error) {
 	var a Action
 	switch {
 	case actionSpec == "exit":
-		a = func() { exitFunc(137) }
+		a = func() {
+			_, _ = fmt.Fprintf(stderr, "failpoint %s fired: exit\n", name)
+			exitFunc(137)
+		}
 	case actionSpec == "panic":
 		a = func() { panic(ErrCrash) }
 	case strings.HasPrefix(actionSpec, "sleep:"):

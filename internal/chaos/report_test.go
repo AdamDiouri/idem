@@ -129,3 +129,35 @@ func TestReport_TextShowsRecoveryCounts(t *testing.T) {
 	require.Contains(t, r.Text(), "webhooks: 3 applied, 1 duplicates, 2 deferred")
 	require.Contains(t, text, "in-doubt resolved: 7")
 }
+
+// Slice 2.3: every armed failpoint must have fired in a run of a minute or more.
+func TestReport_EveryArmedFailpointMustFire(t *testing.T) {
+	r := healthy()
+	r.Config.Duration = 90 * time.Second
+	r.Config.Failpoints = "after_claim=exit@0.1,inbox_before_commit=exit@0.1"
+	r.FailpointExits = 2
+	r.FailpointFires = map[string]int{"after_claim": 2}
+	r.Evaluate()
+	require.False(t, r.Passed)
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "failpoint inbox_before_commit was armed but never fired")
+
+	r = healthy()
+	r.Config.Duration = 90 * time.Second
+	r.Config.Failpoints = "after_claim=exit@0.1,inbox_before_commit=exit@0.1"
+	r.Config.APIFailpoints = "webhook_after_insert=exit@0.1"
+	r.FailpointExits = 3
+	r.FailpointFires = map[string]int{"after_claim": 2, "inbox_before_commit": 1}
+	r.Evaluate()
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "failpoint webhook_after_insert was armed but never fired")
+
+	r.FailpointFires["webhook_after_insert"] = 1
+	r.Reasons = nil
+	r.Evaluate()
+	require.NotContains(t, strings.Join(r.Reasons, "\n"), "failpoint")
+}
+
+func TestReport_TextShowsFailpointFires(t *testing.T) {
+	r := healthy()
+	r.FailpointFires = map[string]int{"inbox_before_commit": 1, "after_claim": 2}
+	require.Contains(t, r.Text(), "failpoints fired: after_claim=2 inbox_before_commit=1")
+}

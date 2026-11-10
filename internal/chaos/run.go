@@ -32,7 +32,8 @@ type Config struct {
 	Sweepers      int           `json:"sweepers"`
 	BinDir        string        `json:"bin_dir"`
 	RunDir        string        `json:"run_dir"`
-	Failpoints    string        `json:"failpoints"` // armed in workers during the campaign
+	Failpoints    string        `json:"failpoints"`     // armed in workers during the campaign
+	APIFailpoints string        `json:"api_failpoints"` // armed in API replicas during the campaign
 }
 
 // DefaultConfig returns the campaign defaults.
@@ -320,6 +321,12 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		return rep, err
 	}
 	rep.FencedCommits = countLogLines(cfg.RunDir, "worker-", "lease lost before completion")
+	rep.FailpointFires = map[string]int{}
+	for _, name := range armedFailpoints(cfg.Failpoints + "," + cfg.APIFailpoints) {
+		if n := countLogLines(cfg.RunDir, "", "failpoint "+name+" fired"); n > 0 {
+			rep.FailpointFires[name] = n
+		}
+	}
 	rep.Outcomes = map[string]int{}
 	rows, err := pool.Query(ctx, `SELECT status, count(*) FROM workflows GROUP BY status`)
 	if err != nil {

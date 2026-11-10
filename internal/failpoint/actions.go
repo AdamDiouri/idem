@@ -6,6 +6,7 @@ package failpoint
 
 import (
 	"errors"
+	"io"
 	"os"
 	"sync"
 )
@@ -15,6 +16,10 @@ type Action func()
 
 // ErrCrash is the panic value used to simulate a crash in-process.
 var ErrCrash = errors.New("failpoint: simulated crash")
+
+// stderr receives the line an exiting failpoint writes ("failpoint <name>
+// fired: exit"), so a chaos run can tell which failpoints fired; swapped in tests.
+var stderr io.Writer = os.Stderr
 
 // exitFunc terminates the process for the "exit" action; swapped in tests.
 var exitFunc = os.Exit
