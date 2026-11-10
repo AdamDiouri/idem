@@ -207,12 +207,14 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 			return rep, err
 		}
 	}
-	for i := range cfg.Sweepers {
-		if _, err := sup.Start(ProcSpec{Name: fmt.Sprintf("sweeper-%d", i), Path: idem, Args: []string{"sweeper"},
+	sweepers := make([]*Proc, cfg.Sweepers)
+	for i := range sweepers {
+		if sweepers[i], err = sup.Start(ProcSpec{Name: fmt.Sprintf("sweeper-%d", i), Path: idem, Args: []string{"sweeper"},
 			LogPath: logPath(fmt.Sprintf("sweeper-%d", i)), Env: env}); err != nil {
 			return rep, err
 		}
 	}
+	procs := procSet{workers: workers, apis: apis, sweepers: sweepers}
 
 	// --- Campaign: traffic and faults --------------------------------------
 	logger.Info("campaign started", "seed", cfg.Seed, "duration", cfg.Duration, "workflows", cfg.Workflows)
@@ -239,7 +241,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		case <-time.After(time.Until(start.Add(ev.At))):
 		}
 		inFlight := unsettled(ctx, pool) + int(outstanding.Load())
-		err := apply(ctx, ev, workers, apis, pg, providerURL, &pauses)
+		err := apply(ctx, ev, procs, pg, providerURL, &pauses)
 		ex := ExecutedEvent{Event: ev, WallTime: time.Now(), InFlight: inFlight}
 		switch {
 		case errors.Is(err, ErrNotRunning):
@@ -501,8 +503,16 @@ func ackMismatches(ctx context.Context, pool *pgxpool.Pool, accepted map[string]
 	return out, nil
 }
 
-func apply(ctx context.Context, ev Event, workers []*Proc, apis []*Proc, pg *Postgres, providerURL string, pauses *sync.WaitGroup) error {
+// procSet is idem's processes, by kind, for apply.
+type procSet struct {
+	workers, apis, sweepers []*Proc
+}
+
+func apply(ctx context.Context, ev Event, procs procSet, pg *Postgres, providerURL string, pauses *sync.WaitGroup) error {
+	workers, apis := procs.workers, procs.apis
 	switch ev.Kind {
+	case RestartAll:
+		return restartAll(ctx, procs)
 	case KillWorker:
 		return workers[ev.Target].Kill()
 	case PauseWorker:
@@ -597,4 +607,24 @@ func undeliveredWebhooks(ds []fakeprovider.WebhookDelivery) int {
 		}
 	}
 	return n
+}
+
+// restartAll restarts every idem process at once (SIGTERM, drain, start). A
+// process that is already down (a crash restart in progress) comes back on its
+// own and is not an error.
+func restartAll(ctx context.Context, procs procSet) error {
+	all := append(append(append([]*Proc{}, procs.workers...), procs.apis...), procs.sweepers...)
+	errs := make([]error, len(all))
+	var wg sync.WaitGroup
+	for i, p := range all {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := p.Restart(ctx); err != nil && !errors.Is(err, ErrNotRunning) {
+				errs[i] = fmt.Errorf("%s: %w", p.Name(), err)
+			}
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }

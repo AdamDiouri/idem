@@ -449,9 +449,9 @@ The heart of the design. Every row should eventually map to at least one automat
 | F21 | Refund keeps failing | Up to 20 attempts → `DEAD` | `NEEDS_ATTENTION` + alert | provider fault |
 | F22 | Retries exhausted on any step | `DEAD` | `NEEDS_ATTENTION`; alert says whether money may have moved | unit |
 | F23 | `IN_DOUBT` key older than provider retention | Lookup by key; if unknown, `DEAD` | Never retried with a new key | short retention in test |
-| F24 | Clock skew between workers | Leases use DB `now()` only | No effect | review + unit |
+| F24 | Clock skew between workers | Leases use DB `now()` only | No effect | static test `TestLeaseQueriesUseDatabaseClock`: no query touching a lease or schedule takes a time from Go (2.3b) |
 | F25 | Panic inside step handler | Recovered → `AMBIGUOUS` → `IN_DOUBT` | Retried; eventually `DEAD` if persistent | unit |
-| F26 | Rolling deploy (SIGTERM) | Graceful drain; leftovers via lease path | No loss | chaos: restart all |
+| F26 | Rolling deploy (SIGTERM) | Graceful drain; leftovers via lease path | No loss | chaos event `restart_all`: every worker, sweeper and API replica restarted at once during traffic (2.3b) |
 | F27 | Engine bug mints a fresh key on retry | Provider performs a second effect | **Caught by invariant I1** (oracle counts effects per workflow, not per key) | chaos |
 
 ---

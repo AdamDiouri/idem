@@ -255,3 +255,15 @@ func TestWithLogTail_ShowsTheProcessLog(t *testing.T) {
 	require.ErrorContains(t, err, "built with -tags nofailpoint")
 	require.Equal(t, "boom", withLogTail(errors.New("boom"), filepath.Join(t.TempDir(), "missing.log")).Error())
 }
+
+// Slice 2.3b (F26): runs of a minute or more restart everything at least once.
+func TestNewPlan_LongRunHasRestartAll(t *testing.T) {
+	events := NewPlan(PlanConfig{Seed: 7, Duration: 90 * time.Second, Workers: 4, APIs: 2, LeaseTTL: time.Second})
+	n := 0
+	for _, e := range events {
+		if e.Kind == RestartAll {
+			n++
+		}
+	}
+	require.Positive(t, n)
+}

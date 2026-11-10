@@ -23,10 +23,13 @@ const (
 	RestartPostgres     EventKind = "restart_postgres" // docker restart
 	SetProviderFaults   EventKind = "set_provider_faults"
 	ClearProviderFaults EventKind = "clear_provider_faults"
+	// RestartAll is a rolling deploy done badly (F26): every worker, sweeper
+	// and API replica gets SIGTERM at once, drains, and starts again.
+	RestartAll EventKind = "restart_all"
 )
 
 // AllKinds lists every disruption kind.
-var AllKinds = []EventKind{KillWorker, PauseWorker, RestartAPI, RestartPostgres, SetProviderFaults, ClearProviderFaults}
+var AllKinds = []EventKind{KillWorker, PauseWorker, RestartAPI, RestartPostgres, SetProviderFaults, ClearProviderFaults, RestartAll}
 
 // Event is one scheduled disruption.
 type Event struct {
@@ -52,8 +55,8 @@ var kindWeights = []struct {
 	kind   EventKind
 	weight int
 }{
-	{KillWorker, 30}, {PauseWorker, 20}, {SetProviderFaults, 25},
-	{RestartAPI, 10}, {RestartPostgres, 10}, {ClearProviderFaults, 5},
+	{KillWorker, 28}, {PauseWorker, 20}, {SetProviderFaults, 25},
+	{RestartAPI, 10}, {RestartPostgres, 10}, {ClearProviderFaults, 4}, {RestartAll, 3},
 }
 
 var endpointModes = map[string][]string{

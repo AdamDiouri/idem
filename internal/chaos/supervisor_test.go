@@ -173,3 +173,33 @@ func TestSupervisor_CountsFailpointExitsSeparately(t *testing.T) {
 	require.Eventually(t, func() bool { return k.Kills() == 1 }, 3*time.Second, 50*time.Millisecond)
 	require.Zero(t, k.FailpointExits())
 }
+
+// Slice 2.3b (F26, rolling deploy): restart_all restarts every process at once,
+// gracefully, while traffic runs.
+func TestApply_RestartAll(t *testing.T) {
+	s := newSupervisor(t)
+	var procs procSet
+	for _, name := range []string{"worker-0", "worker-1"} {
+		p, err := s.Start(helperSpec(t, name))
+		require.NoError(t, err)
+		procs.workers = append(procs.workers, p)
+	}
+	api, err := s.Start(helperSpec(t, "api-0"))
+	require.NoError(t, err)
+	procs.apis = []*Proc{api}
+	sweeper, err := s.Start(helperSpec(t, "sweeper-0"))
+	require.NoError(t, err)
+	procs.sweepers = []*Proc{sweeper}
+
+	all := append(append(append([]*Proc{}, procs.workers...), procs.apis...), procs.sweepers...)
+	before := map[*Proc]int{}
+	for _, p := range all {
+		before[p] = p.PID()
+	}
+	require.NoError(t, apply(context.Background(), Event{Kind: RestartAll}, procs, nil, "", nil))
+	for _, p := range all {
+		require.NotEqual(t, before[p], p.PID(), p.Name())
+		require.True(t, alive(p.PID()), p.Name())
+		require.Equal(t, 0, p.Restarts(), "a deliberate restart is not a crash")
+	}
+}
