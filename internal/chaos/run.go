@@ -54,7 +54,7 @@ const (
 )
 
 // webhookSecret signs the chaos provider's webhooks to the chaos API.
-const webhookSecret = "whsec_chaos_0123456789"
+const webhookSecret = "whsec_chaos_0123456789" //nolint:gosec // throwaway secret for a local chaos run, like apiToken
 
 // providerEnv compresses the fake provider's timings like the engine's: payouts
 // settle in 300ms, and a timeout fault hangs 3s (with a 1s client timeout)
