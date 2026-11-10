@@ -1,9 +1,12 @@
-# Pin to the locally installed toolchain; dependencies are chosen to support Go 1.25.
-export GOTOOLCHAIN := local
+# The Go toolchain is pinned by go.mod's toolchain line: the go command fetches
+# that exact version if it is not installed, so local builds, CI and the Docker
+# image all use the same one.
 
-GOLANGCI_LINT ?= $(shell command -v golangci-lint 2>/dev/null || echo $(shell go env GOPATH)/bin/golangci-lint)
+# The same golangci-lint as CI (.github/workflows/ci.yml); bump both together.
+GOLANGCI_LINT_VERSION := v2.15.0
+GOLANGCI_LINT ?= go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
-.PHONY: generate build build-release test lint up down reset app-user chaos
+.PHONY: generate build build-release test lint vuln up down reset app-user chaos
 
 generate:
 	go tool sqlc generate
@@ -22,6 +25,10 @@ test:
 
 lint:
 	$(GOLANGCI_LINT) run
+
+# Known vulnerabilities our code can reach (same check as CI's Security workflow).
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
 # Local secrets live in .env (never committed). Created once from the example;
 # an existing .env is never overwritten.

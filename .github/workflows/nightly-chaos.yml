@@ -1,0 +1,35 @@
+# Longer chaos campaigns than CI can afford on every PR: rare interleavings
+# show up across seeds and minutes. A failing run uploads its artifacts
+# (report, process logs, fault plan); rerun locally with the same seed:
+#   make chaos CHAOS_ARGS="--seed <seed> --duration 90s"
+name: Nightly chaos
+
+on:
+  schedule:
+    - cron: "41 2 * * *" # 02:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  campaign:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod # its toolchain line: the exact version
+      - run: make build
+      - run: bin/chaos --seed ${{ matrix.seed }} --duration 90s --out chaos-runs
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: chaos-seed-${{ matrix.seed }}
+          path: chaos-runs/
+          retention-days: 14

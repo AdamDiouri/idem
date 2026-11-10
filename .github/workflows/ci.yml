@@ -1,0 +1,75 @@
+# Every PR and every push to main. Third-party actions are pinned to a commit
+# SHA (the tag is in the comment); Dependabot keeps them current.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod # its toolchain line: the exact version
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0 # same as the Makefile; bump both together
+
+  generated:
+    name: generated code is up to date
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod # its toolchain line: the exact version
+      - run: make generate
+      - name: No drift between queries and generated Go
+        run: git diff --exit-code || (echo "::error::run 'make generate' and commit the result"; exit 1)
+      - run: go mod tidy -diff
+
+  test:
+    # Integration tests start postgres:18 with testcontainers (Docker is on the runner).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod # its toolchain line: the exact version
+      - run: make test
+
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod # its toolchain line: the exact version
+      - name: Release build (failpoints compiled out)
+        run: make build-release
+      - name: Docker image
+        run: docker build -t idem:ci .
+
+  chaos:
+    name: chaos smoke (30s campaign, every invariant)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod # its toolchain line: the exact version
+      - run: make build
+      - run: go test -tags chaos -count=1 -v -run TestRun_ShortCampaign ./internal/chaos/
