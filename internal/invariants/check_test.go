@@ -398,3 +398,58 @@ func TestCheck_I6_TwoKeysOneWorkflow(t *testing.T) {
 	require.NoError(t, err)
 	requireViolation(t, e.check(t), "I6", wf, "2 idempotency keys")
 }
+
+// parkStep parks wf with a DEAD step of the given name and reason.
+func (e env) parkStep(t *testing.T, wf uuid.UUID, name, reason string) {
+	t.Helper()
+	_, err := e.pool.Exec(context.Background(), `INSERT INTO steps (id, workflow_id, name, status, idempotency_key, max_attempts, dead_reason)
+		VALUES (gen_random_uuid(), $1, $2, 'DEAD', $3, 8, $4)`, wf, name, uuid.NewString(), reason)
+	require.NoError(t, err)
+	e.setStatus(t, wf, "NEEDS_ATTENTION")
+}
+
+// Slice 2.3b: a payout refused after an ambiguous attempt definitively moved
+// nothing, so the ledger must still match the provider for its workflow.
+func TestCheck_I3_ParkedNoEffectIsNotExempt(t *testing.T) {
+	e := setup(t)
+	wf, _ := newWorkflow(t, e.pool)
+	e.charge(t, wf, "key-1") // no posting
+	e.parkStep(t, wf, "payout", "permanent_after_in_doubt")
+	requireViolation(t, e.check(t), "I3", wf, "charge")
+}
+
+func TestCheck_I7_ParkedPermanentAfterDoubtShape(t *testing.T) {
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	e.charge(t, wf, "key-1")
+	e.post(t, wf, step)
+	e.payout(t, wf, "po-1") // the provider paid after all
+	e.parkStep(t, wf, "payout", "permanent_after_in_doubt")
+	requireViolation(t, e.check(t), "I7", wf, "NEEDS_ATTENTION (payout permanent_after_in_doubt)")
+}
+
+func TestCheck_I7_PartialRefund(t *testing.T) {
+	ctx := context.Background()
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	ch := e.client.CreateCharge(ctx, "ch-1", provider.ChargeRequest{AmountCents: 1000, Currency: "EUR", CustomerID: "cus_1", WorkflowID: wf})
+	require.Equal(t, provider.Success, ch.Class)
+	e.postKind(t, wf, step, "charge", ledger.ChargeEntries(1000, 0))
+	re := e.client.CreateRefund(ctx, "re-1", provider.RefundRequest{AmountCents: 400, Currency: "EUR", ChargeID: ch.ProviderRef, WorkflowID: wf})
+	require.Equal(t, provider.Success, re.Class, "err: %v", re.Err)
+	e.postKind(t, wf, step, "refund", ledger.RefundEntries(400, 0))
+	e.setStatus(t, wf, "COMPENSATED")
+	requireViolation(t, e.check(t), "I7", wf, "refund 400 ≠ charge 1000")
+}
+
+// Regression: a payout parked in doubt may have moved money without a
+// posting; until a human reconciles it, I3 does not judge it.
+func TestCheck_I3_ParkedInDoubtStaysExempt(t *testing.T) {
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	e.charge(t, wf, "key-1")
+	e.post(t, wf, step)
+	e.payout(t, wf, "po-1") // moved, never posted
+	e.parkStep(t, wf, "payout", "attempts_exhausted_in_doubt")
+	require.Empty(t, e.check(t))
+}

@@ -461,11 +461,11 @@ The heart of the design. Every row should eventually map to at least one automat
 |---|---|---|
 | **I1** | Per workflow, the provider performed ≤ 1 charge, ≤ 1 payout, ≤ 1 refund. | Provider effects oracle (counts by `workflow_id` metadata, **not** by key) |
 | **I2** | Every ledger transaction sums to 0; all entries sum to 0. | DB |
-| **I3** | Ledger agrees with provider: each provider effect has exactly one posting and vice versa. | DB × oracle (reconciliation) |
+| **I3** | Ledger agrees with provider: each provider effect has exactly one posting and vice versa. A `NEEDS_ATTENTION` workflow is exempt only while its outcome is genuinely unknown (a step parked in doubt); one parked because the provider definitively did nothing (`permanent_after_in_doubt`, `attempts_exhausted_no_effect`) must match exactly. | DB × oracle (reconciliation) |
 | **I4** | After faults stop and a quiescence period, no workflow is `PENDING`/`RUNNING`/`COMPENSATING` and no step is `RUNNING`/`IN_DOUBT`/`AWAITING_CALLBACK`. | DB |
 | **I5** | No payout exists for a workflow without a successful charge. | Oracle |
 | **I6** | Every inbound idempotency key maps to exactly one workflow. | DB |
-| **I7** | `SUCCEEDED` ⇒ charge+payout effects at provider; `COMPENSATED` ⇒ charge+refund, no payout; `FAILED` ⇒ no effects. | DB × oracle |
+| **I7** | `SUCCEEDED` ⇒ charge+payout effects at provider; `COMPENSATED` ⇒ charge+refund of the same amount, no payout; `FAILED` ⇒ no effects; `NEEDS_ATTENTION` with the payout parked as `permanent_after_in_doubt` ⇒ the charge only. | DB × oracle |
 | **I8–I11** | Milestone 2: outbox, shop view, webhook inbox, webhook acknowledgement. See the [M2 design](superpowers/specs/2026-11-10-milestone-2-design.md) §9. | DB × oracles |
 
 `NEEDS_ATTENTION` workflows are allowed by I4 but listed in the report — a run that produces many of them is a design smell even if no invariant breaks.

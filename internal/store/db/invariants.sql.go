@@ -219,6 +219,39 @@ func (q *Queries) NonTerminalWorkflows(ctx context.Context) ([]NonTerminalWorkfl
 	return items, nil
 }
 
+const parkedStepReasons = `-- name: ParkedStepReasons :many
+SELECT s.workflow_id, s.name, COALESCE(s.dead_reason, '')::text AS dead_reason
+FROM steps s JOIN workflows w ON w.id = s.workflow_id
+WHERE w.status = 'NEEDS_ATTENTION' AND s.status = 'DEAD'
+`
+
+type ParkedStepReasonsRow struct {
+	WorkflowID uuid.UUID
+	Name       string
+	DeadReason string
+}
+
+// The DEAD steps of workflows that need attention, with why they died.
+func (q *Queries) ParkedStepReasons(ctx context.Context) ([]ParkedStepReasonsRow, error) {
+	rows, err := q.db.Query(ctx, parkedStepReasons)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ParkedStepReasonsRow
+	for rows.Next() {
+		var i ParkedStepReasonsRow
+		if err := rows.Scan(&i.WorkflowID, &i.Name, &i.DeadReason); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const pendingInboxEvents = `-- name: PendingInboxEvents :many
 SELECT provider_event_id, received_at FROM webhook_inbox WHERE status = 'PENDING' ORDER BY received_at
 `

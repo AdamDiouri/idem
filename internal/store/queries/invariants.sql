@@ -60,3 +60,9 @@ ORDER BY i.received_at;
 -- name: WorkflowsWithManyKeys :many
 SELECT workflow_id, count(*)::int AS keys FROM api_idempotency_keys
 WHERE workflow_id IS NOT NULL GROUP BY workflow_id HAVING count(*) > 1;
+
+-- name: ParkedStepReasons :many
+-- The DEAD steps of workflows that need attention, with why they died.
+SELECT s.workflow_id, s.name, COALESCE(s.dead_reason, '')::text AS dead_reason
+FROM steps s JOIN workflows w ON w.id = s.workflow_id
+WHERE w.status = 'NEEDS_ATTENTION' AND s.status = 'DEAD';
