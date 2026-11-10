@@ -398,3 +398,20 @@ func TestLookupPayout_PendingIsAccepted(t *testing.T) {
 	require.Equal(t, provider.Accepted, out.Class, "err: %v", out.Err)
 	require.Equal(t, accepted.ProviderRef, out.ProviderRef)
 }
+
+// Final review, Important 2: a lookup that finds an accepted payout settled
+// failed is a definite refusal, not "unknown".
+func TestLookupPayout_FailedIsPermanent(t *testing.T) {
+	ctx := context.Background()
+	p := fakeprovider.New(fakeprovider.Options{Hang: 5 * time.Second})
+	p.SetFaults(fakeprovider.Faults{Rules: []fakeprovider.Rule{{Endpoint: "payouts", Mode: fakeprovider.ModePayoutFail, Times: 1}}})
+	srv := httptest.NewServer(p.Handler())
+	t.Cleanup(srv.Close)
+	c := provider.NewClient(srv.URL, time.Second)
+	require.Equal(t, provider.Accepted, c.CreatePayout(ctx, "po-key-1", payoutReq("mer_1")).Class)
+
+	out, found := c.LookupPayout(ctx, "po-key-1", payoutReq("mer_1"))
+	require.True(t, found)
+	require.Equal(t, provider.Permanent, out.Class, "err: %v", out.Err)
+	require.ErrorContains(t, out.Err, "account_closed")
+}

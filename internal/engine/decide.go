@@ -70,8 +70,11 @@ func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay, callb
 //   - paid → SUCCEEDED; failed → FAILED_PERMANENT, or DEAD under the pivot
 //     rule when an earlier send was ambiguous.
 //   - pending → wait again, backing off; a failed poll → wait b.Base.
-//   - either, once maxPolls polls are used → DEAD callback_unresolved (money
-//     may have moved; a human checks with the provider).
+//   - either, once maxPolls polls since the latest send are used → DEAD
+//     callback_unresolved (money may have moved; a human checks with the
+//     provider). An operator's retry re-sends, which starts a fresh budget.
+//   - The pivot rule applies to a failed payout after an ambiguous send, or
+//     when the poll resolves a step that was itself IN_DOUBT.
 func decidePoll(s ClaimedStep, out provider.Outcome, b Backoff, maxPolls int32, pivot bool) Result {
 	r := Result{ProviderRef: s.ProviderRef, HTTPStatus: out.HTTPStatus}
 	if out.Err != nil {
@@ -83,18 +86,18 @@ func decidePoll(s ClaimedStep, out provider.Outcome, b Backoff, maxPolls int32, 
 		return r
 	case provider.Permanent:
 		r.Kind = ResultFailedPermanent
-		if pivot && s.SendDoubt {
+		if pivot && (s.SendDoubt || s.PriorStatus == string(ResultInDoubt)) {
 			r.Kind, r.DeadReason = ResultDead, DeadPermanentAfterInDoubt
 		}
 		return r
 	}
-	if s.PollCount >= maxPolls {
+	if s.PollsSinceSend >= maxPolls {
 		r.Kind, r.DeadReason = ResultDead, DeadCallbackUnresolved
 		return r
 	}
 	r.Kind = ResultAwaitingCallback
 	if out.Class == provider.Pending {
-		r.RetryDelay = min(b.Cap, b.Base+b.Delay(s.PollCount))
+		r.RetryDelay = min(b.Cap, b.Base+b.Delay(s.PollsSinceSend))
 	} else {
 		r.RetryDelay = b.Base
 	}

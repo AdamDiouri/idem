@@ -35,7 +35,14 @@ RETURNING s.id, s.workflow_id, s.name, s.idempotency_key, s.lease_epoch, s.attem
           (EXTRACT(EPOCH FROM (now() - s.first_attempted_at)) * 1000)::bigint AS key_age_ms,
           w.input,
           EXISTS (SELECT 1 FROM step_attempts a
-                  WHERE a.step_id = s.id AND a.kind = 'send' AND a.outcome IN ('IN_DOUBT', 'ABANDONED', 'DEAD'))::bool AS send_doubt;
+                  WHERE a.step_id = s.id AND a.kind = 'send' AND a.outcome IN ('IN_DOUBT', 'ABANDONED', 'DEAD'))::bool AS send_doubt,
+          -- Polls since the latest send, this one included: the poll budget is
+          -- per acceptance, so an operator's retry (a re-send) gets a fresh one.
+          ((SELECT count(*) FROM step_attempts a
+            WHERE a.step_id = s.id AND a.kind = 'poll'
+              AND a.attempt_no > COALESCE((SELECT max(b.attempt_no) FROM step_attempts b
+                                           WHERE b.step_id = s.id AND b.kind = 'send'), 0))
+           + CASE WHEN s.prior_status = 'AWAITING_CALLBACK' THEN 1 ELSE 0 END)::int AS polls_since_send;
 
 -- name: InsertStepAttempt :exec
 INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id, kind)

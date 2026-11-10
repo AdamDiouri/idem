@@ -108,10 +108,19 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 	var out provider.Outcome
 	failpoint.Hit(FPBeforeProviderCall)
 	callStart := time.Now()
-	if s.PriorStatus == string(ResultAwaitingCallback) {
+	_, canPoll := step.(Poller)
+	switch {
+	case s.PriorStatus == string(ResultAwaitingCallback):
 		// A poll of an accepted request (design §4.5): it sends nothing.
 		out, r = w.poll(ctx, step, s, log)
-	} else if w.nearKeyRetention(s) {
+	case w.nearKeyRetention(s) && canPoll && s.ProviderRef != "":
+		// In doubt near key retention, but the provider already accepted this
+		// request and we hold its reference: ask about that request directly
+		// instead of looking it up by a key the provider may have forgotten.
+		log.Warn("idempotency key near provider retention; resolving by polling the accepted request",
+			"key_age", s.KeyAge.String(), "provider_ref", s.ProviderRef)
+		out, r = w.poll(ctx, step, s, log)
+	case w.nearKeyRetention(s):
 		// Re-sending could reach a provider that has forgotten the key and
 		// charge twice. Ask what happened instead (design §9.4).
 		log.Warn("idempotency key near provider retention; resolving by lookup", "key_age", s.KeyAge.String())
@@ -121,7 +130,7 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 		if !found && out.Class == provider.Permanent {
 			r = Result{Kind: ResultDead, DeadReason: DeadKeyExpiredUnknown, HTTPStatus: out.HTTPStatus, Error: errString(out.Err)}
 		}
-	} else {
+	default:
 		out = w.execute(ctx, step, s)
 	}
 	w.opts.Metrics.ObserveProvider(s.Name, out.Class.String(), time.Since(callStart))

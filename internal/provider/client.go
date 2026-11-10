@@ -308,6 +308,9 @@ func classify(status int, header http.Header, body []byte, want expect) Outcome 
 			(status == http.StatusAccepted || want.acceptOnOK) &&
 			r.AmountCents == want.AmountCents && (r.Currency == "" || r.Currency == want.Currency):
 			out.Class, out.ProviderRef = Accepted, r.ID
+		case want.acceptOnOK && want.AcceptedStatus != "" && r.ID != "" && r.Status == "failed":
+			// A lookup found the accepted request settled failed: a definite refusal.
+			out.Class, out.Err = Permanent, fmt.Errorf("provider reports %s failed: %s", r.ID, failureCode(body))
 		case r.ID == "" || r.Status != want.SuccessStatus:
 			out.Class, out.Err = Ambiguous, fmt.Errorf("unexpected response: id=%q status=%q", r.ID, r.Status)
 		case r.AmountCents != want.AmountCents:
@@ -356,6 +359,14 @@ func retryAfter(h http.Header) time.Duration {
 		return maxRetryAfter
 	}
 	return time.Duration(secs) * time.Second
+}
+
+func failureCode(body []byte) string {
+	var f struct {
+		FailureCode string `json:"failure_code"`
+	}
+	_ = json.Unmarshal(body, &f) // best effort, for messages only
+	return f.FailureCode
 }
 
 func errorCode(body []byte) string {

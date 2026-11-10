@@ -196,7 +196,9 @@ func TestAdmin_RetryCallbackUnresolvedResumesPolling(t *testing.T) {
 
 	require.NoError(t, h.admin().RetryStep(ctx, p.StepID, p.Version, "provider says it is still processing"))
 	require.Equal(t, "IN_DOUBT", h.stepStatus(t, wf, "payout"), "money may have moved: doubt is sticky")
-	// Zero backoff polls every tick: give it a budget that outlasts the settlement.
+	// Zero backoff polls every tick, so this test (about settling through a
+	// re-send) uses a large budget; the budget itself is pinned by
+	// TestAdmin_RetryCallbackUnresolvedGetsAFreshPollBudget.
 	h.runUntil(t, h.workerWith("w1", polling(0, 1000), h.allSteps()...), wf, "SUCCEEDED")
 
 	payouts := h.effectsOf(wf, "payout")
@@ -207,4 +209,53 @@ func TestAdmin_RetryCallbackUnresolvedResumesPolling(t *testing.T) {
 	require.Equal(t, h.count(t, `SELECT count(*) FROM step_attempts WHERE step_id = $1`, p.StepID),
 		h.count(t, `SELECT count(DISTINCT attempt_no) FROM step_attempts WHERE step_id = $1`, p.StepID))
 	h.assertNoViolations(t)
+}
+
+// Final review, Important 1: retry-step after callback_unresolved must give the
+// re-sent (replayed) payout a fresh poll budget. The budget used to be total
+// polls, so the first poll after the retry parked it again.
+func TestAdmin_RetryCallbackUnresolvedGetsAFreshPollBudget(t *testing.T) {
+	ctx := context.Background()
+	h := asyncHarness(t, time.Hour) // the provider stays slow
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	h.drain(t, h.workerWith("w1", polling(0, 2), h.allSteps()...))
+	p := h.parkedStep(t, wf)
+	require.NoError(t, h.admin().RetryStep(ctx, p.StepID, p.Version, "provider says it is still processing"))
+
+	w := h.workerWith("w1", polling(0, 2), h.allSteps()...) // the same budget as before
+	require.Equal(t, "awaiting_callback", h.runOnce(t, w).Outcome, "the re-send is accepted again")
+	require.Equal(t, "awaiting_callback", h.runOnce(t, w).Outcome, "first poll after the retry: still within budget")
+	require.Equal(t, "dead", h.runOnce(t, w).Outcome, "second poll: the fresh budget of 2 is used up")
+	require.Equal(t, engine.DeadCallbackUnresolved,
+		scalar[string](t, h.pool, `SELECT dead_reason FROM steps WHERE workflow_id = $1 AND name = 'payout'`, wf))
+}
+
+// Final review, Important 2: a step that already holds an accepted payout's
+// reference resolves doubt by polling that payout, not by key lookup. The
+// lookup misread a settled "failed" as ambiguous and burned the retry budget.
+func TestFlow_InDoubtAcceptedPayoutNearRetentionPollsByRef(t *testing.T) {
+	ctx := context.Background()
+	h := asyncHarness(t, time.Hour)
+	h.setFaults(fakeprovider.Rule{Endpoint: "payouts", Mode: fakeprovider.ModePayoutFail, Times: 1})
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	h.drain(t, h.workerWith("w1", polling(0, 1), h.allSteps()...)) // accepted, one poll (pending), parked
+	p := h.parkedStep(t, wf)
+	require.Equal(t, engine.DeadCallbackUnresolved, p.DeadReason)
+	require.NoError(t, h.admin().RetryStep(ctx, p.StepID, p.Version, "weekend later"))
+	// The provider has long since settled it failed, and the key is old.
+	_, err := h.pool.Exec(ctx, `UPDATE steps SET first_attempted_at = now() - interval '30 hours' WHERE id = $1`, p.StepID)
+	require.NoError(t, err)
+
+	w := h.workerWith("w1", func(o *engine.WorkerOptions) {
+		o.CallbackDeadline, o.MaxPolls = 0, 8
+		o.KeyRetention, o.KeyRetentionMargin = 24*time.Hour, time.Hour
+	}, h.allSteps()...)
+	h.fake.SettleNow() // the bank rejected it while the step was parked
+	h.runOnce(t, w)
+
+	require.Equal(t, "DEAD", h.stepStatus(t, wf, "payout"))
+	require.Equal(t, engine.DeadPermanentAfterInDoubt,
+		scalar[string](t, h.pool, `SELECT dead_reason FROM steps WHERE workflow_id = $1 AND name = 'payout'`, wf),
+		"failed, after the operator's doubt: parked with the true reason, not attempts_exhausted_in_doubt")
+	require.Zero(t, h.fake.Calls()["GET /payouts"], "no lookup by key: the payout reference is known")
 }

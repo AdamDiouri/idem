@@ -104,7 +104,7 @@ func TestDecidePoll(t *testing.T) {
 	const maxPolls = 8
 	failed := errors.New("payout failed: account_closed")
 	poll := func(n int32, doubt bool) ClaimedStep {
-		return ClaimedStep{Attempt: 1, MaxAttempts: 8, PollCount: n, PriorStatus: "AWAITING_CALLBACK", ProviderRef: "po_1", SendDoubt: doubt}
+		return ClaimedStep{Attempt: 1, MaxAttempts: 8, PollCount: n, PollsSinceSend: n, PriorStatus: "AWAITING_CALLBACK", ProviderRef: "po_1", SendDoubt: doubt}
 	}
 	cases := []struct {
 		name string

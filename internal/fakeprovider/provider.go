@@ -454,6 +454,20 @@ func (p *Provider) lookup(res resource) http.HandlerFunc {
 	}
 }
 
+// SettleNow settles every pending payout immediately, whatever PayoutSettle
+// says. Tests use it to model a provider that finished while idem waited.
+func (p *Provider) SettleNow() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	for _, po := range p.payouts {
+		if po.status == "pending" {
+			po.settleAt = now
+		}
+	}
+	p.settleDueLocked(now)
+}
+
 // getPayout serves GET /payouts/{id}: the payout's current state.
 func (p *Provider) getPayout(w http.ResponseWriter, r *http.Request) {
 	p.count("GET /payouts/{id}")
