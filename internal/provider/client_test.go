@@ -176,7 +176,8 @@ func TestRetryAfter(t *testing.T) {
 		{"abc", 0},
 		{"-5", 0},
 		{"99999999999", time.Hour},
-		{"Wed, 21 Oct 2015 07:28:00 GMT", 0}, // HTTP-date form is not supported
+		{"Wed, 21 Oct 2015 07:28:00 GMT", 0}, // an HTTP date in the past
+		{"Thu, 01 Jan 2099 00:00:00 GMT", time.Hour}, // far future: capped
 	}
 	for _, c := range cases {
 		t.Run(c.header, func(t *testing.T) {
@@ -414,4 +415,30 @@ func TestLookupPayout_FailedIsPermanent(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, provider.Permanent, out.Class, "err: %v", out.Err)
 	require.ErrorContains(t, out.Err, "account_closed")
+}
+
+// Slice 2.3b (review R12): Retry-After may be an HTTP date (RFC 9110).
+func TestRetryAfter_HTTPDate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", time.Now().Add(90*time.Second).UTC().Format(http.TimeFormat))
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	out := provider.NewClient(srv.URL, time.Second).CreateCharge(context.Background(), "key-1", chargeReq("cus_1"))
+	require.Equal(t, provider.NoEffect, out.Class)
+	require.InDelta(t, 90*time.Second, out.RetryAfter, float64(2*time.Second))
+}
+
+// Slice 2.3b (review R12): a lookup that is rate limited says nothing about the
+// request, but the provider's Retry-After must still reach the retry delay.
+func TestLookup_RateLimitedKeepsRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	out, found := provider.NewClient(srv.URL, time.Second).LookupCharge(context.Background(), "key-1", chargeReq("cus_1"))
+	require.False(t, found)
+	require.Equal(t, provider.Ambiguous, out.Class)
+	require.Equal(t, 120*time.Second, out.RetryAfter)
 }

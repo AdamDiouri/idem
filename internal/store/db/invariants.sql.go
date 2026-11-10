@@ -44,6 +44,57 @@ func (q *Queries) ConflictEvents(ctx context.Context) ([]ConflictEventsRow, erro
 	return items, nil
 }
 
+const inboxRowsForCheck = `-- name: InboxRowsForCheck :many
+SELECT i.provider_event_id, i.status, COALESCE(i.note, '')::text AS note, w.status AS workflow_status,
+       EXISTS (SELECT 1 FROM step_attempts a WHERE a.step_id = i.step_id AND a.kind = 'webhook')::bool AS step_applied,
+       -- an operator acted on the workflow (its evidence outlives the parking)
+       EXISTS (SELECT 1 FROM admin_actions x WHERE x.workflow_id = s.workflow_id)::bool AS operator_acted
+FROM webhook_inbox i
+LEFT JOIN steps s ON s.id = i.step_id
+LEFT JOIN workflows w ON w.id = s.workflow_id
+ORDER BY i.received_at
+`
+
+type InboxRowsForCheckRow struct {
+	ProviderEventID string
+	Status          string
+	Note            string
+	WorkflowStatus  *string
+	StepApplied     bool
+	OperatorActed   bool
+}
+
+// Every inbox row with the status of the workflow it was tied to (if any),
+// for checking against the provider's delivery log (I10, I11).
+// step_applied: the event's step records an attempt of kind webhook, the
+// trace the apply path leaves (so "applied" cannot be a label alone).
+func (q *Queries) InboxRowsForCheck(ctx context.Context) ([]InboxRowsForCheckRow, error) {
+	rows, err := q.db.Query(ctx, inboxRowsForCheck)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InboxRowsForCheckRow
+	for rows.Next() {
+		var i InboxRowsForCheckRow
+		if err := rows.Scan(
+			&i.ProviderEventID,
+			&i.Status,
+			&i.Note,
+			&i.WorkflowStatus,
+			&i.StepApplied,
+			&i.OperatorActed,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const keysWithoutWorkflow = `-- name: KeysWithoutWorkflow :many
 SELECT client_id, key FROM api_idempotency_keys
 WHERE workflow_id IS NULL OR response_body IS NULL
@@ -177,6 +228,39 @@ func (q *Queries) NonTerminalWorkflows(ctx context.Context) ([]NonTerminalWorkfl
 	return items, nil
 }
 
+const parkedStepReasons = `-- name: ParkedStepReasons :many
+SELECT s.workflow_id, s.name, COALESCE(s.dead_reason, '')::text AS dead_reason
+FROM steps s JOIN workflows w ON w.id = s.workflow_id
+WHERE w.status = 'NEEDS_ATTENTION' AND s.status = 'DEAD'
+`
+
+type ParkedStepReasonsRow struct {
+	WorkflowID uuid.UUID
+	Name       string
+	DeadReason string
+}
+
+// The DEAD steps of workflows that need attention, with why they died.
+func (q *Queries) ParkedStepReasons(ctx context.Context) ([]ParkedStepReasonsRow, error) {
+	rows, err := q.db.Query(ctx, parkedStepReasons)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ParkedStepReasonsRow
+	for rows.Next() {
+		var i ParkedStepReasonsRow
+		if err := rows.Scan(&i.WorkflowID, &i.Name, &i.DeadReason); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const pendingInboxEvents = `-- name: PendingInboxEvents :many
 SELECT provider_event_id, received_at FROM webhook_inbox WHERE status = 'PENDING' ORDER BY received_at
 `
@@ -290,6 +374,36 @@ func (q *Queries) UnsettledSteps(ctx context.Context) ([]UnsettledStepsRow, erro
 	for rows.Next() {
 		var i UnsettledStepsRow
 		if err := rows.Scan(&i.WorkflowID, &i.Name, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const workflowsWithManyKeys = `-- name: WorkflowsWithManyKeys :many
+SELECT workflow_id, count(*)::int AS keys FROM api_idempotency_keys
+WHERE workflow_id IS NOT NULL GROUP BY workflow_id HAVING count(*) > 1
+`
+
+type WorkflowsWithManyKeysRow struct {
+	WorkflowID *uuid.UUID
+	Keys       int32
+}
+
+func (q *Queries) WorkflowsWithManyKeys(ctx context.Context) ([]WorkflowsWithManyKeysRow, error) {
+	rows, err := q.db.Query(ctx, workflowsWithManyKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WorkflowsWithManyKeysRow
+	for rows.Next() {
+		var i WorkflowsWithManyKeysRow
+		if err := rows.Scan(&i.WorkflowID, &i.Keys); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

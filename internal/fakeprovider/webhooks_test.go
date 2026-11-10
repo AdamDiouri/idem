@@ -289,3 +289,36 @@ func TestWebhook_RetryGoesToTheNextURL(t *testing.T) {
 	require.Len(t, b.all(), 1)
 	require.Equal(t, []string{asrv.URL, bsrv.URL}, p.Webhooks()[0].Targets)
 }
+
+// Slice 2.3b: chaos waits on the delivery log, so it must say which
+// deliveries are finished without succeeding.
+func TestGetWebhooks_ReportsGaveUp(t *testing.T) {
+	rcv := &receiver{}
+	p, url := webhookProvider(t, rcv, 8, true)
+	p.SetFaults(faults(fakeprovider.Rule{Endpoint: "webhooks", Mode: fakeprovider.ModeDropWebhook, Times: 1}))
+	post(t, url, "/payouts", "k1", payoutBody("mer_1", 9825))
+	var ds []fakeprovider.WebhookDelivery
+	require.Eventually(t, func() bool {
+		var err error
+		ds, err = fakeprovider.FetchWebhooks(context.Background(), url)
+		require.NoError(t, err)
+		return len(ds) == 1
+	}, 2*time.Second, 5*time.Millisecond)
+	require.True(t, ds[0].GaveUp)
+	require.False(t, ds[0].Delivered)
+}
+
+// Final review, minor 7: the chaos settle loop is bounded by its deadline only
+// if every read of the provider's oracle is bounded too.
+func TestFetchWebhooks_TimesOutOnAHungProvider(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	defer fakeprovider.SetFetchTimeout(200 * time.Millisecond)()
+
+	start := time.Now()
+	_, err := fakeprovider.FetchWebhooks(context.Background(), srv.URL)
+	require.Error(t, err)
+	require.Less(t, time.Since(start), 2*time.Second)
+}

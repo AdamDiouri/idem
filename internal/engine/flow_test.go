@@ -13,6 +13,7 @@ import (
 	"github.com/AdamDiouri/idem/internal/engine"
 	"github.com/AdamDiouri/idem/internal/failpoint"
 	"github.com/AdamDiouri/idem/internal/fakeprovider"
+	"github.com/AdamDiouri/idem/internal/testutil"
 	"github.com/AdamDiouri/idem/internal/workflow"
 )
 
@@ -151,10 +152,12 @@ func TestFlow_RefundRejectedNeedsAttention(t *testing.T) {
 	h := newHarness(t)
 	wf := submitTo(t, h, "cus_1", "mer_invalid_1")
 	h.drain(t, h.workerWith("w1", nil, h.chargeStep(), h.payoutStep()))
-	// The reference is immutable; plant the corruption with triggers disabled.
+	// The reference is immutable; plant the corruption with triggers disabled
+	// (as the owner: the application role may not).
 	ctx := context.Background()
-	tx, err := h.pool.Begin(ctx)
+	tx, err := testutil.NewOwnerPool(t, dsn).Begin(ctx)
 	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
 	_, err = tx.Exec(ctx, `SET LOCAL session_replication_role = replica`)
 	require.NoError(t, err)
 	_, err = tx.Exec(ctx, `UPDATE steps SET refund_charge_ref = 'ch_missing' WHERE workflow_id = $1 AND name = 'refund'`, wf)

@@ -122,7 +122,7 @@ make down
 When idem cannot finish a workflow without guessing about money, it parks it in `NEEDS_ATTENTION` and alerts. The [runbook](docs/runbooks/needs-attention.md) explains every parking reason and which command resolves it.
 
 ```bash
-export IDEM_DATABASE_URL="postgres://idem:${POSTGRES_PASSWORD}@localhost:5432/idem?sslmode=disable"   # after loading .env
+export IDEM_DATABASE_URL="postgres://idem_app_user:${IDEM_APP_DB_PASSWORD}@localhost:5432/idem?sslmode=disable"   # after loading .env
 idem admin list                       # what is parked, why, and its VERSION
 # every action below also takes --expect-version <VERSION from list>
 idem admin retry-step <step-id> --reason "provider recovered"  # same key: always safe
@@ -167,10 +167,11 @@ The chaos harness runs the real binaries as separate processes and does its best
 - **Infrastructure:** a throwaway Postgres container, the fake provider, **two API replicas** (`--apis`), 4 workers and 2 sweepers.
 - **Traffic:** misbehaving clients (impatient retries, double-clicks, reformatted retries, malformed bodies). Every request goes to the next replica in turn, so one payment's retries usually reach both.
 - **Webhooks:** the provider signs a webhook for every settled payout and rotates deliveries across the replicas, so its retries reach the *other* replica.
-- **Disruptions:** a seeded plan of `kill -9`, `SIGSTOP` beyond the lease, API restarts (one replica at a time), database restarts, provider faults, and the six **webhook faults** (duplicated, sent before the `202`, delayed, a stale contradiction, dropped, badly signed). In runs of a minute or more, the plan reserves a **webhook-fault block**: six back-to-back 8-second windows (5 seconds plus slack for timing drift), one fault each and nothing else, starting once traffic flows.
+- **Disruptions:** a seeded plan of `kill -9`, `SIGSTOP` beyond the lease, API restarts (one replica at a time), **`restart_all`** (every worker, sweeper and API replica gets `SIGTERM` at once and drains: a rolling deploy done badly, F26), database restarts, provider faults, and the six **webhook faults** (duplicated, sent before the `202`, delayed, a stale contradiction, dropped, badly signed). In runs of a minute or more, the plan reserves a **webhook-fault block**: six back-to-back 8-second windows (5 seconds plus slack for timing drift), one fault each and nothing else, starting once traffic flows.
 - **Crash failpoints** make processes `exit` mid-step, including `inbox_before_commit` on workers and `webhook_after_insert` on the API. A supervisor restarts them like Kubernetes would.
+- **Least privilege:** migrations run as the database owner; every idem process logs in as the restricted application user, so a missing grant fails the campaign.
 
-Afterwards it clears every fault, lets the system settle, and checks every invariant.
+Afterwards it clears every fault and lets the system settle: every workflow terminal or parked, and every webhook the provider queued delivered or given up. Then it checks every invariant.
 
 ```bash
 make chaos CHAOS_ARGS="--seed 1 --duration 90s"   # needs Docker
@@ -186,22 +187,23 @@ events executed: 33 (failed to apply: 0, skipped: 1); effective = met work in fl
 provider fault hits: … webhooks/bad_signature:22 webhooks/delay_webhook:17 webhooks/drop_webhook:2 …
 api replicas: 2 (requests api-0=… api-1=…; webhooks accepted api-0=… api-1=…, duplicates api-0=… api-1=…)
 failpoints fired: after_claim=22 after_provider_call=35 before_commit=40 inbox_before_commit=19 webhook_after_insert=25
-webhooks: … applied, … duplicates, … deferred
+webhooks: … applied, … duplicates, … deferred, … stale delivered (… ignored as stale), 0 in flight at the verdict
 outcomes: COMPENSATED=123 FAILED=44 NEEDS_ATTENTION=7 SUCCEEDED=710
 violations: 0
 ```
 
 **How to read the result:**
 - **`PASSED` requires all of:**
-  - zero invariant violations (I1–I10; any webhook `CONFLICT` is one, since the fake provider never truly contradicts itself)
+  - zero invariant violations (I1–I11). The webhook inbox is checked event by event against the provider's delivery log: every acknowledged event stored, none accepted on a forged signature alone, none the provider never sent, an "applied" event leaving a webhook attempt on its step, true events processed, and stale ones ignored as stale (or, on a payout still waiting, applied with what the provider says on a re-check, never with their own claim). Any webhook `CONFLICT` is a violation, since the fake provider never truly contradicts itself
   - every workflow terminal or parked, with no step left `RUNNING`/`IN_DOUBT`
   - no idempotency key that ever returned two different workflows
   - every workflow a client was told about exists in the database under the same ID
-  - no event that failed to apply
+  - no event that failed to apply, and no webhook delivery still in flight at the verdict
   - parking only for expected reasons
 - **A pass must be earned, not vacuous:**
   - every kind of disruption must have met work in flight (an *effective* event)
   - provider faults must actually have hit requests
+  - webhooks must actually have completed payouts (polling completes every payout even when webhooks are broken), and, in runs of a minute or more, the provider must have delivered reordered (stale) events (I10 judges how each was handled)
   - every webhook fault that was in force for at least 5 seconds while work was in flight (measured on the executed timeline) must actually have fired; in runs of a minute or more, **every** webhook fault must have had such a window and fired
   - every armed failpoint must actually have fired (failpoints name themselves when they do)
   - with several API replicas, every replica must have answered clients and accepted new webhooks, and, in runs of a minute or more, recognised duplicates (evidence of deduplication across replicas)
@@ -227,12 +229,13 @@ go test -tags chaos ./internal/chaos/   # 30s chaos campaign as a test (after ma
 
 | Variable | Default | Notes |
 |---|---|---|
-| `IDEM_DATABASE_URL` | (required) | Postgres connection URL |
+| `IDEM_DATABASE_URL` | (required) | Postgres connection URL. For `migrate`: the table owner. For everything else: a login in the restricted `idem_app` role, which cannot rewrite the ledger. idem never creates logins: after `idem migrate`, run `CREATE ROLE idem_app_user LOGIN PASSWORD '…' IN ROLE idem_app` (compose does it for you) |
 | `IDEM_API_TOKENS` | (required for `api`) | `client=token,...`; tokens at least 16 characters, unique |
 | `IDEM_HTTP_ADDR` | `:8080` | |
 | `IDEM_IDEMPOTENCY_LOCK_TIMEOUT` | `5s` | Max wait on a concurrent duplicate request before `409`; must be below the request timeout |
 | `IDEM_REQUEST_TIMEOUT` | `10s` | Deadline for all work in one request before `503 request_timeout`; must be below the write timeout |
 | `IDEM_HTTP_WRITE_TIMEOUT` | `15s` | |
+| `IDEM_SHUTDOWN_GRACE` (API) | `20s` | How long the API drains in-flight requests after SIGTERM; must be greater than the write timeout |
 | `IDEM_FEE_RATE_BPS` | `150` | Fee rate in basis points (0 to 10000) |
 | `IDEM_FEE_FIXED_CENTS` | `25` | Fixed fee in cents |
 | `IDEM_PROVIDER_WEBHOOK_SECRETS` | (none: endpoint off) | Secrets that verify `POST /webhooks/provider`: the current one first, then the previous one while rotating; each at least 16 characters, spaces trimmed |
@@ -252,13 +255,14 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_RETRY_CAP` | `5m` | Maximum retry delay; also caps a provider's `Retry-After` |
 | `IDEM_PROVIDER_KEY_RETENTION` | `24h` | How long the provider remembers idempotency keys |
 | `IDEM_KEY_RETENTION_MARGIN` | `1h` | In-doubt steps older than retention − margin are resolved by lookup, never by a new key |
-| `IDEM_SHUTDOWN_GRACE` | `15s` | How long an in-flight step may finish after SIGTERM; at least provider timeout + 2s |
+| `IDEM_SHUTDOWN_GRACE` (worker) | `15s` | How long an in-flight step may finish after SIGTERM; at least provider timeout + 2s |
 | `IDEM_STUCK_AFTER` | `15m` | Sweeper logs non-terminal workflows unchanged for this long |
 | `IDEM_SWEEP_INTERVAL` | `5s` | How often the sweeper reclaims expired leases |
 | `IDEM_CALLBACK_DEADLINE` | `10m` | How long an accepted payout waits for its result before workers poll it |
 | `IDEM_CALLBACK_POLL_CAP` | `1h` | Polls back off from `IDEM_RETRY_BASE` up to this; at least `IDEM_RETRY_BASE` |
 | `IDEM_CALLBACK_MAX_WAIT` | `72h` | Total wait since the provider accepted a payout before it is `callback_unresolved` (bank payouts take hours or days); longer than the deadline |
 | `IDEM_CALLBACK_MAX_POLLS` | `0` | Optional limit on polls per acceptance; `0` means none |
+| `IDEM_HOOK_MAX_FAILURES` | `3` | After this many failures of a step's bookkeeping hook (ledger posting, saga move), the step is `DEAD` with `hook_failed` (see the runbook) |
 | `IDEM_INBOX_ORPHAN_AFTER` | `1h` | A provider webhook that matches no payout this long is ignored as an orphan |
 | `IDEM_INBOX_RETENTION` | `720h` | The sweeper deletes processed and ignored provider events older than this; evidence and conflicts are kept |
 | `IDEM_WORKER_ID` | `hostname-pid` | |

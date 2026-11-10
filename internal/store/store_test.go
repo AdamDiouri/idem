@@ -40,7 +40,8 @@ func pgCode(t *testing.T, err error) string {
 
 func TestMigrate_UpDownUp(t *testing.T) {
 	ctx := context.Background()
-	pool := testutil.NewPool(t, dsn)
+	testutil.NewPool(t, dsn)              // empty tables
+	pool := testutil.NewOwnerPool(t, dsn) // migrations need the owner
 
 	require.NoError(t, store.MigrateDown(ctx, pool))
 	require.False(t, tableExists(t, pool, "workflows"))
@@ -110,7 +111,8 @@ func TestIsLockTimeout(t *testing.T) {
 // conservative pre-00008 meaning), not a failed migration.
 func TestMigrate_DownFrom00008WithAsyncRows(t *testing.T) {
 	ctx := context.Background()
-	pool := testutil.NewPool(t, dsn)
+	testutil.NewPool(t, dsn)              // empty tables
+	pool := testutil.NewOwnerPool(t, dsn) // migrations need the owner
 	_, err := pool.Exec(ctx, `
 		INSERT INTO workflows (id, client_id, type, status, input) VALUES
 		  ('01936f3e-8c2a-7b1e-9f00-0000000000a1', 'c', 'payment_payout', 'RUNNING', '{}'),
@@ -137,4 +139,48 @@ func TestMigrate_DownFrom00008WithAsyncRows(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM step_attempts WHERE outcome = 'IN_DOUBT'`).Scan(&n))
 	require.Equal(t, 2, n)
 	require.NoError(t, store.Migrate(ctx, pool), "and back up again")
+}
+
+// Slice 2.3b (I6): a key maps to one workflow and a workflow to one key, so a
+// replay bug that answered key B with workflow A cannot be stored.
+func TestIdempotencyKeys_OneKeyPerWorkflow(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.NewPool(t, dsn)
+	_, err := pool.Exec(ctx, `
+		INSERT INTO workflows (id, client_id, type, status, input)
+		VALUES ('01936f3e-8c2a-7b1e-9f00-0000000000c1', 'c', 'payment_payout', 'PENDING', '{}');
+		INSERT INTO api_idempotency_keys (client_id, key, request_fingerprint, workflow_id)
+		VALUES ('c', 'key-a', 'f', '01936f3e-8c2a-7b1e-9f00-0000000000c1');`)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `INSERT INTO api_idempotency_keys (client_id, key, request_fingerprint, workflow_id)
+		VALUES ('c', 'key-b', 'f', '01936f3e-8c2a-7b1e-9f00-0000000000c1')`)
+	require.Error(t, err)
+	require.Equal(t, "23505", pgCode(t, err))
+	require.Contains(t, err.Error(), "api_idempotency_keys_workflow_unique")
+}
+
+// Review focus: on a database that already maps two keys to one workflow the
+// migration fails loudly; it never drops a row.
+func TestMigrate_OneKeyPerWorkflowRefusesExistingDuplicates(t *testing.T) {
+	ctx := context.Background()
+	testutil.NewPool(t, dsn)              // empty tables
+	pool := testutil.NewOwnerPool(t, dsn) // migrations need the owner
+	require.NoError(t, store.MigrateDownTo(ctx, pool, 9))
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM api_idempotency_keys`)
+		require.NoError(t, store.Migrate(ctx, pool))
+	})
+	_, err := pool.Exec(ctx, `
+		INSERT INTO workflows (id, client_id, type, status, input)
+		VALUES ('01936f3e-8c2a-7b1e-9f00-0000000000c2', 'c', 'payment_payout', 'PENDING', '{}');
+		INSERT INTO api_idempotency_keys (client_id, key, request_fingerprint, workflow_id) VALUES
+		  ('c', 'key-a', 'f', '01936f3e-8c2a-7b1e-9f00-0000000000c2'),
+		  ('c', 'key-b', 'f', '01936f3e-8c2a-7b1e-9f00-0000000000c2');`)
+	require.NoError(t, err)
+	err = store.Migrate(ctx, pool)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "api_idempotency_keys_workflow_unique")
+	var n int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM api_idempotency_keys`).Scan(&n))
+	require.Equal(t, 2, n)
 }

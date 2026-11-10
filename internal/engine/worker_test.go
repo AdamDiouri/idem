@@ -366,7 +366,8 @@ func TestWorker_RunSurvivesStepErrors(t *testing.T) {
 }
 
 // Review finding: a panic in a completion hook must not kill the worker
-// (spec §6, F25). It rolls back like a hook error and takes the lease path.
+// (spec §6, F25). It rolls back like a hook error and is counted as one
+// (slice 2.3b): the provider acted, so the step is IN_DOUBT at once.
 func TestWorker_HookPanicIsRecovered(t *testing.T) {
 	h := newHarness(t)
 	wf := submit(t, h.pool, "cus_1")
@@ -378,10 +379,7 @@ func TestWorker_HookPanicIsRecovered(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "panic")
 	require.True(t, res.Claimed)
-	require.Equal(t, "RUNNING", h.chargeStatus(t, wf), "rolled back; recovered via lease expiry")
-
-	time.Sleep(pastLease)
-	require.Equal(t, int64(1), h.reclaim(t))
+	require.Equal(t, "IN_DOUBT", h.chargeStatus(t, wf), "rolled back; counted as a hook failure, no lease wait")
 	require.Equal(t, "succeeded", h.runOnce(t, h.worker("w2", step)).Outcome)
 }
 
@@ -467,8 +465,10 @@ func TestWorker_InFlightConflictRetriesSoon(t *testing.T) {
 	}, step)
 
 	require.Equal(t, "in_doubt", h.runOnce(t, w).Outcome)
+	// Equal jitter draws [500ms, 1s] at completion; now() is read a little
+	// later, so allow slack below 500ms. Still far from the 1h backoff.
 	require.True(t, scalar[bool](t, h.pool,
-		`SELECT run_after BETWEEN now() + interval '500 milliseconds' AND now() + interval '2 seconds' FROM steps WHERE workflow_id = $1`, wf))
+		`SELECT run_after BETWEEN now() + interval '400 milliseconds' AND now() + interval '2 seconds' FROM steps WHERE workflow_id = $1`, wf))
 }
 
 func TestWorker_ShutdownGraceCancelsStuckStep(t *testing.T) {

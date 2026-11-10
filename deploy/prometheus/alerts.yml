@@ -16,7 +16,7 @@ groups:
           runbook: docs/runbooks/needs-attention.md#idemworkflowsneedattention
 
       - alert: IdemMoneyMayHaveMoved
-        expr: sum(max by (reason) (idem_parked_workflows{job="idem-sweeper", reason!="attempts_exhausted_no_effect"})) > 0
+        expr: sum(max by (reason) (idem_parked_workflows{job="idem-sweeper", reason!~"attempts_exhausted_no_effect|hook_failed_no_effect"})) > 0
         for: 0m
         labels:
           severity: page

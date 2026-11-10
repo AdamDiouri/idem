@@ -200,14 +200,14 @@ The columns `callback_deadline` and status `AWAITING_CALLBACK` already exist fro
 
 | ID | Failure | Mechanism | Expected | Injected by |
 |---|---|---|---|---|
-| F15 | Duplicate provider webhook | Inbox primary key | Applied once | `dup_webhook`; exercised in chaos (2.3) |
-| F16 | Webhook before our `AWAITING_CALLBACK` commit | Row stays pending, retried | Applied once the step is ready | `fast_webhook`; exercised in chaos (2.3) |
-| F17 | Contradictory / reordered webhook | Never flip; `CONFLICT` + alert | Loud, not wrong | `reorder`; exercised in chaos (2.3) |
+| F15 | Duplicate provider webhook | Inbox primary key | Applied once | `dup_webhook`; exercised in chaos (2.3), asserted by I10/I11 (2.3b) |
+| F16 | Webhook before our `AWAITING_CALLBACK` commit | Row stays pending, retried | Applied once the step is ready | `fast_webhook`; exercised in chaos (2.3), asserted by I10/I11 (2.3b) |
+| F17 | Contradictory / reordered webhook | Never flip; `CONFLICT` + alert | Loud, not wrong | `reorder`; exercised in chaos (2.3), asserted by I10/I11 (2.3b) |
 | F18 | Webhook never arrives | Deadline → worker polls | Resolved by polling; bounded, then `callback_unresolved` | `drop_webhook`; exercised in chaos (2.3) |
-| F19 | Forged or replayed webhook | Signature + timestamp | `400`, nothing stored | `bad_signature`, unit tests; exercised in chaos (2.3) |
+| F19 | Forged or replayed webhook | Signature + timestamp | `400`, nothing stored | `bad_signature`, unit tests; exercised in chaos (2.3), asserted by I10/I11 (2.3b) |
 | F28 | Crash after storing a webhook, before `200` | Provider retries; dedup | Applied once | failpoint `webhook_after_insert`; exercised in chaos (2.3) |
 | F29 | Crash while applying a webhook | Transaction rolls back; row still pending | Applied once later | failpoint `inbox_before_commit`, kills; exercised in chaos (2.3) |
-| F30 | Webhook and poll race | Same CAS apply | One applies, the other no-ops | `delay_webhook` + short deadline; exercised in chaos (2.3) |
+| F30 | Webhook and poll race | Same CAS apply | One applies, the other no-ops | `delay_webhook` + short deadline; exercised in chaos (2.3), asserted by I10/I11 (2.3b) |
 | F31 | Shop down or slow | Relay backoff; `DEAD` after the budget | Delivered when it recovers; loud otherwise | fake shop `down`, `slow` |
 | F32 | Relay crash after the shop's `2xx`, before marking delivered | At least once + event ID | The shop sees it twice, processes it once | failpoint `relay_after_send`, `ack_after_timeout` |
 | F33 | Outcome committed but the relay never runs | Outbox row durable | Delivered when a relay starts | kill all relays |
@@ -220,7 +220,8 @@ The columns `callback_deadline` and status `AWAITING_CALLBACK` already exist fro
 | **I4** (extended; chaos since 2.3) | After quiescence: no step `AWAITING_CALLBACK`, no inbox row `PENDING`, no outbox row `PENDING` | DB |
 | **I8** | Every terminal workflow has exactly one outbox event, of the matching type; no non-terminal workflow has one | DB |
 | **I9** | The fake shop's deduplicated view equals idem's terminal workflows: same set, same outcomes. No event the shop saw contradicts the database | Fake shop `/_seen` × DB |
-| **I10** (checked by every chaos run since 2.3) | After quiescence, every inbox row is `PROCESSED`, `IGNORED` (stale or orphan, counted) or `EVIDENCE` (attached to a parked workflow). `CONFLICT` appears only if the provider's state truly contradicts idem's, which the fake provider never does, so chaos expects none. | DB × fake provider fault log |
+| **I10** (checked by every chaos run since 2.3; tightened in 2.3b) | After quiescence, checked event by event against the fake provider's delivery log: a true event ends `PROCESSED`; a stale (reordered) one ends `IGNORED` as stale, or `PROCESSED` when it reached a payout still waiting (applied with the provider's re-checked state, never its own claim; I3 and I7 judge the money); either may be `EVIDENCE` only on a workflow in `NEEDS_ATTENTION`. Orphan, malformed, unsupported or mismatch notes, and a true event dismissed as stale, are violations: the honest fake provider never causes them. `CONFLICT` appears only if the provider's state truly contradicts idem's, which the fake provider never does, so chaos expects none. | DB × fake provider delivery log (`/_webhooks`) |
+| **I11** (2.3b) | Every event the provider saw acknowledged (2xx) is in the inbox; no event was accepted on a wrongly signed delivery alone; the inbox holds no event the provider never sent. Chaos also requires that webhooks completed payouts and (runs ≥ 1 min) that the provider delivered reordered events, because polling completes every payout even when webhooks are broken. | DB × fake provider delivery log |
 | **Recon** | `idem reconcile` over the campaign window: zero discrepancies on non-parked workflows; parked workflows' discrepancies match the oracle | Reconciliation tables × oracle |
 
 ## 10. Delivery slices

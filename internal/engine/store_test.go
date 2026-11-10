@@ -33,8 +33,9 @@ type stubStep struct {
 	successCalls  int
 	failureCalls  int
 	successErr    error
-	successErrFor int // return successErr for the first N OnSuccess calls
-	panicFor      int // panic in the first N OnSuccess calls
+	successErrFor int   // return successErr for the first N OnSuccess calls
+	failureErr    error // returned by every OnPermanentFailure call
+	panicFor      int   // panic in the first N OnSuccess calls
 	execute       func(context.Context, engine.ClaimedStep) provider.Outcome
 }
 
@@ -75,7 +76,7 @@ func (s *stubStep) OnPermanentFailure(context.Context, *db.Queries, engine.Claim
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failureCalls++
-	return nil
+	return s.failureErr
 }
 
 func submit(t *testing.T, pool *pgxpool.Pool, customer string) uuid.UUID {

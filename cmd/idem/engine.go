@@ -114,6 +114,7 @@ func workerCmd() *cobra.Command {
 				PollBackoff:        engine.Backoff{Base: e.cfg.RetryBase, Cap: e.cfg.CallbackPollCap},
 				MaxWait:            e.cfg.CallbackMaxWait,
 				MaxPolls:           e.cfg.CallbackMaxPolls,
+				HookMaxFailures:    e.cfg.HookMaxFailures,
 				ShutdownGrace:      e.cfg.ShutdownGrace,
 				Logger:             e.logger,
 			})
@@ -175,6 +176,15 @@ func checkCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			deliveries, err := fakeprovider.FetchWebhooks(e.ctx, e.cfg.ProviderURL)
+			if err != nil {
+				return err
+			}
+			webhookViolations, err := invariants.CheckWebhooks(e.ctx, e.pool, deliveries, time.Now().Add(-e.cfg.InboxRetention))
+			if err != nil {
+				return err
+			}
+			violations = append(violations, webhookViolations...)
 
 			attention, err := invariants.NeedsAttention(e.ctx, e.pool)
 			if err != nil {

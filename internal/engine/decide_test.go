@@ -166,3 +166,13 @@ func TestDecidePoll_TimeBudgetAndPollCap(t *testing.T) {
 	r = decidePoll(waiting(3, time.Minute), provider.Outcome{Class: provider.Ambiguous}, pb, PollLimits{MaxPolls: 3, MaxWait: 72 * time.Hour}, true)
 	require.Equal(t, ResultDead, r.Kind, "an optional poll count limit still applies")
 }
+
+// Slice 2.3b (review R12): an ambiguous answer that carries Retry-After (a
+// rate-limited lookup) waits at least that long, as a no-effect 429 does.
+func TestDecide_InDoubtHonoursRetryAfter(t *testing.T) {
+	b := Backoff{Base: time.Second, Cap: 5 * time.Minute, Rand: func() float64 { return 0.5 }}
+	s := ClaimedStep{Attempt: 1, MaxAttempts: 8, PriorStatus: "IN_DOUBT"}
+	r := decide(s, provider.Outcome{Class: provider.Ambiguous, RetryAfter: 2 * time.Minute}, b, time.Second, callbackDeadline, false)
+	require.Equal(t, ResultInDoubt, r.Kind)
+	require.Equal(t, 2*time.Minute, r.RetryDelay)
+}

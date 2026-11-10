@@ -27,6 +27,7 @@ func healthy() Report {
 		Restarts:  map[string]int{"w0": 1},
 		FaultHits: map[string]int{"charges/error_before_effect": 3},
 		Outcomes:  map[string]int{"SUCCEEDED": 1},
+		Webhooks:  WebhookCounts{Applied: 1},
 	}
 }
 

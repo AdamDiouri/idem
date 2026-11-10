@@ -34,8 +34,7 @@ RETURNING s.id, s.workflow_id, s.name, s.idempotency_key, s.lease_epoch, s.attem
           s.max_attempts, s.refund_charge_ref, s.provider_ref,
           (EXTRACT(EPOCH FROM (now() - s.first_attempted_at)) * 1000)::bigint AS key_age_ms,
           w.input,
-          EXISTS (SELECT 1 FROM step_attempts a
-                  WHERE a.step_id = s.id AND a.kind = 'send' AND a.outcome IN ('IN_DOUBT', 'ABANDONED', 'DEAD'))::bool AS send_doubt,
+          step_send_doubt(s.id)::bool AS send_doubt,
           -- Polls since the latest send, this one included: the poll budget is
           -- per acceptance, so an operator's retry (a re-send) gets a fresh one.
           ((SELECT count(*) FROM step_attempts a
@@ -189,3 +188,9 @@ SELECT
   COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(received_at))) * 1000 FROM webhook_inbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms,
   (SELECT count(*) FROM webhook_inbox WHERE status = 'CONFLICT')::int AS conflicts_open,
   (SELECT count(*) FROM steps WHERE status = 'AWAITING_CALLBACK' AND callback_deadline < now() - interval '5 minutes')::int AS callbacks_overdue;
+
+-- name: IncrementHookFailures :one
+-- Fenced like CompleteStep: only the current lease holder counts a failure.
+UPDATE steps SET hook_failures = hook_failures + 1
+WHERE id = sqlc.arg(id) AND lease_epoch = sqlc.arg(lease_epoch) AND status = 'RUNNING'
+RETURNING hook_failures;

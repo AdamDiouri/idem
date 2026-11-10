@@ -47,3 +47,27 @@ WHERE i.status = 'CONFLICT' ORDER BY i.received_at;
 
 -- name: PendingInboxEvents :many
 SELECT provider_event_id, received_at FROM webhook_inbox WHERE status = 'PENDING' ORDER BY received_at;
+
+-- name: InboxRowsForCheck :many
+-- Every inbox row with the status of the workflow it was tied to (if any),
+-- for checking against the provider's delivery log (I10, I11).
+-- step_applied: the event's step records an attempt of kind webhook, the
+-- trace the apply path leaves (so "applied" cannot be a label alone).
+SELECT i.provider_event_id, i.status, COALESCE(i.note, '')::text AS note, w.status AS workflow_status,
+       EXISTS (SELECT 1 FROM step_attempts a WHERE a.step_id = i.step_id AND a.kind = 'webhook')::bool AS step_applied,
+       -- an operator acted on the workflow (its evidence outlives the parking)
+       EXISTS (SELECT 1 FROM admin_actions x WHERE x.workflow_id = s.workflow_id)::bool AS operator_acted
+FROM webhook_inbox i
+LEFT JOIN steps s ON s.id = i.step_id
+LEFT JOIN workflows w ON w.id = s.workflow_id
+ORDER BY i.received_at;
+
+-- name: WorkflowsWithManyKeys :many
+SELECT workflow_id, count(*)::int AS keys FROM api_idempotency_keys
+WHERE workflow_id IS NOT NULL GROUP BY workflow_id HAVING count(*) > 1;
+
+-- name: ParkedStepReasons :many
+-- The DEAD steps of workflows that need attention, with why they died.
+SELECT s.workflow_id, s.name, COALESCE(s.dead_reason, '')::text AS dead_reason
+FROM steps s JOIN workflows w ON w.id = s.workflow_id
+WHERE w.status = 'NEEDS_ATTENTION' AND s.status = 'DEAD';

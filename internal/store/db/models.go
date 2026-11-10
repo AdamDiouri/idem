@@ -72,6 +72,7 @@ type Step struct {
 	DeadReason       *string
 	RefundChargeRef  *string
 	PollCount        int32
+	HookFailures     int32
 }
 
 type StepAttempt struct {

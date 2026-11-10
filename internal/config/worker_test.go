@@ -16,7 +16,7 @@ func setWorkerRequired(t *testing.T) {
 	for _, k := range []string{
 		"IDEM_API_TOKENS", "IDEM_PROVIDER_TIMEOUT", "IDEM_LEASE_TTL", "IDEM_POLL_INTERVAL",
 		"IDEM_RETRY_BASE", "IDEM_RETRY_CAP", "IDEM_PROVIDER_KEY_RETENTION", "IDEM_KEY_RETENTION_MARGIN",
-		"IDEM_SHUTDOWN_GRACE", "IDEM_STUCK_AFTER", "IDEM_METRICS_ADDR", "IDEM_CALLBACK_DEADLINE", "IDEM_CALLBACK_MAX_POLLS",
+		"IDEM_SHUTDOWN_GRACE", "IDEM_STUCK_AFTER", "IDEM_METRICS_ADDR", "IDEM_CALLBACK_DEADLINE", "IDEM_CALLBACK_MAX_POLLS", "IDEM_HOOK_MAX_FAILURES",
 		"IDEM_CALLBACK_MAX_WAIT", "IDEM_CALLBACK_POLL_CAP", "IDEM_INBOX_ORPHAN_AFTER", "IDEM_INBOX_RETENTION",
 		"IDEM_SWEEP_INTERVAL", "IDEM_WORKER_ID", "IDEM_FAILPOINTS", "IDEM_LOG_LEVEL",
 	} {
@@ -37,6 +37,7 @@ func TestLoadWorker_Defaults(t *testing.T) {
 	require.Equal(t, 24*time.Hour, cfg.ProviderKeyRetention)
 	require.Equal(t, time.Hour, cfg.KeyRetentionMargin)
 	require.Equal(t, 15*time.Second, cfg.ShutdownGrace)
+	require.Equal(t, 3, cfg.HookMaxFailures)
 	require.Equal(t, 15*time.Minute, cfg.StuckAfter)
 	require.Equal(t, 5*time.Second, cfg.SweepInterval)
 	require.Equal(t, "", cfg.WorkerID)
@@ -83,6 +84,7 @@ func TestLoadWorker_Invalid(t *testing.T) {
 		{"bad metrics address", "IDEM_METRICS_ADDR", "nope", "IDEM_METRICS_ADDR"},
 		{"zero callback deadline", "IDEM_CALLBACK_DEADLINE", "0s", "IDEM_CALLBACK_DEADLINE"},
 		{"negative callback polls", "IDEM_CALLBACK_MAX_POLLS", "-1", "IDEM_CALLBACK_MAX_POLLS"},
+		{"zero hook failures", "IDEM_HOOK_MAX_FAILURES", "0", "IDEM_HOOK_MAX_FAILURES"},
 		{"zero callback max wait", "IDEM_CALLBACK_MAX_WAIT", "0s", "IDEM_CALLBACK_MAX_WAIT"},
 		{"max wait not above deadline", "IDEM_CALLBACK_MAX_WAIT", "10m", "IDEM_CALLBACK_MAX_WAIT"},
 		{"poll cap below retry base", "IDEM_CALLBACK_POLL_CAP", "1s", "IDEM_CALLBACK_POLL_CAP"},

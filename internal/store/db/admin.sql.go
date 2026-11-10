@@ -273,7 +273,7 @@ func (q *Queries) ProviderRefInUse(ctx context.Context, arg ProviderRefInUsePara
 const resetStepForRetry = `-- name: ResetStepForRetry :execrows
 UPDATE steps
 SET status = $1::text, max_attempts = attempt_count + $2::int,
-    dead_reason = NULL, last_error = NULL,
+    dead_reason = NULL, last_error = NULL, hook_failures = 0,
     run_after = now(), lease_epoch = lease_epoch + 1, lease_owner = NULL, lease_expires_at = NULL
 WHERE id = $3 AND status IN ('DEAD', 'FAILED_PERMANENT')
 `
@@ -318,14 +318,11 @@ func (q *Queries) ResolveConflict(ctx context.Context, providerEventID string) (
 }
 
 const stepHadInDoubtAttempt = `-- name: StepHadInDoubtAttempt :one
-SELECT EXISTS (
-  SELECT 1 FROM step_attempts
-  WHERE step_id = $1 AND kind = 'send' AND outcome IN ('IN_DOUBT', 'ABANDONED')
-)::bool AS had
+SELECT step_send_doubt($1)::bool AS had
 `
 
-// Whether any SEND attempt of the step may have moved money (ambiguous or
-// abandoned). Polls send nothing, so they never count (design D17).
+// Whether any SEND attempt of the step may have moved money: the one shared
+// definition (migration 00012). Polls send nothing, so they never count (D17).
 func (q *Queries) StepHadInDoubtAttempt(ctx context.Context, stepID uuid.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, stepHadInDoubtAttempt, stepID)
 	var had bool

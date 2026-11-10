@@ -47,8 +47,13 @@ type WorkerOptions struct {
 	// ShutdownGrace is how long the in-flight step may keep running after Run's
 	// context is cancelled.
 	ShutdownGrace time.Duration
-	Logger        *slog.Logger
-	Metrics       *metrics.Metrics // nil disables metrics
+	// HookMaxFailures is how many times a step's hook may fail before the step
+	// is DEAD with hook_failed. Zero means DefaultHookMaxFailures.
+	HookMaxFailures int
+	Logger          *slog.Logger
+
+	beforeRecordHookFailure func()           // test seam: after a hook failed, before it is recorded
+	Metrics                 *metrics.Metrics // nil disables metrics
 }
 
 // RunResult describes one RunOnce call.
@@ -150,6 +155,34 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 		w.opts.Metrics.ObserveAttempt(s.Name, "fenced")
 		log.Warn("lease lost before completion; result discarded", "provider_class", out.Class.String())
 		return RunResult{Claimed: true, StepID: s.ID, Outcome: "fenced"}, nil
+	}
+	if err != nil && countableHookError(err) {
+		if w.opts.beforeRecordHookFailure != nil {
+			w.opts.beforeRecordHookFailure()
+		}
+		delay := w.opts.Backoff.Delay(s.Attempt)
+		if s.PriorStatus == string(ResultAwaitingCallback) {
+			delay = pollDelay(w.opts.PollBackoff, s) // a poll waits on the poll schedule
+		}
+		dead, recErr := RecordHookFailure(completeCtx, w.pool, s, r, err, w.opts.HookMaxFailures, delay)
+		switch {
+		case errors.Is(recErr, ErrFenced):
+			w.opts.Metrics.ObserveAttempt(s.Name, "fenced")
+			log.Warn("lease lost before the hook failure was recorded; result discarded", "outcome", "fenced", "hook_error", err.Error())
+			return RunResult{Claimed: true, StepID: s.ID, Outcome: "fenced"}, nil
+		}
+		w.opts.Metrics.ObserveAttempt(s.Name, "error")
+		switch {
+		case recErr != nil:
+			log.Error("step hook failed; could not record it, the step will be recovered when its lease expires",
+				"error", err, "record_error", recErr)
+		case dead:
+			log.Error("step hook kept failing; step is DEAD and its workflow needs attention",
+				"dead_reason", DeadHookFailed, "money_may_have_moved", true, "error", err)
+		default:
+			log.Error("step hook failed; the step will be retried", "error", err)
+		}
+		return RunResult{Claimed: true, StepID: s.ID}, err
 	}
 	if err != nil {
 		w.opts.Metrics.ObserveAttempt(s.Name, "error")

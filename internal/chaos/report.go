@@ -70,8 +70,11 @@ type Report struct {
 	Liveness        []invariants.Violation `json:"liveness"`
 	Restarts        map[string]int         `json:"restarts"` // process → crash restarts
 	SettleTime      time.Duration          `json:"settle_time"`
-	Passed          bool                   `json:"passed"`
-	Reasons         []string               `json:"reasons"`
+	// WebhooksInFlight counts provider webhooks neither delivered nor given
+	// up when the settle phase ended: the inbox was judged incomplete.
+	WebhooksInFlight int      `json:"webhooks_in_flight"`
+	Passed           bool     `json:"passed"`
+	Reasons          []string `json:"reasons"`
 }
 
 // Evaluate sets Passed and Reasons. A run passes only if every check holds AND
@@ -87,6 +90,9 @@ func (r *Report) Evaluate() {
 	}
 	if n := len(r.Liveness); n > 0 {
 		add("%d workflows or steps did not settle (I4)", n)
+	}
+	if n := r.WebhooksInFlight; n > 0 {
+		add("%d webhook deliveries still in flight at the verdict", n)
 	}
 	if n := len(r.Clients.Conflicts); n > 0 {
 		add("%d idempotency keys returned two different workflows", n)
@@ -164,6 +170,14 @@ func (r *Report) Evaluate() {
 		case !armedWebhook[mode] && r.Config.Duration >= time.Minute:
 			add("vacuous: webhook fault %s never had a real window (in force %s while work was in flight)", mode, minFaultWindow)
 		}
+	}
+	// Polling completes payouts without webhooks, so the webhook path must
+	// show it did real work, not merely that faults were drawn.
+	if r.Webhooks.Applied == 0 {
+		add("vacuous: no webhook completed a payout")
+	}
+	if r.Config.Duration >= time.Minute && r.Webhooks.StaleDelivered == 0 {
+		add("vacuous: no reordered webhook was delivered")
 	}
 	if effective[SetProviderFaults] > 0 && hits == 0 {
 		add("vacuous: provider faults were set but never fired")
@@ -272,7 +286,8 @@ func (r *Report) Text() string {
 	}
 	fmt.Fprintf(&b, "fenced commits: %d\nin-doubt resolved: %d\n", r.FencedCommits, r.InDoubtResolved)
 	fmt.Fprintf(&b, "callback polls: %d (payouts that waited: %d)\n", r.CallbackPolls, r.PayoutsWaited)
-	fmt.Fprintf(&b, "webhooks: %d applied, %d duplicates, %d deferred\n", r.Webhooks.Applied, r.Webhooks.Duplicates, r.Webhooks.Deferred)
+	fmt.Fprintf(&b, "webhooks: %d applied, %d duplicates, %d deferred, %d stale delivered (%d ignored as stale), %d in flight at the verdict\n",
+		r.Webhooks.Applied, r.Webhooks.Duplicates, r.Webhooks.Deferred, r.Webhooks.StaleDelivered, r.Webhooks.StaleIgnored, r.WebhooksInFlight)
 
 	fmt.Fprintf(&b, "crash restarts:\n")
 	for _, name := range slices.Sorted(maps.Keys(r.Restarts)) {
@@ -325,12 +340,19 @@ func (r *Report) Write(dir string) error {
 	return os.WriteFile(filepath.Join(dir, "report.txt"), []byte(r.Text()), 0o644) //nolint:gosec // report file
 }
 
-// WebhookCounts summarise the inbox after a run: events applied to a waiting
-// payout, duplicates absorbed, and events that needed more than one attempt.
+// WebhookCounts summarise the inbox after a run: payouts completed by a
+// webhook (counted from the steps' webhook attempts, not the inbox's own
+// label), duplicates absorbed, and events that needed more than one attempt.
 type WebhookCounts struct {
 	Applied    int `json:"applied"`
 	Duplicates int `json:"duplicates"`
 	Deferred   int `json:"deferred"`
+	// StaleIgnored counts reordered (stale) events recognised as stale;
+	// StaleDelivered counts every stale event the provider delivered, whatever
+	// its correct outcome (ignored, or applied with the re-checked state on a
+	// payout still waiting): I10 judges each one.
+	StaleIgnored   int `json:"stale_ignored"`
+	StaleDelivered int `json:"stale_delivered"`
 }
 
 // armedFailpoints lists the failpoint names in comma-separated specs

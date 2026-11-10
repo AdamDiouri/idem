@@ -366,7 +366,8 @@ Retry policy: exponential backoff with **full jitter** — `delay = rand(0, min(
 
 - **Double-entry, append-only.** Amounts are signed `bigint` in minor units (cents): debits positive, credits negative. Every ledger transaction must sum to zero.
 - Enforced by a `DEFERRABLE INITIALLY DEFERRED` constraint trigger that checks the sum at `COMMIT`.
-- **Immutability:** the application's DB role has no `UPDATE`/`DELETE` on ledger tables. Corrections are new reversing transactions.
+- **Immutability, by privilege (built in slice 2.3b):** migrations run as the table owner; the API, workers and sweepers log in as a member of the `idem_app` role, which may `SELECT` and `INSERT` on the ledger tables but has no `UPDATE`, `DELETE` or `TRUNCATE` (migration 00013 defines `idem_app`; the login itself is infrastructure: compose creates it from `deploy/postgres/initdb`, an operator with `CREATE ROLE … LOGIN IN ROLE idem_app`). Row triggers also refuse `UPDATE`/`DELETE`, as a second layer that even the owner meets. Corrections are new reversing transactions.
+- **No empty transactions:** a second deferred constraint trigger rejects a ledger transaction with no entries at `COMMIT` (it would otherwise pass the balance check and record nothing).
 - **Exactly-once posting:** `UNIQUE (step_id, kind)` on `ledger_transactions` — a second attempt to post for the same step fails loudly instead of double-counting.
 - Balances are computed with `SUM()` in M1 (no cached balance columns to drift).
 - **Currency:** EUR only in M1. Every entry still carries a `currency` column (constrained to `'EUR'`) so multi-currency later is a constraint change, not a schema rewrite.
@@ -448,9 +449,9 @@ The heart of the design. Every row should eventually map to at least one automat
 | F21 | Refund keeps failing | Up to 20 attempts → `DEAD` | `NEEDS_ATTENTION` + alert | provider fault |
 | F22 | Retries exhausted on any step | `DEAD` | `NEEDS_ATTENTION`; alert says whether money may have moved | unit |
 | F23 | `IN_DOUBT` key older than provider retention | Lookup by key; if unknown, `DEAD` | Never retried with a new key | short retention in test |
-| F24 | Clock skew between workers | Leases use DB `now()` only | No effect | review + unit |
+| F24 | Clock skew between workers | Leases use DB `now()` only | No effect | static test `TestLeaseQueriesUseDatabaseClock`: no query touching a lease or schedule takes a time from Go (2.3b) |
 | F25 | Panic inside step handler | Recovered → `AMBIGUOUS` → `IN_DOUBT` | Retried; eventually `DEAD` if persistent | unit |
-| F26 | Rolling deploy (SIGTERM) | Graceful drain; leftovers via lease path | No loss | chaos: restart all |
+| F26 | Rolling deploy (SIGTERM) | Graceful drain; leftovers via lease path | No loss | chaos event `restart_all`: every worker, sweeper and API replica restarted at once during traffic (2.3b) |
 | F27 | Engine bug mints a fresh key on retry | Provider performs a second effect | **Caught by invariant I1** (oracle counts effects per workflow, not per key) | chaos |
 
 ---
@@ -461,11 +462,12 @@ The heart of the design. Every row should eventually map to at least one automat
 |---|---|---|
 | **I1** | Per workflow, the provider performed ≤ 1 charge, ≤ 1 payout, ≤ 1 refund. | Provider effects oracle (counts by `workflow_id` metadata, **not** by key) |
 | **I2** | Every ledger transaction sums to 0; all entries sum to 0. | DB |
-| **I3** | Ledger agrees with provider: each provider effect has exactly one posting and vice versa. | DB × oracle (reconciliation) |
+| **I3** | Ledger agrees with provider: each provider effect has exactly one posting and vice versa. A `NEEDS_ATTENTION` workflow is exempt only while its outcome is genuinely unknown (a step parked in doubt); one parked because the provider definitively did nothing (`permanent_after_in_doubt`, `attempts_exhausted_no_effect`) must match exactly. | DB × oracle (reconciliation) |
 | **I4** | After faults stop and a quiescence period, no workflow is `PENDING`/`RUNNING`/`COMPENSATING` and no step is `RUNNING`/`IN_DOUBT`/`AWAITING_CALLBACK`. | DB |
 | **I5** | No payout exists for a workflow without a successful charge. | Oracle |
 | **I6** | Every inbound idempotency key maps to exactly one workflow. | DB |
-| **I7** | `SUCCEEDED` ⇒ charge+payout effects at provider; `COMPENSATED` ⇒ charge+refund, no payout; `FAILED` ⇒ no effects. | DB × oracle |
+| **I7** | `SUCCEEDED` ⇒ charge+payout effects at provider; `COMPENSATED` ⇒ charge+refund of the same amount, no payout; `FAILED` ⇒ no effects; `NEEDS_ATTENTION` with the payout parked as `permanent_after_in_doubt` ⇒ the charge only. | DB × oracle |
+| **I8–I11** | Milestone 2: outbox, shop view, webhook inbox, webhook acknowledgement. See the [M2 design](superpowers/specs/2026-11-10-milestone-2-design.md) §9. | DB × oracles |
 
 `NEEDS_ATTENTION` workflows are allowed by I4 but listed in the report — a run that produces many of them is a design smell even if no invariant breaks.
 

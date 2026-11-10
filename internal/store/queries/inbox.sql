@@ -30,8 +30,7 @@ SELECT s.id, s.workflow_id, s.name, s.status, s.dead_reason, s.idempotency_key, 
        s.refund_charge_ref, s.lease_epoch, s.attempt_count, s.poll_count, s.max_attempts,
        w.status AS workflow_status, w.input,
        (NOT EXISTS (SELECT 1 FROM steps o WHERE o.workflow_id = s.workflow_id AND o.created_at > s.created_at))::bool AS newest,
-       EXISTS (SELECT 1 FROM step_attempts a
-               WHERE a.step_id = s.id AND a.kind = 'send' AND a.outcome IN ('IN_DOUBT', 'ABANDONED', 'DEAD'))::bool AS send_doubt
+       step_send_doubt(s.id)::bool AS send_doubt
 FROM steps s JOIN workflows w ON w.id = s.workflow_id
 WHERE s.provider_ref = sqlc.arg(payout_id)::text OR s.idempotency_key = sqlc.arg(idempotency_key)::text
 ORDER BY (s.provider_ref IS NOT DISTINCT FROM sqlc.arg(payout_id)::text) DESC, s.generation DESC
@@ -43,8 +42,7 @@ SELECT s.id, s.workflow_id, s.name, s.status, s.dead_reason, s.idempotency_key, 
        s.refund_charge_ref, s.lease_epoch, s.attempt_count, s.poll_count, s.max_attempts,
        w.status AS workflow_status, w.input,
        (NOT EXISTS (SELECT 1 FROM steps o WHERE o.workflow_id = s.workflow_id AND o.created_at > s.created_at))::bool AS newest,
-       EXISTS (SELECT 1 FROM step_attempts a
-               WHERE a.step_id = s.id AND a.kind = 'send' AND a.outcome IN ('IN_DOUBT', 'ABANDONED', 'DEAD'))::bool AS send_doubt
+       step_send_doubt(s.id)::bool AS send_doubt
 FROM steps s JOIN workflows w ON w.id = s.workflow_id
 WHERE s.id = sqlc.arg(id)
 FOR UPDATE OF s, w;

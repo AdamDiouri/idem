@@ -24,8 +24,6 @@ import (
 	"github.com/AdamDiouri/idem/internal/workflow"
 )
 
-const shutdownGrace = 10 * time.Second
-
 func main() {
 	os.Exit(runIdem(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -146,13 +144,14 @@ func apiCmd() *cobra.Command {
 				ReadTimeout:       10 * time.Second,
 				WriteTimeout:      cfg.HTTPWriteTimeout,
 			}
-			return serve(ctx, srv, logger)
+			return serve(ctx, srv, logger, cfg.ShutdownGrace)
 		},
 	}
 }
 
-// serve runs srv until ctx is cancelled, then drains in-flight requests.
-func serve(ctx context.Context, srv *http.Server, logger *slog.Logger) error {
+// serve runs srv until ctx is cancelled, then drains in-flight requests for
+// up to grace.
+func serve(ctx context.Context, srv *http.Server, logger *slog.Logger, grace time.Duration) error {
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("api listening", "addr", srv.Addr)
@@ -165,8 +164,8 @@ func serve(ctx context.Context, srv *http.Server, logger *slog.Logger) error {
 	case <-ctx.Done():
 	}
 
-	logger.Info("shutting down", "grace", shutdownGrace.String())
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+	logger.Info("shutting down", "grace", grace.String())
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("graceful shutdown: %w", err)
