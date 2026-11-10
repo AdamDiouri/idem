@@ -87,6 +87,10 @@ const (
 	// DeadCallbackUnresolved: an accepted request was still unsettled (or
 	// unpollable) after every allowed poll. It may have moved money.
 	DeadCallbackUnresolved = "callback_unresolved"
+	// DeadHookFailed: the provider reported success or a refusal, but the
+	// step's hook (ledger posting, saga move) kept failing. The provider DID
+	// act; fix the bug, then retry or confirm the step.
+	DeadHookFailed = "hook_failed"
 )
 
 // MoneyMayHaveMoved reports whether a dead reason leaves the external effect unknown.

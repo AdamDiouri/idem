@@ -118,6 +118,16 @@ The provider **accepted** the payout (`202`, a `po_…` reference), but it was s
 3. **Failed:** run `idem admin compensate <workflow> --expect-version <V> --confirm-no-effect --reason …`. The workflow ends `COMPENSATED`.
 4. **Still pending** (the provider is slow): run `idem admin retry-step <step> --expect-version <V> --reason …`. The same key is re-sent, the provider replays the same payout, and polling resumes. Never use `new-generation` while the old payout can still settle: that could pay twice.
 
+### hook_failed
+
+The provider **answered**, but the step's own bookkeeping kept failing: the ledger posting or the saga move that runs in the completion transaction. Every attempt rolled back. After `IDEM_HOOK_MAX_FAILURES` failures (default 3) the step is parked rather than retried forever. **The provider DID act**: if it reported success, money moved and **nothing is posted yet**. This is a bug in idem (or bad data), not a provider problem. `IdemMoneyMayHaveMoved` pages.
+
+1. Read the error: `idem admin list` shows `last_error`, and the worker logs `step hook failed` with the error for each failure.
+2. Fix the cause (deploy the fix, or correct the data), then hand the step back:
+   - `idem admin retry-step <step> --expect-version <V> --reason …`. The same key is re-sent, the provider replays its answer, and the hook runs again. `retry-step` resets the failure count.
+   - Or, if you have confirmed the outcome with the provider, `idem admin confirm-step <step> --provider-ref <ref> --expect-version <V> --reason …`, which runs the same success hook.
+3. Never use `new-generation`: the provider already acted on this key, so a new key could act twice.
+
 ### Provider news about a parked workflow (`PROVIDER SAYS`)
 
 When a webhook arrives for a parked step, idem re-checks it with the provider and shows it in the `PROVIDER SAYS` column. It never resolves the workflow by itself (money decisions made under doubt end with a human).

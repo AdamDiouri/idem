@@ -41,6 +41,9 @@ type WorkerConfig struct {
 	CallbackPollCap  time.Duration `env:"IDEM_CALLBACK_POLL_CAP" envDefault:"1h"`
 	CallbackMaxWait  time.Duration `env:"IDEM_CALLBACK_MAX_WAIT" envDefault:"72h"`
 	CallbackMaxPolls int32         `env:"IDEM_CALLBACK_MAX_POLLS" envDefault:"0"`
+	// HookMaxFailures: after this many failures of a step's hook (ledger
+	// posting, saga move) the step is DEAD with hook_failed.
+	HookMaxFailures int `env:"IDEM_HOOK_MAX_FAILURES" envDefault:"3"`
 	// InboxOrphanAfter: a provider webhook that still matches no step this
 	// long after it arrived is ignored as an orphan (and counted).
 	InboxOrphanAfter time.Duration `env:"IDEM_INBOX_ORPHAN_AFTER" envDefault:"1h"`
@@ -109,6 +112,9 @@ func (c WorkerConfig) validate() error {
 	}
 	if c.CallbackDeadline <= 0 {
 		return fmt.Errorf("IDEM_CALLBACK_DEADLINE must be positive")
+	}
+	if c.HookMaxFailures < 1 {
+		return fmt.Errorf("IDEM_HOOK_MAX_FAILURES must be at least 1")
 	}
 	if c.CallbackMaxPolls < 0 {
 		return fmt.Errorf("IDEM_CALLBACK_MAX_POLLS must not be negative (0 = no limit)")

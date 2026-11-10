@@ -189,3 +189,9 @@ SELECT
   COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(received_at))) * 1000 FROM webhook_inbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms,
   (SELECT count(*) FROM webhook_inbox WHERE status = 'CONFLICT')::int AS conflicts_open,
   (SELECT count(*) FROM steps WHERE status = 'AWAITING_CALLBACK' AND callback_deadline < now() - interval '5 minutes')::int AS callbacks_overdue;
+
+-- name: IncrementHookFailures :one
+-- Fenced like CompleteStep: only the current lease holder counts a failure.
+UPDATE steps SET hook_failures = hook_failures + 1
+WHERE id = sqlc.arg(id) AND lease_epoch = sqlc.arg(lease_epoch) AND status = 'RUNNING'
+RETURNING hook_failures;

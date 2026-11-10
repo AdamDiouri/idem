@@ -114,6 +114,7 @@ func workerCmd() *cobra.Command {
 				PollBackoff:        engine.Backoff{Base: e.cfg.RetryBase, Cap: e.cfg.CallbackPollCap},
 				MaxWait:            e.cfg.CallbackMaxWait,
 				MaxPolls:           e.cfg.CallbackMaxPolls,
+				HookMaxFailures:    e.cfg.HookMaxFailures,
 				ShutdownGrace:      e.cfg.ShutdownGrace,
 				Logger:             e.logger,
 			})

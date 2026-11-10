@@ -260,6 +260,7 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_CALLBACK_POLL_CAP` | `1h` | Polls back off from `IDEM_RETRY_BASE` up to this; at least `IDEM_RETRY_BASE` |
 | `IDEM_CALLBACK_MAX_WAIT` | `72h` | Total wait since the provider accepted a payout before it is `callback_unresolved` (bank payouts take hours or days); longer than the deadline |
 | `IDEM_CALLBACK_MAX_POLLS` | `0` | Optional limit on polls per acceptance; `0` means none |
+| `IDEM_HOOK_MAX_FAILURES` | `3` | After this many failures of a step's bookkeeping hook (ledger posting, saga move), the step is `DEAD` with `hook_failed` (see the runbook) |
 | `IDEM_INBOX_ORPHAN_AFTER` | `1h` | A provider webhook that matches no payout this long is ignored as an orphan |
 | `IDEM_INBOX_RETENTION` | `720h` | The sweeper deletes processed and ignored provider events older than this; evidence and conflicts are kept |
 | `IDEM_WORKER_ID` | `hostname-pid` | |

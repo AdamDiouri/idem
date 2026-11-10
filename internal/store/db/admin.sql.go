@@ -273,7 +273,7 @@ func (q *Queries) ProviderRefInUse(ctx context.Context, arg ProviderRefInUsePara
 const resetStepForRetry = `-- name: ResetStepForRetry :execrows
 UPDATE steps
 SET status = $1::text, max_attempts = attempt_count + $2::int,
-    dead_reason = NULL, last_error = NULL,
+    dead_reason = NULL, last_error = NULL, hook_failures = 0,
     run_after = now(), lease_epoch = lease_epoch + 1, lease_owner = NULL, lease_expires_at = NULL
 WHERE id = $3 AND status IN ('DEAD', 'FAILED_PERMANENT')
 `

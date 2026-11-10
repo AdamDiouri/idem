@@ -82,19 +82,29 @@ func stepStatus(s ClaimedStep, kind ResultKind) string {
 	return "PENDING"
 }
 
+// HookError is a failure (or panic) of a step's success or failure hook. The
+// completion rolled back; the worker counts it (RecordHookFailure).
+type HookError struct{ Err error }
+
+func (e *HookError) Error() string { return e.Err.Error() }
+func (e *HookError) Unwrap() error { return e.Err }
+
 // runHook turns a panic in step hook code into an error, so the completion
-// transaction rolls back and the step takes the lease-expiry path instead of
-// killing the worker (design §6, F25). Simulated crashes are re-panicked.
+// transaction rolls back instead of killing the worker (design §6, F25), and
+// marks hook failures as *HookError. Simulated crashes are re-panicked.
 func runHook(f func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if failpoint.IsCrash(r) {
 				panic(r)
 			}
-			err = fmt.Errorf("hook panic: %v", r)
+			err = &HookError{Err: fmt.Errorf("hook panic: %v", r)}
 		}
 	}()
-	return f()
+	if err := f(); err != nil {
+		return &HookError{Err: err}
+	}
+	return nil
 }
 
 func optional(s string) *string {

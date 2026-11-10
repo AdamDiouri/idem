@@ -41,7 +41,7 @@ WHERE s.workflow_id = sqlc.arg(workflow_id)
 -- per step (step_attempts primary key), so resetting it would block the claim.
 UPDATE steps
 SET status = sqlc.arg(status)::text, max_attempts = attempt_count + sqlc.arg(extra_attempts)::int,
-    dead_reason = NULL, last_error = NULL,
+    dead_reason = NULL, last_error = NULL, hook_failures = 0,
     run_after = now(), lease_epoch = lease_epoch + 1, lease_owner = NULL, lease_expires_at = NULL
 WHERE id = sqlc.arg(id) AND status IN ('DEAD', 'FAILED_PERMANENT');
 

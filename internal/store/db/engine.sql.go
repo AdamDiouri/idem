@@ -288,6 +288,25 @@ func (q *Queries) InboxStats(ctx context.Context) (InboxStatsRow, error) {
 	return i, err
 }
 
+const incrementHookFailures = `-- name: IncrementHookFailures :one
+UPDATE steps SET hook_failures = hook_failures + 1
+WHERE id = $1 AND lease_epoch = $2 AND status = 'RUNNING'
+RETURNING hook_failures
+`
+
+type IncrementHookFailuresParams struct {
+	ID         uuid.UUID
+	LeaseEpoch int64
+}
+
+// Fenced like CompleteStep: only the current lease holder counts a failure.
+func (q *Queries) IncrementHookFailures(ctx context.Context, arg IncrementHookFailuresParams) (int32, error) {
+	row := q.db.QueryRow(ctx, incrementHookFailures, arg.ID, arg.LeaseEpoch)
+	var hook_failures int32
+	err := row.Scan(&hook_failures)
+	return hook_failures, err
+}
+
 const insertStepAttempt = `-- name: InsertStepAttempt :exec
 INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id, kind)
 VALUES ($1, $2, $3, $4, $5)
