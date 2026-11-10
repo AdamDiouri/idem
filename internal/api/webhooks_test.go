@@ -239,3 +239,40 @@ func TestWebhooks_CrossReplicaRetryIsDuplicate(t *testing.T) {
 	require.NoError(t, pool.QueryRow(context.Background(), `SELECT count(*) FROM webhook_inbox`).Scan(&n))
 	require.Equal(t, 1, n)
 }
+
+// blockingInbox never finishes a store by itself: it waits for the request's
+// deadline (or for the test to end), like a saturated pool.
+type blockingInbox struct{ release chan struct{} }
+
+func (b blockingInbox) Store(ctx context.Context, _, _ string, _ []byte) (bool, error) {
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-b.release:
+		return false, errors.New("test over")
+	}
+}
+
+// Slice 2.3b (review R7): the webhook endpoint is bounded by RequestTimeout,
+// like POST /workflows, so a saturated pool answers 503 instead of hanging.
+func TestWebhooks_StoreBlockedReturns503WithinRequestTimeout(t *testing.T) {
+	in := blockingInbox{release: make(chan struct{})}
+	opts := options()
+	opts.WebhookSecrets, opts.Inbox, opts.RequestTimeout = [][]byte{whCurrent}, in, 200*time.Millisecond
+	srv := httptest.NewServer(api.NewServer(opts, nil, nil))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(in.release) }) // runs first: unblocks a hung handler
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/webhooks/provider", strings.NewReader(eventBody))
+	require.NoError(t, err)
+	req.Header.Set(webhook.ProviderSignatureHeader, signed(whCurrent, eventBody))
+	client := &http.Client{Timeout: 5 * time.Second} // guard: a regression must not hang the suite
+	start := time.Now()
+	resp, err := client.Do(req)
+	require.NoError(t, err, "the handler did not answer within 5s")
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	require.Contains(t, string(b), "store_error")
+	require.Less(t, time.Since(start), time.Second)
+}

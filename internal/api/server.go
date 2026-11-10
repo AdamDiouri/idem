@@ -27,9 +27,9 @@ type Pinger interface {
 type Options struct {
 	Tokens map[string]string // bearer token → client ID
 	Logger *slog.Logger
-	// RequestTimeout bounds all work for one POST /workflows, including waiting
-	// for a database connection. It must be below the server's WriteTimeout so
-	// the client always gets a status. Zero means defaultRequestTimeout.
+	// RequestTimeout bounds all work for one POST /workflows or one provider
+	// webhook, including waiting for a database connection. It must be below
+	// the server's WriteTimeout so the client always gets a status. Zero means defaultRequestTimeout.
 	RequestTimeout time.Duration
 	// Metrics, if set, are updated per request and served on GET /metrics.
 	Metrics *metrics.Metrics

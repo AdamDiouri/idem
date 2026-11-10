@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -55,7 +56,11 @@ func (s *server) postProviderWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	inserted, err := s.opts.Inbox.Store(r.Context(), ev.ID, ev.Type, body)
+	// Bounded like POST /workflows: a saturated pool answers 503 (the
+	// provider retries) instead of holding the request open.
+	ctx, cancel := context.WithTimeout(r.Context(), s.opts.RequestTimeout)
+	defer cancel()
+	inserted, err := s.opts.Inbox.Store(ctx, ev.ID, ev.Type, body)
 	if err != nil {
 		s.logger.Error("store provider webhook", "event_id", ev.ID, "error", err)
 		s.opts.Metrics.ObserveWebhook("store_error")
