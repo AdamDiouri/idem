@@ -70,6 +70,9 @@ type Report struct {
 	Liveness        []invariants.Violation `json:"liveness"`
 	Restarts        map[string]int         `json:"restarts"` // process → crash restarts
 	SettleTime      time.Duration          `json:"settle_time"`
+	// WebhooksInFlight counts provider webhooks neither delivered nor given
+	// up when the settle phase ended: the inbox was judged incomplete.
+	WebhooksInFlight int `json:"webhooks_in_flight"`
 	Passed          bool                   `json:"passed"`
 	Reasons         []string               `json:"reasons"`
 }
@@ -87,6 +90,9 @@ func (r *Report) Evaluate() {
 	}
 	if n := len(r.Liveness); n > 0 {
 		add("%d workflows or steps did not settle (I4)", n)
+	}
+	if n := r.WebhooksInFlight; n > 0 {
+		add("%d webhook deliveries still in flight at the verdict", n)
 	}
 	if n := len(r.Clients.Conflicts); n > 0 {
 		add("%d idempotency keys returned two different workflows", n)
@@ -272,7 +278,8 @@ func (r *Report) Text() string {
 	}
 	fmt.Fprintf(&b, "fenced commits: %d\nin-doubt resolved: %d\n", r.FencedCommits, r.InDoubtResolved)
 	fmt.Fprintf(&b, "callback polls: %d (payouts that waited: %d)\n", r.CallbackPolls, r.PayoutsWaited)
-	fmt.Fprintf(&b, "webhooks: %d applied, %d duplicates, %d deferred\n", r.Webhooks.Applied, r.Webhooks.Duplicates, r.Webhooks.Deferred)
+	fmt.Fprintf(&b, "webhooks: %d applied, %d duplicates, %d deferred, %d in flight at the verdict\n",
+		r.Webhooks.Applied, r.Webhooks.Duplicates, r.Webhooks.Deferred, r.WebhooksInFlight)
 
 	fmt.Fprintf(&b, "crash restarts:\n")
 	for _, name := range slices.Sorted(maps.Keys(r.Restarts)) {

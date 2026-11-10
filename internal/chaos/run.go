@@ -300,12 +300,21 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	}
 	rep.Clients.PerReplica = perReplica
 
+	// Settled means: every provider webhook was delivered or given up, AND
+	// idem is live (which includes an empty inbox). The deliveries are read
+	// first, so one that lands between the two reads shows as a pending
+	// inbox row rather than being missed.
 	deadline := settleStart.Add(cfg.SettleTimeout)
 	for {
+		deliveries, err := fakeprovider.FetchWebhooks(ctx, providerURL)
+		if err != nil {
+			return rep, err
+		}
+		rep.WebhooksInFlight = undeliveredWebhooks(deliveries)
 		if rep.Liveness, err = invariants.CheckLiveness(ctx, pool); err != nil {
 			return rep, err
 		}
-		if len(rep.Liveness) == 0 || time.Now().After(deadline) {
+		if (len(rep.Liveness) == 0 && rep.WebhooksInFlight == 0) || time.Now().After(deadline) {
 			break
 		}
 		select {
@@ -564,4 +573,16 @@ func withLogTail(err error, logFile string) error {
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	return fmt.Errorf("%w\nlast lines of %s:\n%s", err, filepath.Base(logFile), strings.Join(lines[max(0, len(lines)-5):], "\n"))
+}
+
+// undeliveredWebhooks counts deliveries the provider has not finished: neither
+// delivered nor given up.
+func undeliveredWebhooks(ds []fakeprovider.WebhookDelivery) int {
+	n := 0
+	for _, d := range ds {
+		if !d.Delivered && !d.GaveUp {
+			n++
+		}
+	}
+	return n
 }

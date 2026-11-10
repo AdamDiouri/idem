@@ -70,3 +70,25 @@ func FetchFaultHits(ctx context.Context, baseURL string) (map[string]int, error)
 	}
 	return hits, nil
 }
+
+// FetchWebhooks reads the delivery log of a provider at baseURL: every webhook
+// event it queued, and whether it was delivered or given up.
+func FetchWebhooks(ctx context.Context, baseURL string) ([]WebhookDelivery, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/_webhooks", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch webhooks: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch webhooks: status %d", resp.StatusCode)
+	}
+	var out []WebhookDelivery
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode webhooks: %w", err)
+	}
+	return out, nil
+}
