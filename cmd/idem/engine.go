@@ -40,9 +40,8 @@ func (e *workerEnv) serveMetrics() *metrics.Metrics {
 		return nil
 	}
 	m := metrics.New()
-	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", m.Handler())
-	srv := &http.Server{Addr: e.cfg.MetricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	// The metrics port is internal-only, so it also serves pprof.
+	srv := &http.Server{Addr: e.cfg.MetricsAddr, Handler: metrics.InternalHandler(m), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		e.logger.Info("metrics listening", "addr", e.cfg.MetricsAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

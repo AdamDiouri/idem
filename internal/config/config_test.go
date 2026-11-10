@@ -23,7 +23,7 @@ func setRequired(t *testing.T) {
 	for _, k := range []string{
 		"IDEM_HTTP_ADDR", "IDEM_IDEMPOTENCY_LOCK_TIMEOUT", "IDEM_REQUEST_TIMEOUT", "IDEM_HTTP_WRITE_TIMEOUT",
 		"IDEM_FEE_RATE_BPS", "IDEM_FEE_FIXED_CENTS", "IDEM_LOG_LEVEL",
-		"IDEM_PROVIDER_WEBHOOK_SECRETS", "IDEM_FAILPOINTS",
+		"IDEM_PROVIDER_WEBHOOK_SECRETS", "IDEM_FAILPOINTS", "IDEM_DEBUG_ADDR",
 	} {
 		t.Setenv(k, "")
 	}
@@ -114,4 +114,19 @@ func TestLoad_WebhookSecretsTrimmed(t *testing.T) {
 	t.Setenv("IDEM_PROVIDER_WEBHOOK_SECRETS", "whsec_new_0123456789,,")
 	_, err = config.Load()
 	require.ErrorContains(t, err, "IDEM_PROVIDER_WEBHOOK_SECRETS")
+}
+
+// pprof for the API is off unless an internal debug address is set.
+func TestLoad_DebugAddr(t *testing.T) {
+	setRequired(t)
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	require.Equal(t, "off", cfg.DebugAddr)
+	t.Setenv("IDEM_DEBUG_ADDR", "127.0.0.1:6060")
+	cfg, err = config.Load()
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1:6060", cfg.DebugAddr)
+	t.Setenv("IDEM_DEBUG_ADDR", "nope")
+	_, err = config.Load()
+	require.ErrorContains(t, err, "IDEM_DEBUG_ADDR")
 }

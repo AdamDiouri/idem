@@ -61,3 +61,30 @@ func TestMetrics_NilIsANoOp(t *testing.T) {
 		m.ObserveSubmission("created")
 	})
 }
+
+// pprof is served next to /metrics on the internal port (workers, sweepers,
+// and the API's optional debug listener), never on the public API port.
+func TestInternalHandler_ServesMetricsAndPprof(t *testing.T) {
+	h := metrics.InternalHandler(metrics.New())
+	for path, want := range map[string]string{
+		"/metrics":                       "go_goroutines",
+		"/debug/pprof/":                  "goroutine",
+		"/debug/pprof/goroutine?debug=1": "goroutine profile",
+		"/debug/pprof/heap?debug=1":      "heap profile",
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		require.Equal(t, 200, rec.Code, path)
+		require.Contains(t, rec.Body.String(), want, path)
+	}
+}
+
+func TestInternalHandler_NilMetricsServesOnlyPprof(t *testing.T) {
+	h := metrics.InternalHandler(nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	require.Equal(t, 404, rec.Code)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/debug/pprof/", nil))
+	require.Equal(t, 200, rec.Code)
+}

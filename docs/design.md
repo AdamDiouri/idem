@@ -538,11 +538,12 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 - **Deferred to where they belong:**
   - *Sweeper snapshot cost* (whole-table counts every tick): measure with `cmd/loadgen` in M3, then index, sample or slow the interval with real numbers.
   - *`/metrics` authentication:* the endpoints reveal volumes, never IDs or secrets. Restrict them in M4 with a NetworkPolicy, or a separate internal-only port for the API.
-- OpenTelemetry tracing → Milestone 3.
+- **Profiling:** Go's `pprof` on the internal metrics port of workers and sweepers, and on the API's optional `IDEM_DEBUG_ADDR` (never on its public port).
+- **Tracing → Milestone 3, alongside the load generator (D20).** Traces answer "where did the time go" for one payment, and only show bottlenecks under load. idem hands work off **through database rows**, not calls: the API commits a workflow that a worker claims later, and a webhook lands in the inbox that another worker applies later. So the W3C trace context (`traceparent`) is **stored in the rows that carry work**: `workflows`, `steps`, `webhook_inbox`, and the outbox. Whichever process continues the work starts a span linked to it, so one trace shows API → queue wait → claim → provider call → commit, and webhook → inbox wait → apply. Metrics carry exemplars linking latency buckets to traces.
 
 ### Later milestones (outline only)
 - **M2** — **Nobody silently disagrees:** see [the M2 design](superpowers/specs/2026-11-10-milestone-2-design.md). Async payouts and polling (2.1), provider webhooks (2.2, 2.3), status + outbox + relay to shops (2.4, 2.5), reconciliation (2.6). Generic workflow definitions moved to M4.
-- **M3** — Prove it at scale: long chaos campaigns, toxiproxy network faults, load tests, tracing, SLOs + alerts, a published chaos report.
+- **M3** — Prove it at scale: long chaos campaigns, toxiproxy network faults, load tests, tracing (OpenTelemetry, trace context stored in work rows: D20), SLOs + alerts, a published chaos report.
   - **Traffic generator (`cmd/loadgen`)** — simulates 100–500 external clients against the public API only (no database or internal shortcuts while generating load):
     - **Realistic misbehaviour, not just happy paths:** clients that time out and retry with the same key; double submissions; impatient retries with a *new* key (a real client bug the system must survive); declined customers; malformed payloads.
     - **Open workload model:** requests arrive at a target rate whether or not earlier ones finished (avoids coordinated omission hiding latency).
@@ -572,6 +573,7 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 | D12 | (M2) Workers poll waiting payouts, not the sweeper | Workers already own every provider call, leases and fencing; the sweeper stays database-only | Sweeper polls |
 | D16 | (M2) Contradictory provider news never flips a terminal state; it is re-checked with the provider, and only a real disagreement pages | Late and reordered webhooks are normal; flipping on them is how money moves twice | Last event wins |
 | D18 | (M2) Provider news about a parked step is evidence for a human, never an automatic resolution | Money decisions made under doubt end with a human, who sees the answer | Auto-resolve parked steps |
+| D20 | (M3) Tracing with the trace context stored in the rows that hand work between processes | Work moves through database rows, not RPC calls, so headers alone cannot carry a trace; storing it keeps one payment one trace | Trace each process separately; header-only propagation |
 | D17 | (M2) Polls are attempts of kind `poll` and never create doubt; the pivot rule reads the history of send attempts | A `GET` cannot move money; counting a crashed poll as doubt would park clean failures | Treat every attempt alike |
 
 **Calls made by Claude while drafting (please check):** D2, D4, D7, D8; fee defaults and rounding rule; retry defaults; one hard-coded workflow type; static API token; in-memory fake provider; `generation` mechanism for deliberate new keys.
