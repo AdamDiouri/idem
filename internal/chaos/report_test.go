@@ -196,3 +196,15 @@ func TestReport_ReplicaWithoutTrafficIsVacuous(t *testing.T) {
 	require.NotContains(t, strings.Join(r.Reasons, "\n"), "replica")
 	require.Contains(t, r.Text(), "api replicas: 2 (requests api-0=5 api-1=4; webhooks stored api-0=3 api-1=2)")
 }
+
+// Slice 2.3 (found by campaigns): a webhook fault in force for under the
+// minimum window had no real chance to fire, so its silence is not vacuity.
+func TestReport_ShortWebhookWindowIsNotVacuous(t *testing.T) {
+	r := healthy()
+	r.Events = append(r.Events,
+		ExecutedEvent{InFlight: 4, Event: Event{At: 5800 * time.Millisecond, Kind: SetProviderFaults,
+			Faults: fakeprovider.Faults{Rules: []fakeprovider.Rule{{Endpoint: "webhooks", Mode: fakeprovider.ModeReorder, Probability: 0.3}}}}},
+		ExecutedEvent{InFlight: 4, Event: Event{At: 6700 * time.Millisecond, Kind: ClearProviderFaults}})
+	r.Evaluate()
+	require.NotContains(t, strings.Join(r.Reasons, "\n"), "webhook fault reorder")
+}

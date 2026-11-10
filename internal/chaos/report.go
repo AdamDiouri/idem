@@ -149,10 +149,16 @@ func (r *Report) Evaluate() {
 	case restarts+pauses == 0:
 		add("vacuous: no process crashed or was paused")
 	}
-	// Every webhook fault armed in an effective event must have fired.
+	// Every webhook fault armed in an effective event, and in force long
+	// enough to meet payouts (minFaultWindow), must have fired.
+	planned := make([]Event, len(r.Events))
+	for i, e := range r.Events {
+		planned[i] = e.Event
+	}
 	armedWebhook := map[string]bool{}
-	for _, e := range r.Events {
-		if e.Err != "" || e.Skipped != "" || e.Kind != SetProviderFaults || !e.effective() {
+	for i, e := range r.Events {
+		if e.Err != "" || e.Skipped != "" || e.Kind != SetProviderFaults || !e.effective() ||
+			faultWindow(planned, i, r.Config.Duration) < minFaultWindow {
 			continue
 		}
 		for _, rule := range e.Faults.Rules {

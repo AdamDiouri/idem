@@ -166,3 +166,45 @@ func TestPlan_RestartAPITargetsOneReplica(t *testing.T) {
 	}
 	require.Len(t, targets, 2)
 }
+
+// faultWindows maps each SetProviderFaults event to how long it stays in
+// force: until the next fault change, or the end of the campaign.
+func faultWindows(events []Event, duration time.Duration) map[int]time.Duration {
+	out := map[int]time.Duration{}
+	for i, e := range events {
+		if e.Kind != SetProviderFaults {
+			continue
+		}
+		end := duration
+		for _, n := range events[i+1:] {
+			if n.Kind == SetProviderFaults || n.Kind == ClearProviderFaults {
+				end = n.At
+				break
+			}
+		}
+		out[i] = end - e.At
+	}
+	return out
+}
+
+// Slice 2.3 (found by campaigns): a webhook fault armed for under a second
+// can meet no payout at all. Each one gets a window of at least 5s.
+func TestPlan_EveryWebhookFaultHasALongWindow(t *testing.T) {
+	for seed := int64(1); seed <= 30; seed++ {
+		events := NewPlan(PlanConfig{Seed: seed, Duration: 90 * time.Second, Workers: 4, APIs: 2, LeaseTTL: 4 * time.Second})
+		long := map[string]bool{}
+		for i, w := range faultWindows(events, 90*time.Second) {
+			if w < minFaultWindow {
+				continue
+			}
+			for _, r := range events[i].Faults.Rules {
+				if r.Endpoint == "webhooks" {
+					long[r.Mode] = true
+				}
+			}
+		}
+		for _, m := range wantWebhookModes {
+			require.True(t, long[m], "seed %d: %s never in force for %s", seed, m, minFaultWindow)
+		}
+	}
+}

@@ -96,24 +96,8 @@ func NewPlan(cfg PlanConfig) []Event {
 				events = append(events, newEvent(rng, cfg, at, k))
 			}
 		}
-		// Every webhook fault, too: each mode in at least one fault set.
-		armed := map[string]bool{}
-		for _, e := range events {
-			for _, r := range e.Faults.Rules {
-				if r.Endpoint == webhooksEndpoint {
-					armed[r.Mode] = true
-				}
-			}
-		}
-		for _, mode := range webhookModes {
-			if !armed[mode] {
-				at := time.Duration(rng.Int64N(int64(window)))
-				events = append(events, Event{At: at, Kind: SetProviderFaults, Faults: fakeprovider.Faults{
-					Seed:  rng.Int64N(math.MaxInt32) + 1,
-					Rules: []fakeprovider.Rule{webhookRule(rng, mode)},
-				}})
-			}
-		}
+		sort.SliceStable(events, func(i, j int) bool { return events[i].At < events[j].At })
+		events = armEveryWebhookFault(rng, events, cfg.Duration)
 	}
 
 	sort.SliceStable(events, func(i, j int) bool { return events[i].At < events[j].At })
@@ -177,4 +161,84 @@ const webhooksEndpoint = "webhooks"
 // payouts that settle while it is armed.
 func webhookRule(rng *rand.Rand, mode string) fakeprovider.Rule {
 	return fakeprovider.Rule{Endpoint: webhooksEndpoint, Mode: mode, Probability: 0.2 + 0.3*rng.Float64()}
+}
+
+// minFaultWindow is how long a fault set must stay in force before a fault in
+// it can be expected to have fired: a webhook fault is drawn once per payout,
+// at acceptance, so a sub-second window may meet no payout at all.
+const minFaultWindow = 5 * time.Second
+
+// faultWindow is how long the fault set of events[i] stays in force: until the
+// next fault change, or the end of the campaign. events must be sorted.
+func faultWindow(events []Event, i int, end time.Duration) time.Duration {
+	for _, n := range events[i+1:] {
+		if n.Kind == SetProviderFaults || n.Kind == ClearProviderFaults {
+			return n.At - events[i].At
+		}
+	}
+	return end - events[i].At
+}
+
+// armEveryWebhookFault makes sure each webhook fault is in force for at least
+// minFaultWindow at some point: a missing mode joins the longest-lasting fault
+// set that lacks a webhook rule (else the longest one), or, if none lasts long
+// enough, a new fault set at the start of the longest quiet stretch. events
+// must be sorted; the result is.
+func armEveryWebhookFault(rng *rand.Rand, events []Event, end time.Duration) []Event {
+	for _, mode := range webhookModes {
+		best, bestWindow, covered := -1, time.Duration(0), false
+		for i, e := range events {
+			if e.Kind != SetProviderFaults {
+				continue
+			}
+			w := faultWindow(events, i, end)
+			hasWebhook := false
+			for _, r := range e.Faults.Rules {
+				if r.Endpoint == webhooksEndpoint {
+					hasWebhook = true
+					covered = covered || (r.Mode == mode && w >= minFaultWindow)
+				}
+			}
+			// Prefer a long set with no webhook rule yet, so modes don't
+			// crowd one set (the first matching rule wins each draw).
+			score := w
+			if hasWebhook {
+				score /= 2
+			}
+			if score > bestWindow {
+				best, bestWindow = i, score
+			}
+		}
+		if covered {
+			continue
+		}
+		if best >= 0 && faultWindow(events, best, end) >= minFaultWindow {
+			events[best].Faults.Rules = append(events[best].Faults.Rules, webhookRule(rng, mode))
+			continue
+		}
+		at := longestQuietStart(events, end)
+		events = append(events, Event{At: at, Kind: SetProviderFaults, Faults: fakeprovider.Faults{
+			Seed: rng.Int64N(math.MaxInt32) + 1, Rules: []fakeprovider.Rule{webhookRule(rng, mode)},
+		}})
+		sort.SliceStable(events, func(i, j int) bool { return events[i].At < events[j].At })
+	}
+	return events
+}
+
+// longestQuietStart returns the start of the longest stretch with no fault change.
+func longestQuietStart(events []Event, end time.Duration) time.Duration {
+	prev, bestStart, bestLen := time.Millisecond, time.Millisecond, time.Duration(0)
+	for _, e := range events {
+		if e.Kind != SetProviderFaults && e.Kind != ClearProviderFaults {
+			continue
+		}
+		if e.At-prev > bestLen {
+			bestStart, bestLen = prev, e.At-prev
+		}
+		prev = e.At + time.Millisecond
+	}
+	if end-prev > bestLen {
+		bestStart = prev
+	}
+	return bestStart
 }
