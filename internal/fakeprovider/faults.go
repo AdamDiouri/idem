@@ -12,7 +12,7 @@ const (
 	ModeErrorAfterEffect    = "error_after_effect"
 	ModeDecline             = "decline"
 	ModeRateLimit           = "rate_limit"  // 429 + Retry-After: 1, no effect
-	ModePayoutFail          = "payout_fail" // payouts only: 422 invalid_account, stored
+	ModePayoutFail          = "payout_fail" // payouts only: accepted (202), then settles failed with account_closed
 )
 
 // Faults configures fault injection. The first matching rule wins.

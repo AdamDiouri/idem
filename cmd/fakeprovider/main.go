@@ -23,9 +23,20 @@ func main() {
 		addr = ":9090"
 	}
 
+	// How long an accepted payout stays pending before it settles (design §4.1).
+	settle := 2 * time.Second
+	if v := os.Getenv("FAKEPROVIDER_PAYOUT_SETTLE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			logger.Error("FAKEPROVIDER_PAYOUT_SETTLE must be a non-negative duration", "value", v)
+			os.Exit(2)
+		}
+		settle = d
+	}
+
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           fakeprovider.New(fakeprovider.Options{}).Handler(),
+		Handler:           fakeprovider.New(fakeprovider.Options{PayoutSettle: settle}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

@@ -374,35 +374,131 @@ func idOf(t *testing.T, b, prefix, status string) string {
 	return c.ID
 }
 
-func TestPayout_CreatesEffectOnceAndReplays(t *testing.T) {
-	p, srv := newServer(t)
-	first := post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825))
-	second := post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825))
-	require.Equal(t, http.StatusCreated, first.status, first.body)
-	require.Equal(t, first, second)
-	id := idOf(t, first.body, "po_", "paid")
+func newServerWith(t *testing.T, opts fakeprovider.Options) (*fakeprovider.Provider, *httptest.Server) {
+	t.Helper()
+	if opts.Hang == 0 {
+		opts.Hang = 5 * time.Second
+	}
+	p := fakeprovider.New(opts)
+	srv := httptest.NewServer(p.Handler())
+	t.Cleanup(srv.Close)
+	return p, srv
+}
 
+func get(t *testing.T, url string) resp {
+	t.Helper()
+	r, err := http.Get(url) //nolint:noctx // test helper
+	require.NoError(t, err)
+	defer r.Body.Close()
+	data, err := io.ReadAll(r.Body)
+	require.NoError(t, err)
+	return resp{status: r.StatusCode, body: string(data)}
+}
+
+type payoutView struct {
+	ID          string `json:"id"`
+	Status      string `json:"status"`
+	FailureCode string `json:"failure_code"`
+	AmountCents int64  `json:"amount_cents"`
+	Currency    string `json:"currency"`
+}
+
+func payoutState(t *testing.T, r resp) payoutView {
+	t.Helper()
+	require.Equal(t, http.StatusOK, r.status, r.body)
+	var v payoutView
+	require.NoError(t, json.Unmarshal([]byte(r.body), &v), r.body)
+	return v
+}
+
+// M2 (design §4.1): payouts are accepted (202 pending) and settle later. The
+// money moves, and the effect is recorded, only when the payout is paid.
+func TestPayout_AcceptedThenPaid(t *testing.T) {
+	p, srv := newServerWith(t, fakeprovider.Options{PayoutSettle: 200 * time.Millisecond})
+	r := post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825))
+	require.Equal(t, http.StatusAccepted, r.status, r.body)
+	id := idOf(t, r.body, "po_", "pending")
+	require.Empty(t, p.Effects(), "nothing has moved yet")
+	require.Equal(t, "pending", payoutState(t, get(t, srv.URL+"/payouts/"+id)).Status)
+
+	require.Eventually(t, func() bool {
+		return payoutState(t, get(t, srv.URL+"/payouts/"+id)).Status == "paid"
+	}, 2*time.Second, 20*time.Millisecond)
 	effects := p.Effects()
 	require.Len(t, effects, 1)
 	require.Equal(t, fakeprovider.Effect{ID: id, Type: "payout", WorkflowID: wfID, IdempotencyKey: "k1", AmountCents: 9825, At: effects[0].At}, effects[0])
+	v := payoutState(t, get(t, srv.URL+"/payouts/"+id))
+	require.Equal(t, int64(9825), v.AmountCents)
+	require.Equal(t, "EUR", v.Currency)
 }
 
-func TestPayout_InvalidMerchant(t *testing.T) {
+func TestPayout_ReplayReturnsSamePendingPayout(t *testing.T) {
+	p, srv := newServerWith(t, fakeprovider.Options{PayoutSettle: time.Hour})
+	first := post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825))
+	second := post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825))
+	require.Equal(t, http.StatusAccepted, first.status, first.body)
+	require.Equal(t, first, second)
+	idOf(t, first.body, "po_", "pending")
+	require.Empty(t, p.Effects())
+}
+
+func TestPayout_InvalidMerchantRefusedSynchronously(t *testing.T) {
 	p, srv := newServer(t)
 	first := post(t, srv.URL, "/payouts", "k1", payoutBody("mer_invalid_1", 9825))
 	require.Equal(t, http.StatusUnprocessableEntity, first.status)
 	require.Contains(t, first.body, "invalid_account")
 	require.Equal(t, first, post(t, srv.URL, "/payouts", "k1", payoutBody("mer_invalid_1", 9825)))
+	lookup := get(t, srv.URL+"/payouts?idempotency_key=k1")
+	require.Equal(t, http.StatusUnprocessableEntity, lookup.status)
 	require.Empty(t, p.Effects())
 }
 
+// payout_fail now models a payout the provider accepts and the bank later
+// rejects: 202 first, then status failed.
 func TestFault_PayoutFail(t *testing.T) {
 	p, srv := newServer(t)
 	p.SetFaults(faults(fakeprovider.Rule{Endpoint: "payouts", Mode: fakeprovider.ModePayoutFail, Times: 1}))
 	r := post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825))
-	require.Equal(t, http.StatusUnprocessableEntity, r.status)
-	require.Contains(t, r.body, "invalid_account")
+	require.Equal(t, http.StatusAccepted, r.status, r.body)
+	id := idOf(t, r.body, "po_", "pending")
+	v := payoutState(t, get(t, srv.URL+"/payouts/"+id))
+	require.Equal(t, "failed", v.Status)
+	require.Equal(t, "account_closed", v.FailureCode)
 	require.Empty(t, p.Effects())
+}
+
+func TestPayout_LookupByKeyShowsCurrentState(t *testing.T) {
+	_, srv := newServerWith(t, fakeprovider.Options{PayoutSettle: 200 * time.Millisecond})
+	require.Equal(t, http.StatusAccepted, post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825)).status)
+	require.Equal(t, "pending", payoutState(t, get(t, srv.URL+"/payouts?idempotency_key=k1")).Status)
+	require.Eventually(t, func() bool {
+		return payoutState(t, get(t, srv.URL+"/payouts?idempotency_key=k1")).Status == "paid"
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestPayout_GetUnknownIs404(t *testing.T) {
+	_, srv := newServer(t)
+	require.Equal(t, http.StatusNotFound, get(t, srv.URL+"/payouts/po_nope").status)
+}
+
+func TestPayout_TimeoutAfterEffectAcceptsThenHangs(t *testing.T) {
+	p, srv := newServer(t)
+	p.SetFaults(faults(fakeprovider.Rule{Endpoint: "payouts", Mode: fakeprovider.ModeTimeoutAfterEffect, Times: 1}))
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/payouts", strings.NewReader(payoutBody("mer_1", 9825)))
+	require.NoError(t, err)
+	req.Header.Set("Idempotency-Key", "k1")
+	r, err := shortClient.Do(req)
+	if err == nil {
+		_ = r.Body.Close()
+	}
+	require.Error(t, err, "the client timed out after the provider accepted the payout")
+
+	retry := post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825))
+	require.Equal(t, http.StatusAccepted, retry.status, retry.body)
+	id := idOf(t, retry.body, "po_", "pending")
+	effects := p.Effects() // settles (PayoutSettle 0)
+	require.Len(t, effects, 1)
+	require.Equal(t, id, effects[0].ID)
 }
 
 func TestRefund_OfExistingCharge(t *testing.T) {
@@ -439,8 +535,8 @@ func TestRefund_Invalid(t *testing.T) {
 func TestKeysNamespacedPerResource(t *testing.T) {
 	p, srv := newServer(t)
 	require.Equal(t, http.StatusCreated, mustCharge(t, srv.URL, "k1", body("cus_1", 10000)).status)
-	require.Equal(t, http.StatusCreated, post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825)).status)
-	require.Len(t, p.Effects(), 2)
+	require.Equal(t, http.StatusAccepted, post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825)).status)
+	require.Len(t, p.Effects(), 2) // the payout settles at once (PayoutSettle 0)
 }
 
 func TestLookup_InFlightIs409(t *testing.T) {
