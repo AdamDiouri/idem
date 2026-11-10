@@ -187,7 +187,22 @@ The provider's p99 latency is above 2s. Expect more timeouts, and so more in-dou
 
 ### IdemInboxBacklog
 
-Provider webhooks are stored but not being applied (oldest pending > 10 minutes). Usually the workers are down or failing; check worker logs for `inbox event` errors. Payouts are not stuck meanwhile: polling still settles them, just more slowly. An event that never matches a payout is ignored as an orphan after `IDEM_INBOX_ORPHAN_AFTER` (default 1h) and logged (`ignored as an orphan`).
+Provider webhooks are stored but not being applied (oldest pending > 10 minutes). Usually the workers are down or failing; check worker logs for `inbox event` errors. Payouts are not stuck meanwhile: polling still settles them, just more slowly. An event that never matches a payout is ignored as an orphan after `IDEM_INBOX_ORPHAN_AFTER` (see `IdemWebhookOrphans`). Processed and ignored events are deleted after `IDEM_INBOX_RETENTION` (default 30 days); evidence and conflicts are kept.
+
+### IdemWebhookOrphans
+
+Provider webhooks arrived for payouts idem has no record of, and stayed unmatched for `IDEM_INBOX_ORPHAN_AFTER` (default 1h). They are ignored (`webhook_inbox` status `IGNORED`, note `orphan`) and never applied. Possible causes:
+- a provider bug, or events meant for another environment sharing the endpoint (check the signing secret)
+- a payout created outside idem
+- rarely, a payout idem sent but never recorded; reconciliation (slice 2.6) will report it as `missing_in_ledger`
+
+Find them with `SELECT provider_event_id, received_at, payload FROM webhook_inbox WHERE note = 'orphan' ORDER BY received_at DESC`.
+
+**Other events idem ignores, without alerting** (also counted in `idem_webhooks_applied_total{outcome}`):
+- `stale`: a late or reordered event that the provider's current state contradicts; idem was right
+- `unsupported event type …`: an event type idem does not act on
+- `mismatch`: an event whose amount or currency differs from the payout it names; logged as a warning, never applied
+- `malformed`: an event that is not a valid payout event
 
 ### IdemCallbacksOverdue
 

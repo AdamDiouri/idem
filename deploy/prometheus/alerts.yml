@@ -114,3 +114,12 @@ groups:
         annotations:
           summary: "Provider webhooks keep failing verification: a wrong secret, a clock problem, or forged requests"
           runbook: docs/runbooks/needs-attention.md#idemwebhooksignaturefailures
+
+      - alert: IdemWebhookOrphans
+        expr: sum(increase(idem_webhooks_applied_total{outcome="orphaned"}[1h])) > 0
+        for: 0m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} provider webhooks in the last hour matched no payout idem knows"
+          runbook: docs/runbooks/needs-attention.md#idemwebhookorphans
