@@ -3,6 +3,7 @@
 package failpoint
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -125,4 +126,20 @@ func TestEnableFromEnv_Errors(t *testing.T) {
 		entry := spec
 		require.Contains(t, err.Error(), entry, "error must name the bad entry")
 	}
+}
+
+// Slice 2.3: an exiting failpoint names itself first, so a chaos run can tell
+// which failpoints actually fired.
+func TestEnableFromEnv_ExitNamesTheFailpoint(t *testing.T) {
+	t.Cleanup(Reset)
+	var code int
+	origExit, origErr := exitFunc, stderr
+	var buf strings.Builder
+	exitFunc, stderr = func(c int) { code = c }, &buf
+	t.Cleanup(func() { exitFunc, stderr = origExit, origErr })
+
+	require.NoError(t, EnableFromEnv("before_commit=exit"))
+	Hit("before_commit")
+	require.Equal(t, 137, code)
+	require.Equal(t, "failpoint before_commit fired: exit\n", buf.String())
 }

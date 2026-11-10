@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -46,14 +47,20 @@ func main() {
 	}
 
 	// Signed payout webhooks (M2 §4.1): sent when a URL is configured.
-	webhookURL := os.Getenv("FAKEPROVIDER_WEBHOOK_URL")
+	// A comma-separated list rotates deliveries across API replicas.
+	var webhookURLs []string
+	for _, u := range strings.Split(os.Getenv("FAKEPROVIDER_WEBHOOK_URL"), ",") {
+		if u = strings.TrimSpace(u); u != "" {
+			webhookURLs = append(webhookURLs, u)
+		}
+	}
 	webhookSecret := os.Getenv("FAKEPROVIDER_WEBHOOK_SECRET")
-	if webhookURL != "" && webhookSecret == "" {
+	if len(webhookURLs) > 0 && webhookSecret == "" {
 		logger.Error("FAKEPROVIDER_WEBHOOK_SECRET is required with FAKEPROVIDER_WEBHOOK_URL")
 		os.Exit(2)
 	}
 	provider := fakeprovider.New(fakeprovider.Options{
-		PayoutSettle: settle, Hang: hang, WebhookURL: webhookURL, WebhookSecret: []byte(webhookSecret),
+		PayoutSettle: settle, Hang: hang, WebhookURLs: webhookURLs, WebhookSecret: []byte(webhookSecret),
 	})
 
 	srv := &http.Server{

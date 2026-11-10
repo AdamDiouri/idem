@@ -1,11 +1,16 @@
 package chaos
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/AdamDiouri/idem/internal/fakeprovider"
 )
 
 func cfg(seed int64) PlanConfig {
@@ -73,8 +78,12 @@ func TestPlan_FaultsAreValid(t *testing.T) {
 				require.NotEmpty(t, e.Faults.Rules)
 				require.NoError(t, e.Faults.Validate())
 				for _, r := range e.Faults.Rules {
-					require.GreaterOrEqual(t, r.Probability, 0.1)
-					require.LessOrEqual(t, r.Probability, 0.4)
+					lo, hi := 0.1, 0.4
+					if r.Endpoint == "webhooks" { // slice 2.3: likelier, so they meet settling payouts
+						lo, hi = 0.2, 0.5
+					}
+					require.GreaterOrEqual(t, r.Probability, lo)
+					require.LessOrEqual(t, r.Probability, hi)
 				}
 			}
 		}
@@ -101,7 +110,7 @@ func TestWorkerEnv_SetsCallbackTimings(t *testing.T) {
 // the client gives up after 1s is harsher than any real provider and parked
 // healthy payouts. The hang is compressed too.
 func TestProviderEnv_CompressesHang(t *testing.T) {
-	env := providerEnv(9999, 8888)
+	env := providerEnv(9999, []int{8888})
 	require.Contains(t, env, "FAKEPROVIDER_ADDR=127.0.0.1:9999")
 	require.Contains(t, env, "FAKEPROVIDER_PAYOUT_SETTLE=300ms")
 	require.Contains(t, env, "FAKEPROVIDER_HANG=3s")
@@ -110,9 +119,139 @@ func TestProviderEnv_CompressesHang(t *testing.T) {
 // Slice 2.2: the chaos provider sends signed webhooks to the chaos API, which
 // shares the secret.
 func TestProviderEnv_SendsWebhooksToAPI(t *testing.T) {
-	env := providerEnv(1, 2)
-	require.Contains(t, env, "FAKEPROVIDER_WEBHOOK_URL=http://127.0.0.1:2/webhooks/provider")
+	env := providerEnv(1, []int{2, 3})
+	require.Contains(t, env, "FAKEPROVIDER_WEBHOOK_URL=http://127.0.0.1:2/webhooks/provider,http://127.0.0.1:3/webhooks/provider")
 	require.Contains(t, env, "FAKEPROVIDER_WEBHOOK_SECRET="+webhookSecret)
-	require.Contains(t, apiEnv("postgres://x", 2), "IDEM_PROVIDER_WEBHOOK_SECRETS="+webhookSecret)
+	require.Contains(t, apiEnv("postgres://x", 2, "webhook_after_insert=exit@0.02"), "IDEM_PROVIDER_WEBHOOK_SECRETS="+webhookSecret)
+	require.Contains(t, apiEnv("postgres://x", 2, "webhook_after_insert=exit@0.02"), "IDEM_FAILPOINTS=webhook_after_insert=exit@0.02")
 	require.GreaterOrEqual(t, len(webhookSecret), 16)
+}
+
+var wantWebhookModes = []string{fakeprovider.ModeDupWebhook, fakeprovider.ModeFastWebhook, fakeprovider.ModeDelayWebhook,
+	fakeprovider.ModeReorder, fakeprovider.ModeDropWebhook, fakeprovider.ModeBadSignature}
+
+// Slice 2.3: runs of a minute or more inject every webhook fault.
+func TestPlan_IncludesEveryWebhookFaultInLongRuns(t *testing.T) {
+	for seed := int64(1); seed <= 20; seed++ {
+		seen := map[string]bool{}
+		for _, e := range NewPlan(PlanConfig{Seed: seed, Duration: 90 * time.Second, Workers: 4, LeaseTTL: 4 * time.Second}) {
+			for _, r := range e.Faults.Rules {
+				if r.Endpoint == "webhooks" {
+					seen[r.Mode] = true
+				}
+			}
+		}
+		for _, m := range wantWebhookModes {
+			require.True(t, seen[m], "seed %d: no %s", seed, m)
+		}
+	}
+}
+
+func TestPlan_WebhookRulesTargetWebhooksOnly(t *testing.T) {
+	for seed := int64(1); seed <= 20; seed++ {
+		for _, e := range NewPlan(PlanConfig{Seed: seed, Duration: 90 * time.Second, Workers: 4, LeaseTTL: 4 * time.Second}) {
+			require.NoError(t, e.Faults.Validate(), "seed %d", seed)
+		}
+	}
+}
+
+// Slice 2.3: an API restart hits one replica, and over many seeds both.
+func TestPlan_RestartAPITargetsOneReplica(t *testing.T) {
+	targets := map[int]bool{}
+	for seed := int64(1); seed <= 20; seed++ {
+		for _, e := range NewPlan(PlanConfig{Seed: seed, Duration: 90 * time.Second, Workers: 4, APIs: 2, LeaseTTL: 4 * time.Second}) {
+			if e.Kind == RestartAPI {
+				require.GreaterOrEqual(t, e.Target, 0)
+				require.Less(t, e.Target, 2)
+				targets[e.Target] = true
+			}
+		}
+	}
+	require.Len(t, targets, 2)
+}
+
+// faultWindows maps each SetProviderFaults event to how long it stays in
+// force: until the next fault change, or the end of the campaign.
+func faultWindows(events []Event, duration time.Duration) map[int]time.Duration {
+	out := map[int]time.Duration{}
+	for i, e := range events {
+		if e.Kind != SetProviderFaults {
+			continue
+		}
+		end := duration
+		for _, n := range events[i+1:] {
+			if n.Kind == SetProviderFaults || n.Kind == ClearProviderFaults {
+				end = n.At
+				break
+			}
+		}
+		out[i] = end - e.At
+	}
+	return out
+}
+
+// Slice 2.3 (found by campaigns): a webhook fault armed for under a second
+// can meet no payout at all. Each one gets a window of at least 5s.
+func TestPlan_EveryWebhookFaultHasALongWindow(t *testing.T) {
+	for seed := int64(1); seed <= 30; seed++ {
+		events := NewPlan(PlanConfig{Seed: seed, Duration: 90 * time.Second, Workers: 4, APIs: 2, LeaseTTL: 4 * time.Second})
+		long := map[string]bool{}
+		for i, w := range faultWindows(events, 90*time.Second) {
+			if w < minFaultWindow {
+				continue
+			}
+			for _, r := range events[i].Faults.Rules {
+				if r.Endpoint == "webhooks" {
+					long[r.Mode] = true
+				}
+			}
+		}
+		for _, m := range wantWebhookModes {
+			require.True(t, long[m], "seed %d: %s never in force for %s", seed, m, minFaultWindow)
+		}
+	}
+}
+
+// Final review C1/C2: runs of a minute or more reserve a webhook-fault block:
+// one set per webhook fault, that fault alone, each in force for at least
+// minFaultWindow, starting once traffic flows (>= 10% of the run), with no
+// other fault change inside it.
+func TestPlan_WebhookFaultBlock(t *testing.T) {
+	for _, d := range []time.Duration{60 * time.Second, 90 * time.Second, 120 * time.Second, 300 * time.Second} {
+		for seed := int64(1); seed <= 2000; seed++ {
+			events := NewPlan(PlanConfig{Seed: seed, Duration: d, Workers: 4, APIs: 2, LeaseTTL: 4 * time.Second})
+			found := map[string]bool{}
+			for i, e := range events {
+				if e.Kind != SetProviderFaults || len(e.Faults.Rules) != 1 || e.Faults.Rules[0].Endpoint != "webhooks" {
+					continue
+				}
+				// Planned with slack: executed times drift (a slow event before a
+				// window's start), and the verdict measures the executed window.
+				if faultWindow(events, i, d) < minFaultWindow+faultWindowSlack || e.At < d/10 || e.At > d*9/10 {
+					continue
+				}
+				found[e.Faults.Rules[0].Mode] = true
+			}
+			for _, m := range wantWebhookModes {
+				require.True(t, found[m], "%s seed %d: no dedicated %s window", d, seed, m)
+			}
+			kinds := map[EventKind]bool{}
+			for _, e := range events {
+				kinds[e.Kind] = true
+				require.Less(t, e.At, d, "%s seed %d: event past the run", d, seed)
+			}
+			require.Len(t, kinds, len(AllKinds), "%s seed %d: every disruption kind still occurs", d, seed)
+		}
+	}
+}
+
+// Minor fix: a process that never becomes ready shows why, from its own log
+// (e.g. a release binary refusing failpoints).
+func TestWithLogTail_ShowsTheProcessLog(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "api-0.log")
+	require.NoError(t, os.WriteFile(log, []byte("starting\nfailpoints requested but this binary was built with -tags nofailpoint\n"), 0o600))
+	err := withLogTail(errors.New("api-0: not ready"), log)
+	require.ErrorContains(t, err, "api-0: not ready")
+	require.ErrorContains(t, err, "built with -tags nofailpoint")
+	require.Equal(t, "boom", withLogTail(errors.New("boom"), filepath.Join(t.TempDir(), "missing.log")).Error())
 }

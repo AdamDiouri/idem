@@ -54,6 +54,11 @@ type Report struct {
 	AckMismatches  []string        `json:"ack_mismatches"` // accepted IDs the database disagrees with
 	FaultHits      map[string]int  `json:"fault_hits"`     // provider faults that actually fired
 	FailpointExits int             `json:"failpoint_exits"`
+	FailpointFires map[string]int  `json:"failpoint_fires"` // name → times it fired (from process logs)
+	// Per API replica: provider webhooks it stored as new, and those it
+	// recognised as duplicates (often of an event another replica stored).
+	WebhooksAccepted  map[string]int `json:"webhooks_accepted"`
+	WebhooksDuplicate map[string]int `json:"webhooks_duplicate"`
 	// Recovery evidence (informational): completions discarded because the
 	// worker had lost its lease, and steps that succeeded after being IN_DOUBT.
 	FencedCommits   int                    `json:"fenced_commits"`
@@ -147,11 +152,47 @@ func (r *Report) Evaluate() {
 	case restarts+pauses == 0:
 		add("vacuous: no process crashed or was paused")
 	}
+	// Webhook faults: a fault had a real window when it was in an effective
+	// fault set that stayed in force for minFaultWindow on the EXECUTED
+	// timeline. Every fault that had one must have fired; in runs of a minute
+	// or more, every fault must have had one (the plan reserves them).
+	armedWebhook := r.realWebhookWindows()
+	for _, mode := range webhookModes {
+		switch {
+		case armedWebhook[mode] && r.FaultHits[webhooksEndpoint+"/"+mode] == 0:
+			add("vacuous: webhook fault %s was armed but never fired", mode)
+		case !armedWebhook[mode] && r.Config.Duration >= time.Minute:
+			add("vacuous: webhook fault %s never had a real window (in force %s while work was in flight)", mode, minFaultWindow)
+		}
+	}
 	if effective[SetProviderFaults] > 0 && hits == 0 {
 		add("vacuous: provider faults were set but never fired")
 	}
-	if r.Config.Failpoints != "" && r.FailpointExits == 0 {
+	if (r.Config.Failpoints != "" || r.Config.APIFailpoints != "") && r.FailpointExits == 0 {
 		add("vacuous: failpoints were armed but none fired (binary built with -tags nofailpoint?)")
+	}
+	if r.Config.APIs > 1 {
+		for i := range r.Config.APIs {
+			name := fmt.Sprintf("api-%d", i)
+			if r.Clients.PerReplica[name] == 0 {
+				add("vacuous: API replica %s answered no client request", name)
+			}
+			if r.WebhooksAccepted[name] == 0 {
+				add("vacuous: API replica %s accepted no new webhook", name)
+			}
+			// Runs of a minute or more have the dedicated dup_webhook window,
+			// whose copies go to the next replica; shorter runs may see none.
+			if r.Config.Duration >= time.Minute && r.WebhooksDuplicate[name] == 0 {
+				add("vacuous: API replica %s deduplicated no webhook (no evidence of deduplication across replicas)", name)
+			}
+		}
+	}
+	if r.Config.Duration >= time.Minute {
+		for _, name := range armedFailpoints(r.Config.Failpoints + "," + r.Config.APIFailpoints) {
+			if r.FailpointFires[name] == 0 {
+				add("vacuous: failpoint %s was armed but never fired", name)
+			}
+		}
 	}
 	if r.Config.Duration >= time.Minute {
 		for _, k := range AllKinds {
@@ -166,8 +207,8 @@ func (r *Report) Evaluate() {
 // Reproduce returns the command that replays this run's fault plan.
 func (r *Report) Reproduce() string {
 	c := r.Config
-	return fmt.Sprintf("bin/chaos --seed %d --duration %s --workflows %d --workers %d --sweepers %d",
-		r.Seed, c.Duration, c.Workflows, c.Workers, c.Sweepers)
+	return fmt.Sprintf("bin/chaos --seed %d --duration %s --workflows %d --workers %d --apis %d --sweepers %d",
+		r.Seed, c.Duration, c.Workflows, c.Workers, max(c.APIs, 1), c.Sweepers)
 }
 
 // Text renders a human-readable summary.
@@ -203,7 +244,32 @@ func (r *Report) Text() string {
 		fmt.Fprintf(&b, "  %-22s %d (effective %d)\n", k, kinds[k], effective[k])
 	}
 	fmt.Fprintf(&b, "provider fault hits: %v\n", r.FaultHits)
+	if r.Config.APIs > 1 {
+		var reqs, accepted, dups []string
+		for i := range r.Config.APIs {
+			name := fmt.Sprintf("api-%d", i)
+			reqs = append(reqs, fmt.Sprintf("%s=%d", name, r.Clients.PerReplica[name]))
+			accepted = append(accepted, fmt.Sprintf("%s=%d", name, r.WebhooksAccepted[name]))
+			dups = append(dups, fmt.Sprintf("%s=%d", name, r.WebhooksDuplicate[name]))
+		}
+		fmt.Fprintf(&b, "api replicas: %d (requests %s; webhooks accepted %s, duplicates %s)\n", r.Config.APIs,
+			strings.Join(reqs, " "), strings.Join(accepted, " "), strings.Join(dups, " "))
+	}
+	conflicts := 0
+	for _, v := range r.Violations {
+		if v.Invariant == "I10" {
+			conflicts++
+		}
+	}
+	fmt.Fprintf(&b, "conflicts: %d (provider webhooks contradicting idem; any is an I10 violation)\n", conflicts)
 	fmt.Fprintf(&b, "failpoint exits: %d\n", r.FailpointExits)
+	if len(r.FailpointFires) > 0 {
+		var fires []string
+		for _, name := range slices.Sorted(maps.Keys(r.FailpointFires)) {
+			fires = append(fires, fmt.Sprintf("%s=%d", name, r.FailpointFires[name]))
+		}
+		fmt.Fprintf(&b, "failpoints fired: %s\n", strings.Join(fires, " "))
+	}
 	fmt.Fprintf(&b, "fenced commits: %d\nin-doubt resolved: %d\n", r.FencedCommits, r.InDoubtResolved)
 	fmt.Fprintf(&b, "callback polls: %d (payouts that waited: %d)\n", r.CallbackPolls, r.PayoutsWaited)
 	fmt.Fprintf(&b, "webhooks: %d applied, %d duplicates, %d deferred\n", r.Webhooks.Applied, r.Webhooks.Duplicates, r.Webhooks.Deferred)
@@ -265,4 +331,68 @@ type WebhookCounts struct {
 	Applied    int `json:"applied"`
 	Duplicates int `json:"duplicates"`
 	Deferred   int `json:"deferred"`
+}
+
+// armedFailpoints lists the failpoint names in comma-separated specs
+// ("name=action[@p],..."), sorted and without duplicates.
+func armedFailpoints(specs string) []string {
+	seen := map[string]bool{}
+	for entry := range strings.SplitSeq(specs, ",") {
+		if name, _, ok := strings.Cut(strings.TrimSpace(entry), "="); ok && name != "" {
+			seen[name] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(seen))
+}
+
+// realWebhookWindows reports which webhook faults were in a fault set that
+// stayed in force for minFaultWindow while work was in flight, measured on the
+// executed timeline (wall times), not the plan: a slow event in between shortens a
+// window, a late fault change lengthens it.
+func (r *Report) realWebhookWindows() map[string]bool {
+	out := map[string]bool{}
+	if len(r.Events) == 0 {
+		return out
+	}
+	start := r.Events[0].WallTime.Add(-r.Events[0].At) // when the campaign began
+	for _, e := range r.Events[1:] {
+		if s := e.WallTime.Add(-e.At); s.Before(start) {
+			start = s
+		}
+	}
+	end := start.Add(r.Config.Duration)
+	for i, e := range r.Events {
+		if e.Kind != SetProviderFaults || e.Err != "" || e.Skipped != "" {
+			continue
+		}
+		until := end
+		for _, n := range r.Events[i+1:] {
+			if (n.Kind == SetProviderFaults || n.Kind == ClearProviderFaults) && n.Err == "" && n.Skipped == "" {
+				until = n.WallTime
+				break
+			}
+		}
+		if until.Sub(e.WallTime) < minFaultWindow {
+			continue
+		}
+		// Work in flight during the window, not only at its first instant:
+		// in-flight is sampled when an event fires, and a window opened right
+		// after a database restart samples 0 while traffic flows through it.
+		busy := e.InFlight > 0
+		for _, n := range r.Events[i+1:] {
+			if !n.WallTime.Before(until) {
+				break
+			}
+			busy = busy || n.InFlight > 0
+		}
+		if !busy {
+			continue
+		}
+		for _, rule := range e.Faults.Rules {
+			if rule.Endpoint == webhooksEndpoint {
+				out[rule.Mode] = true
+			}
+		}
+	}
+	return out
 }

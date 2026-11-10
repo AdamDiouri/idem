@@ -68,7 +68,7 @@ func webhookProvider(t *testing.T, rcv *receiver, maxAttempts int, run bool) (*f
 	rsrv := httptest.NewServer(http.HandlerFunc(rcv.handler))
 	t.Cleanup(rsrv.Close)
 	p, srv := newServerWith(t, fakeprovider.Options{
-		WebhookURL: rsrv.URL, WebhookSecret: whSecret, WebhookRetryBase: 20 * time.Millisecond,
+		WebhookURLs: []string{rsrv.URL}, WebhookSecret: whSecret, WebhookRetryBase: 20 * time.Millisecond,
 		WebhookMaxAttempts: maxAttempts, Tick: 5 * time.Millisecond,
 	})
 	if run {
@@ -231,7 +231,7 @@ func TestWebhook_FastBeatsTheResponseEvenWithRun(t *testing.T) {
 	rsrv := httptest.NewServer(http.HandlerFunc(rcv.handler))
 	t.Cleanup(rsrv.Close)
 	p, srv := newServerWith(t, fakeprovider.Options{
-		WebhookURL: rsrv.URL, WebhookSecret: whSecret, WebhookRetryBase: 20 * time.Millisecond, Tick: time.Millisecond,
+		WebhookURLs: []string{rsrv.URL}, WebhookSecret: whSecret, WebhookRetryBase: 20 * time.Millisecond, Tick: time.Millisecond,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -264,4 +264,28 @@ func TestWebhook_DeliveriesDoNotQueueBehindASlowOne(t *testing.T) {
 	require.Eventually(t, func() bool { return len(rcv.all()) == 2 }, time.Second, 5*time.Millisecond,
 		"the second webhook arrives while the first is still hanging")
 	once.Do(func() { close(release) })
+}
+
+// Slice 2.3: with several webhook URLs (API replicas), a retry goes to the
+// next one, so deduplication is exercised across replicas.
+func TestWebhook_RetryGoesToTheNextURL(t *testing.T) {
+	a := &receiver{respond: func(int) int { return http.StatusServiceUnavailable }}
+	b := &receiver{}
+	asrv := httptest.NewServer(http.HandlerFunc(a.handler))
+	bsrv := httptest.NewServer(http.HandlerFunc(b.handler))
+	t.Cleanup(asrv.Close)
+	t.Cleanup(bsrv.Close)
+	p, srv := newServerWith(t, fakeprovider.Options{
+		WebhookURLs: []string{asrv.URL, bsrv.URL}, WebhookSecret: whSecret,
+		WebhookRetryBase: 20 * time.Millisecond, Tick: 5 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go p.Run(ctx)
+	post(t, srv.URL, "/payouts", "k1", payoutBody("mer_1", 9825))
+
+	require.Eventually(t, func() bool { d := p.Webhooks(); return len(d) == 1 && d[0].Delivered }, 2*time.Second, 5*time.Millisecond)
+	require.Len(t, a.all(), 1)
+	require.Len(t, b.all(), 1)
+	require.Equal(t, []string{asrv.URL, bsrv.URL}, p.Webhooks()[0].Targets)
 }

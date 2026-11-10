@@ -200,14 +200,14 @@ The columns `callback_deadline` and status `AWAITING_CALLBACK` already exist fro
 
 | ID | Failure | Mechanism | Expected | Injected by |
 |---|---|---|---|---|
-| F15 | Duplicate provider webhook | Inbox primary key | Applied once | `dup_webhook` |
-| F16 | Webhook before our `AWAITING_CALLBACK` commit | Row stays pending, retried | Applied once the step is ready | `fast_webhook` |
-| F17 | Contradictory / reordered webhook | Never flip; `CONFLICT` + alert | Loud, not wrong | `reorder` |
-| F18 | Webhook never arrives | Deadline → worker polls | Resolved by polling; bounded, then `callback_unresolved` | `drop_webhook` |
-| F19 | Forged or replayed webhook | Signature + timestamp | `400`, nothing stored | `bad_signature`, unit tests |
-| F28 | Crash after storing a webhook, before `200` | Provider retries; dedup | Applied once | failpoint `webhook_after_insert` |
-| F29 | Crash while applying a webhook | Transaction rolls back; row still pending | Applied once later | failpoint `inbox_before_commit`, kills |
-| F30 | Webhook and poll race | Same CAS apply | One applies, the other no-ops | `delay_webhook` + short deadline |
+| F15 | Duplicate provider webhook | Inbox primary key | Applied once | `dup_webhook`; exercised in chaos (2.3) |
+| F16 | Webhook before our `AWAITING_CALLBACK` commit | Row stays pending, retried | Applied once the step is ready | `fast_webhook`; exercised in chaos (2.3) |
+| F17 | Contradictory / reordered webhook | Never flip; `CONFLICT` + alert | Loud, not wrong | `reorder`; exercised in chaos (2.3) |
+| F18 | Webhook never arrives | Deadline → worker polls | Resolved by polling; bounded, then `callback_unresolved` | `drop_webhook`; exercised in chaos (2.3) |
+| F19 | Forged or replayed webhook | Signature + timestamp | `400`, nothing stored | `bad_signature`, unit tests; exercised in chaos (2.3) |
+| F28 | Crash after storing a webhook, before `200` | Provider retries; dedup | Applied once | failpoint `webhook_after_insert`; exercised in chaos (2.3) |
+| F29 | Crash while applying a webhook | Transaction rolls back; row still pending | Applied once later | failpoint `inbox_before_commit`, kills; exercised in chaos (2.3) |
+| F30 | Webhook and poll race | Same CAS apply | One applies, the other no-ops | `delay_webhook` + short deadline; exercised in chaos (2.3) |
 | F31 | Shop down or slow | Relay backoff; `DEAD` after the budget | Delivered when it recovers; loud otherwise | fake shop `down`, `slow` |
 | F32 | Relay crash after the shop's `2xx`, before marking delivered | At least once + event ID | The shop sees it twice, processes it once | failpoint `relay_after_send`, `ack_after_timeout` |
 | F33 | Outcome committed but the relay never runs | Outbox row durable | Delivered when a relay starts | kill all relays |
@@ -217,10 +217,10 @@ The columns `callback_deadline` and status `AWAITING_CALLBACK` already exist fro
 
 | ID | Invariant | Checked against |
 |---|---|---|
-| **I4** (extended) | After quiescence: no step `AWAITING_CALLBACK`, no inbox row `PENDING`, no outbox row `PENDING` | DB |
+| **I4** (extended; chaos since 2.3) | After quiescence: no step `AWAITING_CALLBACK`, no inbox row `PENDING`, no outbox row `PENDING` | DB |
 | **I8** | Every terminal workflow has exactly one outbox event, of the matching type; no non-terminal workflow has one | DB |
 | **I9** | The fake shop's deduplicated view equals idem's terminal workflows: same set, same outcomes. No event the shop saw contradicts the database | Fake shop `/_seen` × DB |
-| **I10** | After quiescence, every inbox row is `PROCESSED`, `IGNORED` (stale or orphan, counted) or `EVIDENCE` (attached to a parked workflow). `CONFLICT` appears only if the provider's state truly contradicts idem's, which the fake provider never does, so chaos expects none. | DB × fake provider fault log |
+| **I10** (checked by every chaos run since 2.3) | After quiescence, every inbox row is `PROCESSED`, `IGNORED` (stale or orphan, counted) or `EVIDENCE` (attached to a parked workflow). `CONFLICT` appears only if the provider's state truly contradicts idem's, which the fake provider never does, so chaos expects none. | DB × fake provider fault log |
 | **Recon** | `idem reconcile` over the campaign window: zero discrepancies on non-parked workflows; parked workflows' discrepancies match the oracle | Reconciliation tables × oracle |
 
 ## 10. Delivery slices
@@ -231,7 +231,7 @@ Each slice ends like M1's: tests, an independent review, fixes, a PR and the doc
 |---|---|---|
 | **2.1** Async payouts + polling | Fake provider `202` + settlement + `GET /payouts/{id}`; `ACCEPTED_ASYNC` → `AWAITING_CALLBACK`; worker polls past the deadline; `callback_unresolved`; I4 extended | F18 (no webhooks exist yet: polling alone must complete every payout), pivot rule on the async outcome |
 | **2.2** Provider webhooks | Signed webhooks from the fake provider with its retries; `/webhooks/provider`; inbox; worker inbox loop; conflicts; metrics, alerts, runbook | F15, F16, F17, F19, F28, F29, F30; I10 |
-| **2.3** Async chaos | Webhook faults and the new failpoints in chaos campaigns; the verdict requires them to be effective | All of A at process level |
+| **2.3** Async chaos | Webhook faults and the new failpoints in chaos campaigns; in runs of a minute or more, the plan reserves a block of six back-to-back 8s windows (5s plus slack; one webhook fault each, once traffic flows) and the verdict requires every webhook fault to have had a real window and fired, and every armed failpoint to have fired. **Two API replicas** (owner's decision, 2026-11-10): misbehaving clients and provider webhooks are spread across both, and API restarts hit one replica at a time | All of A at process level; I6 (one workflow per key) and webhook dedup proven across replicas, since the API is stateless and Postgres enforces both |
 | **2.4** Status + outbox | `GET /workflows/{id}`; outbox written in `transitionWorkflow`; I8 | F33 (rows survive with no relay) |
 | **2.5** Relay + fake shop | `idem relay`, signing, backoff, `DEAD`; admin outbox commands; fake shop with faults; chaos with the shop; README "Receiving webhooks" | F31, F32; I9 |
 | **2.6** Reconciliation | Provider balance-transactions report; `idem reconcile`; tables, metrics, alerts, admin, runbook; chaos requires zero discrepancies | F34; Recon invariant |

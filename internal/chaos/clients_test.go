@@ -52,7 +52,7 @@ func workflowCount(t *testing.T, pool *pgxpool.Pool) int {
 }
 
 func clientConfig(url string, n int, seed int64) ClientConfig {
-	return ClientConfig{BaseURL: url, Token: testToken, Workflows: n, Concurrency: 8, Seed: seed}
+	return ClientConfig{BaseURLs: []string{url}, Token: testToken, Workflows: n, Concurrency: 8, Seed: seed}
 }
 
 func TestClients_RetriesConvergeOnOneWorkflow(t *testing.T) {
@@ -169,4 +169,53 @@ func TestClients_StopWhenContextEnds(t *testing.T) {
 	res := RunClients(ctx, clientConfig("http://127.0.0.1:1", 5, 1))
 	require.NotEmpty(t, res.Unfinished)
 	require.True(t, errors.Is(ctx.Err(), context.DeadlineExceeded))
+}
+
+// Slice 2.3: clients rotate across API replicas, so retries and double
+// clicks of one key usually reach both.
+func TestClients_RotateAcrossReplicas(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	a, _ := startAPI(t, pool, "")
+	b, _ := startAPI(t, pool, "")
+	cfg := clientConfig(a, 20, 5)
+	cfg.BaseURLs = []string{a, b}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	res := RunClients(ctx, cfg)
+	require.Empty(t, res.Conflicts)
+	require.Empty(t, res.Unfinished)
+	require.Positive(t, res.PerReplica[a])
+	require.Positive(t, res.PerReplica[b])
+	require.Equal(t, len(res.Accepted), workflowCount(t, pool))
+}
+
+// Review focus 3: one replica down (restarting); every workflow is still
+// accepted through the other.
+func TestClients_SurviveOneReplicaDown(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	a, _ := startAPI(t, pool, "")
+	b, stopB := startAPI(t, pool, "")
+	stopB()
+	cfg := clientConfig(a, 20, 6)
+	cfg.BaseURLs = []string{a, b}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	res := RunClients(ctx, cfg)
+	require.Empty(t, res.Unfinished)
+	require.Empty(t, res.Conflicts)
+	require.Empty(t, res.Unexpected)
+	require.Zero(t, res.PerReplica[b], "a replica that is down answers nothing")
+	require.Equal(t, len(res.Accepted), workflowCount(t, pool))
+}
+
+// Minor fix: no replica to send to is a reported failure, not a panic.
+func TestClients_NoReplicaIsReportedNotPanic(t *testing.T) {
+	cfg := clientConfig("", 3, 1)
+	cfg.BaseURLs = nil
+	var res ClientResult
+	require.NotPanics(t, func() { res = RunClients(context.Background(), cfg) })
+	require.NotEmpty(t, res.Unexpected)
+	require.Contains(t, res.Unexpected[0], "no API replica")
 }

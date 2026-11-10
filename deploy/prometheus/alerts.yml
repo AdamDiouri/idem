@@ -123,3 +123,13 @@ groups:
         annotations:
           summary: "{{ $value }} provider webhooks in the last hour matched no payout idem knows"
           runbook: docs/runbooks/needs-attention.md#idemwebhookorphans
+
+      # Slice 2.3: is the database connection pool a bottleneck?
+      - alert: IdemDBPoolSaturated
+        expr: max by (job) (rate(idem_db_pool_acquire_wait_seconds_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.job }} processes spend {{ $value | humanize }}s per second waiting for a database connection"
+          runbook: docs/runbooks/needs-attention.md#idemdbpoolsaturated

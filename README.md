@@ -138,6 +138,8 @@ Every change needs `--reason` and `--expect-version` (the `VERSION` column of `l
 - refunding a customer whose merchant was paid pays out twice
 - failing a charge that happened loses the customer's money
 
+**Database pool:** every process exports its connection pool (`idem_db_pool_*`): connections in use, idle and maximum, and how often and how long requests waited for one. `IdemDBPoolSaturated` fires on sustained waiting.
+
 **Profiling (pprof):** workers and sweepers serve Go's profiler next to `/metrics` on their internal port; compose publishes them on localhost only (worker `:8090`, sweeper `:8091`). The API serves it only on `IDEM_DEBUG_ADDR`, never on its public port.
 
 ```bash
@@ -162,9 +164,11 @@ curl -s 'http://localhost:8090/debug/pprof/goroutine?debug=1' | head            
 ## Run a chaos campaign
 
 The chaos harness runs the real binaries as separate processes and does its best to break them:
-- **Infrastructure:** a throwaway Postgres container, the fake provider, the API, 4 workers and 2 sweepers.
-- **Traffic:** about 300 workflows from misbehaving clients (impatient retries, double-clicks, reformatted retries, malformed bodies).
-- **Disruptions:** a seeded plan of `kill -9`, `SIGSTOP` beyond the lease, API and database restarts, and provider faults. Workers also carry crash failpoints that make them `exit` mid-step, and a supervisor restarts them like Kubernetes would.
+- **Infrastructure:** a throwaway Postgres container, the fake provider, **two API replicas** (`--apis`), 4 workers and 2 sweepers.
+- **Traffic:** misbehaving clients (impatient retries, double-clicks, reformatted retries, malformed bodies). Every request goes to the next replica in turn, so one payment's retries usually reach both.
+- **Webhooks:** the provider signs a webhook for every settled payout and rotates deliveries across the replicas, so its retries reach the *other* replica.
+- **Disruptions:** a seeded plan of `kill -9`, `SIGSTOP` beyond the lease, API restarts (one replica at a time), database restarts, provider faults, and the six **webhook faults** (duplicated, sent before the `202`, delayed, a stale contradiction, dropped, badly signed). In runs of a minute or more, the plan reserves a **webhook-fault block**: six back-to-back 8-second windows (5 seconds plus slack for timing drift), one fault each and nothing else, starting once traffic flows.
+- **Crash failpoints** make processes `exit` mid-step, including `inbox_before_commit` on workers and `webhook_after_insert` on the API. A supervisor restarts them like Kubernetes would.
 
 Afterwards it clears every fault, lets the system settle, and checks every invariant.
 
@@ -179,17 +183,17 @@ chaos run seed 1: PASSED
 events executed: 33 (failed to apply: 0, skipped: 1); effective = met work in flight
   kill_worker 16 (effective 16)   pause_worker 4 (4)   restart_api 1 (1)
   restart_postgres 5 (5)          set_provider_faults 6 (6)   clear_provider_faults 1 (1)
-provider fault hits: 59 across charges/payouts/refunds
-failpoint exits: 99
-clients: submitted 1000, accepted 884, malformed rejected 116, retried attempts 178
-outcomes: COMPENSATED=74 FAILED=66 NEEDS_ATTENTION=5 SUCCEEDED=739
-settled in: 3.619s
+provider fault hits: … webhooks/bad_signature:22 webhooks/delay_webhook:17 webhooks/drop_webhook:2 …
+api replicas: 2 (requests api-0=… api-1=…; webhooks accepted api-0=… api-1=…, duplicates api-0=… api-1=…)
+failpoints fired: after_claim=22 after_provider_call=35 before_commit=40 inbox_before_commit=19 webhook_after_insert=25
+webhooks: … applied, … duplicates, … deferred
+outcomes: COMPENSATED=123 FAILED=44 NEEDS_ATTENTION=7 SUCCEEDED=710
 violations: 0
 ```
 
 **How to read the result:**
 - **`PASSED` requires all of:**
-  - zero invariant violations (I1–I7)
+  - zero invariant violations (I1–I10; any webhook `CONFLICT` is one, since the fake provider never truly contradicts itself)
   - every workflow terminal or parked, with no step left `RUNNING`/`IN_DOUBT`
   - no idempotency key that ever returned two different workflows
   - every workflow a client was told about exists in the database under the same ID
@@ -198,7 +202,9 @@ violations: 0
 - **A pass must be earned, not vacuous:**
   - every kind of disruption must have met work in flight (an *effective* event)
   - provider faults must actually have hit requests
-  - armed failpoints must actually have fired
+  - every webhook fault that was in force for at least 5 seconds while work was in flight (measured on the executed timeline) must actually have fired; in runs of a minute or more, **every** webhook fault must have had such a window and fired
+  - every armed failpoint must actually have fired (failpoints name themselves when they do)
+  - with several API replicas, every replica must have answered clients and accepted new webhooks, and, in runs of a minute or more, recognised duplicates (evidence of deduplication across replicas)
   - a binary built with `-tags nofailpoint` refuses `IDEM_FAILPOINTS` instead of running silently
 - **Skipped events:** a kill or pause aimed at a worker that was already restarting is *skipped*. That is harmless, and it is neither counted nor treated as a failure.
 - **`NEEDS_ATTENTION`** entries list the step and reason. In a healthy run they are all `payout permanent_after_in_doubt`: payouts refused after an ambiguous attempt, parked for a human by the pivot safety rule instead of being refunded on a guess.

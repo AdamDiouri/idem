@@ -213,3 +213,29 @@ func TestServer_NoPprofOnPublicPort(t *testing.T) {
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
+
+// Review focus 1 (slice 2.3): replica A stores the event and crashes before
+// answering; the provider's retry reaches replica B, where it is a duplicate.
+func TestWebhooks_CrossReplicaRetryIsDuplicate(t *testing.T) {
+	pool := idemtest.NewPool(t, dsn)
+	t.Cleanup(failpoint.Reset)
+	replica := func() *httptest.Server {
+		opts := options()
+		opts.WebhookSecrets, opts.Inbox = [][]byte{whCurrent}, webhook.NewInbox(pool)
+		srv := httptest.NewServer(api.NewServer(opts, workflow.NewSubmitter(pool, 5*time.Second, defaultFees), pool))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	a, b := replica(), replica()
+	failpoint.Enable(api.FPWebhookAfterInsert, failpoint.CrashOnce()) // the next stored webhook crashes its handler
+
+	code, _, err := sendWebhook(t, a.URL, eventBody, signed(whCurrent, eventBody))
+	require.True(t, err != nil || code >= 500, "replica A never acknowledged (code %d, err %v)", code, err)
+	code, body, err := sendWebhook(t, b.URL, eventBody, signed(whCurrent, eventBody))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, code)
+	require.Contains(t, body, "duplicate")
+	var n int
+	require.NoError(t, pool.QueryRow(context.Background(), `SELECT count(*) FROM webhook_inbox`).Scan(&n))
+	require.Equal(t, 1, n)
+}

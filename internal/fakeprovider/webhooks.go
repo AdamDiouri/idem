@@ -14,8 +14,10 @@ import (
 
 const webhookTimeout = 2 * time.Second
 
-// delivery is one webhook event on its way to WebhookURL (and its log entry).
+// delivery is one webhook event on its way to WebhookURLs (and its log entry).
 type delivery struct {
+	index     int      // position in the queue: rotates the first target
+	targets   []string // the URL of each attempt
 	event     webhook.ProviderEvent
 	body      []byte
 	fault     string
@@ -31,18 +33,19 @@ type delivery struct {
 
 // WebhookDelivery is the oracle's view of one webhook event.
 type WebhookDelivery struct {
-	EventID   string `json:"event_id"`
-	Type      string `json:"type"`
-	PayoutID  string `json:"payout_id"`
-	Attempts  int    `json:"attempts"`
-	Delivered bool   `json:"delivered"`
-	Stale     bool   `json:"stale"`
-	Fault     string `json:"fault,omitempty"`
+	EventID   string   `json:"event_id"`
+	Type      string   `json:"type"`
+	PayoutID  string   `json:"payout_id"`
+	Attempts  int      `json:"attempts"`
+	Delivered bool     `json:"delivered"`
+	Stale     bool     `json:"stale"`
+	Fault     string   `json:"fault,omitempty"`
+	Targets   []string `json:"targets"` // the URL of each attempt, in order
 }
 
 // enqueueWebhookLocked queues the event for a just-settled payout. Callers hold p.mu.
 func (p *Provider) enqueueWebhookLocked(po *payout, now time.Time) {
-	if p.opts.WebhookURL == "" {
+	if len(p.opts.WebhookURLs) == 0 {
 		return
 	}
 	typ := webhook.EventPayoutPaid
@@ -69,7 +72,7 @@ func (p *Provider) newDeliveryLocked(po *payout, typ string, created int64, now 
 		e.Data.Status, e.Data.FailureCode = "failed", failureAccountClosed
 	}
 	e.Data.Metadata.WorkflowID = po.req.WorkflowID
-	d := &delivery{event: e, body: mustJSON(e), nextAt: now}
+	d := &delivery{index: len(p.webhooks), event: e, body: mustJSON(e), nextAt: now}
 	p.webhooks = append(p.webhooks, d)
 	return d
 }
@@ -99,7 +102,7 @@ func (p *Provider) Run(ctx context.Context) {
 // inline, before the 202 is written. The payout was held back from Run, so
 // nothing else can settle or send it first.
 func (p *Provider) deliverFast(ctx context.Context, slot string) {
-	if p.opts.WebhookURL == "" {
+	if len(p.opts.WebhookURLs) == 0 {
 		return
 	}
 	p.mu.Lock()
@@ -139,13 +142,22 @@ func (p *Provider) send(ctx context.Context, d *delivery) {
 	if d.fault == ModeBadSignature && d.attempts == 0 {
 		secret = []byte("not-the-secret")
 	}
-	ok := p.post(ctx, d.body, secret)
+	p.mu.Lock()
+	n := len(d.targets) // every send so far, including dup copies
+	p.mu.Unlock()
+	url := p.opts.WebhookURLs[(d.index+n)%len(p.opts.WebhookURLs)]
+	ok := p.post(ctx, url, d.body, secret)
+	sent := []string{url}
 	if ok && d.fault == ModeDupWebhook && !d.sentTwice {
-		p.post(ctx, d.body, p.opts.WebhookSecret) // the same event again
+		// The same event again, to the next replica: dedup across replicas.
+		dupURL := p.opts.WebhookURLs[(d.index+n+1)%len(p.opts.WebhookURLs)]
+		p.post(ctx, dupURL, d.body, p.opts.WebhookSecret)
+		sent = append(sent, dupURL)
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	d.targets = append(d.targets, sent...)
 	d.sending = false
 	d.attempts++
 	switch {
@@ -178,10 +190,10 @@ func (p *Provider) enqueueStaleLocked(d *delivery) {
 	s.stale, s.fault = true, ModeReorder
 }
 
-func (p *Provider) post(ctx context.Context, body, secret []byte) bool {
+func (p *Provider) post(ctx context.Context, url string, body, secret []byte) bool {
 	ctx, cancel := context.WithTimeout(ctx, webhookTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.opts.WebhookURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return false
 	}
@@ -204,6 +216,7 @@ func (p *Provider) Webhooks() []WebhookDelivery {
 		out = append(out, WebhookDelivery{
 			EventID: d.event.ID, Type: d.event.Type, PayoutID: d.event.Data.PayoutID,
 			Attempts: d.attempts, Delivered: d.delivered, Stale: d.stale, Fault: d.fault,
+			Targets: append([]string(nil), d.targets...),
 		})
 	}
 	return out

@@ -498,7 +498,8 @@ Initial set: `after_claim`, `before_provider_call`, `after_provider_call`, `befo
    5. Run the invariant checker; write a report (counts per terminal state, fenced commits, `IN_DOUBT` resolutions, violations with workflow IDs).
    - Runs are seeded. Honest caveat: OS scheduling isn't deterministic, so a seed reproduces the *fault plan*, not the exact interleaving. Fully deterministic simulation is a stretch goal.
    - As built (slice 1.5): `make chaos CHAOS_ARGS="--seed N --duration 90s"`.
-     - **Processes:** a throwaway Postgres container, the fake provider, the API, 4 workers and 2 sweepers.
+     - **Processes:** a throwaway Postgres container, the fake provider, **two API replicas** (since M2 slice 2.3; clients and webhooks rotate across them, restarts hit one at a time), 4 workers and 2 sweepers.
+     - **M2 slice 2.3:** campaigns inject the six webhook faults (runs of a minute or more reserve a block of six back-to-back 8s windows, 5s plus slack for timing drift, one fault each, once traffic flows) and the `inbox_before_commit` and `webhook_after_insert` failpoints. In runs of a minute or more the verdict requires every webhook fault to have had a real window (effective, ≥5s on the executed timeline) and fired, every armed failpoint to have fired, and every replica to have served clients, accepted new webhooks and recognised duplicates.
      - **Supervision:** a supervisor restarts any process that crashes (modelling Kubernetes); the fake provider is never killed, because it is the oracle.
      - **Child timings:** short (4s lease, 1s provider timeout, 100ms–2s retries), so a short run exercises many recoveries.
      - **Clients misbehave:** polite, impatient, double-click, reformatted-retry and malformed. They must never see two workflows for one key.
@@ -538,6 +539,7 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 - **Deferred to where they belong:**
   - *Sweeper snapshot cost* (whole-table counts every tick): measure with `cmd/loadgen` in M3, then index, sample or slow the interval with real numbers.
   - *`/metrics` authentication:* the endpoints reveal volumes, never IDs or secrets. Restrict them in M4 with a NetworkPolicy, or a separate internal-only port for the API.
+- **Database pool:** each process exports pgx's pool statistics (`idem_db_pool_*`: connections in use, idle, maximum; acquisitions that waited and the total wait), so "is the pool a bottleneck?" is a graph, not a guess. Alert `IdemDBPoolSaturated`.
 - **Profiling:** Go's `pprof` on the internal metrics port of workers and sweepers, and on the API's optional `IDEM_DEBUG_ADDR` (never on its public port).
 - **Tracing → Milestone 3, alongside the load generator (D20).** Traces answer "where did the time go" for one payment, and only show bottlenecks under load. idem hands work off **through database rows**, not calls: the API commits a workflow that a worker claims later, and a webhook lands in the inbox that another worker applies later. So the W3C trace context (`traceparent`) is **stored in the rows that carry work**: `workflows`, `steps`, `webhook_inbox`, and the outbox. Whichever process continues the work starts a span linked to it, so one trace shows API → queue wait → claim → provider call → commit, and webhook → inbox wait → apply. Metrics carry exemplars linking latency buckets to traces.
 
