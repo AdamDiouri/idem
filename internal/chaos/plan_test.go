@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/AdamDiouri/idem/internal/fakeprovider"
 )
 
 func cfg(seed int64) PlanConfig {
@@ -73,8 +75,12 @@ func TestPlan_FaultsAreValid(t *testing.T) {
 				require.NotEmpty(t, e.Faults.Rules)
 				require.NoError(t, e.Faults.Validate())
 				for _, r := range e.Faults.Rules {
-					require.GreaterOrEqual(t, r.Probability, 0.1)
-					require.LessOrEqual(t, r.Probability, 0.4)
+					lo, hi := 0.1, 0.4
+					if r.Endpoint == "webhooks" { // slice 2.3: likelier, so they meet settling payouts
+						lo, hi = 0.2, 0.5
+					}
+					require.GreaterOrEqual(t, r.Probability, lo)
+					require.LessOrEqual(t, r.Probability, hi)
 				}
 			}
 		}
@@ -115,4 +121,32 @@ func TestProviderEnv_SendsWebhooksToAPI(t *testing.T) {
 	require.Contains(t, env, "FAKEPROVIDER_WEBHOOK_SECRET="+webhookSecret)
 	require.Contains(t, apiEnv("postgres://x", 2), "IDEM_PROVIDER_WEBHOOK_SECRETS="+webhookSecret)
 	require.GreaterOrEqual(t, len(webhookSecret), 16)
+}
+
+var wantWebhookModes = []string{fakeprovider.ModeDupWebhook, fakeprovider.ModeFastWebhook, fakeprovider.ModeDelayWebhook,
+	fakeprovider.ModeReorder, fakeprovider.ModeDropWebhook, fakeprovider.ModeBadSignature}
+
+// Slice 2.3: runs of a minute or more inject every webhook fault.
+func TestPlan_IncludesEveryWebhookFaultInLongRuns(t *testing.T) {
+	for seed := int64(1); seed <= 20; seed++ {
+		seen := map[string]bool{}
+		for _, e := range NewPlan(PlanConfig{Seed: seed, Duration: 90 * time.Second, Workers: 4, LeaseTTL: 4 * time.Second}) {
+			for _, r := range e.Faults.Rules {
+				if r.Endpoint == "webhooks" {
+					seen[r.Mode] = true
+				}
+			}
+		}
+		for _, m := range wantWebhookModes {
+			require.True(t, seen[m], "seed %d: no %s", seed, m)
+		}
+	}
+}
+
+func TestPlan_WebhookRulesTargetWebhooksOnly(t *testing.T) {
+	for seed := int64(1); seed <= 20; seed++ {
+		for _, e := range NewPlan(PlanConfig{Seed: seed, Duration: 90 * time.Second, Workers: 4, LeaseTTL: 4 * time.Second}) {
+			require.NoError(t, e.Faults.Validate(), "seed %d", seed)
+		}
+	}
 }

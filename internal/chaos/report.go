@@ -148,6 +148,23 @@ func (r *Report) Evaluate() {
 	case restarts+pauses == 0:
 		add("vacuous: no process crashed or was paused")
 	}
+	// Every webhook fault armed in an effective event must have fired.
+	armedWebhook := map[string]bool{}
+	for _, e := range r.Events {
+		if e.Err != "" || e.Skipped != "" || e.Kind != SetProviderFaults || !e.effective() {
+			continue
+		}
+		for _, rule := range e.Faults.Rules {
+			if rule.Endpoint == webhooksEndpoint {
+				armedWebhook[rule.Mode] = true
+			}
+		}
+	}
+	for _, mode := range slices.Sorted(maps.Keys(armedWebhook)) {
+		if r.FaultHits[webhooksEndpoint+"/"+mode] == 0 {
+			add("vacuous: webhook fault %s was armed but never fired", mode)
+		}
+	}
 	if effective[SetProviderFaults] > 0 && hits == 0 {
 		add("vacuous: provider faults were set but never fired")
 	}

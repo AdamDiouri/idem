@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/AdamDiouri/idem/internal/fakeprovider"
+
 	"github.com/AdamDiouri/idem/internal/invariants"
 )
 
@@ -160,4 +162,19 @@ func TestReport_TextShowsFailpointFires(t *testing.T) {
 	r := healthy()
 	r.FailpointFires = map[string]int{"inbox_before_commit": 1, "after_claim": 2}
 	require.Contains(t, r.Text(), "failpoints fired: after_claim=2 inbox_before_commit=1")
+}
+
+// Review focus 5: a webhook fault armed in an effective event but never hit
+// proves nothing, so the run is vacuous.
+func TestReport_WebhookFaultArmedButNeverFiredIsVacuous(t *testing.T) {
+	r := healthy()
+	r.Events = append(r.Events, ExecutedEvent{InFlight: 4, Event: Event{Kind: SetProviderFaults,
+		Faults: fakeprovider.Faults{Rules: []fakeprovider.Rule{{Endpoint: "webhooks", Mode: fakeprovider.ModeReorder, Probability: 0.3}}}}})
+	r.Evaluate()
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "webhook fault reorder was armed but never fired")
+
+	r.FaultHits["webhooks/reorder"] = 2
+	r.Reasons = nil
+	r.Evaluate()
+	require.NotContains(t, strings.Join(r.Reasons, "\n"), "webhook fault")
 }

@@ -62,9 +62,14 @@ var endpointModes = map[string][]string{
 		fakeprovider.ModeErrorAfterEffect, fakeprovider.ModeRateLimit, fakeprovider.ModePayoutFail},
 	"refunds": {fakeprovider.ModeTimeoutBeforeEffect, fakeprovider.ModeTimeoutAfterEffect, fakeprovider.ModeErrorBeforeEffect,
 		fakeprovider.ModeErrorAfterEffect, fakeprovider.ModeRateLimit},
+	// Slice 2.3: provider webhooks (drawn once per payout, at acceptance).
+	"webhooks": webhookModes,
 }
 
-var endpoints = []string{"charges", "payouts", "refunds"}
+var webhookModes = []string{fakeprovider.ModeDupWebhook, fakeprovider.ModeFastWebhook, fakeprovider.ModeDelayWebhook,
+	fakeprovider.ModeReorder, fakeprovider.ModeDropWebhook, fakeprovider.ModeBadSignature}
+
+var endpoints = []string{"charges", "payouts", "refunds", "webhooks"}
 
 // NewPlan returns the disruption schedule for cfg. It is a pure function of
 // cfg: the same seed always yields the same plan (OS scheduling during the run
@@ -88,6 +93,24 @@ func NewPlan(cfg PlanConfig) []Event {
 			if !seen[k] {
 				at := time.Duration(rng.Int64N(int64(window)))
 				events = append(events, newEvent(rng, cfg, at, k))
+			}
+		}
+		// Every webhook fault, too: each mode in at least one fault set.
+		armed := map[string]bool{}
+		for _, e := range events {
+			for _, r := range e.Faults.Rules {
+				if r.Endpoint == webhooksEndpoint {
+					armed[r.Mode] = true
+				}
+			}
+		}
+		for _, mode := range webhookModes {
+			if !armed[mode] {
+				at := time.Duration(rng.Int64N(int64(window)))
+				events = append(events, Event{At: at, Kind: SetProviderFaults, Faults: fakeprovider.Faults{
+					Seed:  rng.Int64N(math.MaxInt32) + 1,
+					Rules: []fakeprovider.Rule{webhookRule(rng, mode)},
+				}})
 			}
 		}
 	}
@@ -131,11 +154,24 @@ func randomFaults(rng *rand.Rand) fakeprovider.Faults {
 	for range 1 + rng.IntN(3) {
 		endpoint := endpoints[rng.IntN(len(endpoints))]
 		modes := endpointModes[endpoint]
+		mode := modes[rng.IntN(len(modes))]
+		if endpoint == webhooksEndpoint {
+			f.Rules = append(f.Rules, webhookRule(rng, mode))
+			continue
+		}
 		f.Rules = append(f.Rules, fakeprovider.Rule{
 			Endpoint:    endpoint,
-			Mode:        modes[rng.IntN(len(modes))],
+			Mode:        mode,
 			Probability: 0.1 + 0.3*rng.Float64(),
 		})
 	}
 	return f
+}
+
+const webhooksEndpoint = "webhooks"
+
+// webhookRule is a webhook fault, likely enough (0.2–0.5 per payout) to meet
+// payouts that settle while it is armed.
+func webhookRule(rng *rand.Rand, mode string) fakeprovider.Rule {
+	return fakeprovider.Rule{Endpoint: webhooksEndpoint, Mode: mode, Probability: 0.2 + 0.3*rng.Float64()}
 }

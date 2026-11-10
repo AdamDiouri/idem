@@ -49,10 +49,12 @@ type Options struct {
 	// the first read after acceptance.
 	PayoutSettle time.Duration
 
-	// WebhookURL, when set, receives a signed webhook (WebhookSecret) for
+	// WebhookURLs, when set, receive a signed webhook (WebhookSecret) for
 	// every settled payout, retried from WebhookRetryBase (default 1s,
-	// doubling) up to WebhookMaxAttempts (default 8). Delivery needs Run.
-	WebhookURL         string
+	// doubling) up to WebhookMaxAttempts (default 8). Deliveries rotate
+	// across the URLs (API replicas): a retry goes to the next one. Delivery
+	// needs Run.
+	WebhookURLs        []string
 	WebhookSecret      []byte
 	WebhookRetryBase   time.Duration
 	WebhookMaxAttempts int
@@ -364,7 +366,7 @@ func (p *Provider) perform(res resource, slot, key string, req request, fail boo
 	id := res.idPrefix + uuid.Must(uuid.NewV7()).String()
 	if res.async {
 		po := &payout{id: id, key: key, req: req, status: "pending", settleAt: time.Now().Add(p.opts.PayoutSettle), fail: fail}
-		if p.opts.WebhookURL != "" {
+		if len(p.opts.WebhookURLs) > 0 {
 			po.webhookFault = p.pickFault(webhooksEndpoint)
 			if po.webhookFault == ModeFastWebhook {
 				// Settles, and its webhook is sent, by this request before the
