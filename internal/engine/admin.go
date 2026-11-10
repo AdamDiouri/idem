@@ -178,6 +178,13 @@ func (a *Admin) ConfirmStep(ctx context.Context, stepID uuid.UUID, version int64
 				return "", nil, fmt.Errorf("%w: step %s was definitively refused and never in doubt", ErrNotActionable, st.Name)
 			}
 		}
+		if st.ProviderRef != nil && *st.ProviderRef != providerRef {
+			// The provider accepted this step's request as *st.ProviderRef, and
+			// the same key always returns the same one: another reference is
+			// almost certainly a typo.
+			return "", nil, fmt.Errorf("%w: step %s was accepted by the provider as %s; confirm with that reference",
+				ErrNotActionable, st.Name, *st.ProviderRef)
+		}
 		used, err := q.ProviderRefInUse(ctx, db.ProviderRefInUseParams{ProviderRef: &providerRef, StepID: st.ID})
 		if err != nil {
 			return "", nil, err

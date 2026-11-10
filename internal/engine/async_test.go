@@ -281,3 +281,20 @@ func TestFlow_NoEffectExhaustionIsNotDoubt(t *testing.T) {
 	require.Equal(t, "COMPENSATED", h.workflowStatus(t, wf), "no attempt ever moved money: a clean failure refunds")
 	h.assertNoViolations(t)
 }
+
+// Fix before merge: the same key always returns the same payout, so confirming
+// a step that holds its provider reference with a DIFFERENT one is almost
+// certainly a typo, and posting it would record a payout that isn't this one.
+func TestAdmin_ConfirmRefusesAnotherRefForAcceptedPayout(t *testing.T) {
+	ctx := context.Background()
+	h := asyncHarness(t, time.Hour)
+	wf := parkUnresolvedPayout(t, h)
+	p := h.parkedStep(t, wf)
+	own := scalar[string](t, h.pool, `SELECT provider_ref FROM steps WHERE id = $1`, p.StepID)
+
+	err := h.admin().ConfirmStep(ctx, p.StepID, p.Version, "po_typo", "dashboard says paid")
+	require.ErrorIs(t, err, engine.ErrNotActionable)
+	require.ErrorContains(t, err, own, "the message names the reference to use")
+	require.Equal(t, "DEAD", h.stepStatus(t, wf, "payout"))
+	require.Zero(t, h.auditRows(t, wf))
+}

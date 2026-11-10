@@ -119,7 +119,7 @@ func (q *Queries) ListParkedSteps(ctx context.Context) ([]ListParkedStepsRow, er
 
 const lockParkedStep = `-- name: LockParkedStep :one
 SELECT s.id, s.workflow_id, s.name, s.generation, s.status, s.dead_reason, s.idempotency_key,
-       s.refund_charge_ref, w.input, w.version AS workflow_version
+       s.refund_charge_ref, s.provider_ref, w.input, w.version AS workflow_version
 FROM steps s
 JOIN workflows w ON w.id = s.workflow_id
 WHERE s.id = $1
@@ -138,6 +138,7 @@ type LockParkedStepRow struct {
 	DeadReason      *string
 	IdempotencyKey  string
 	RefundChargeRef *string
+	ProviderRef     *string
 	Input           []byte
 	WorkflowVersion int64
 }
@@ -157,6 +158,7 @@ func (q *Queries) LockParkedStep(ctx context.Context, id uuid.UUID) (LockParkedS
 		&i.DeadReason,
 		&i.IdempotencyKey,
 		&i.RefundChargeRef,
+		&i.ProviderRef,
 		&i.Input,
 		&i.WorkflowVersion,
 	)
