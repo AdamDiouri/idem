@@ -51,6 +51,6 @@ func (s *server) handleGet(ctx context.Context, w http.ResponseWriter, rawID, cl
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(view)
+	_, _ = w.Write(view) //nolint:gosec // G705: JSON built by Postgres (workflow_view), served as application/json, never rendered as HTML
 	return "found", http.StatusOK
 }

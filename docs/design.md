@@ -49,7 +49,7 @@ The provider deduplicates requests carrying the same **idempotency key**, so we 
 - **Asynchronous payouts and provider webhooks (M2).** In M1 the provider answers payouts synchronously. The schema and state machine leave room for M2 (§9.5).
 - Currencies other than EUR, FX, multiple providers.
 - Sharding, multi-region, Postgres HA/failover.
-- Publishing outbox events to an external broker (rows are written in M1; the relay is M2).
+- Publishing outbox events to an external broker. (Outbox rows are written since M2 slice 2.4; delivery to shops by webhook is slice 2.5.)
 - Admin UI. Manual intervention is via a small CLI / documented SQL.
 - Authentication beyond a static API token.
 
@@ -297,7 +297,7 @@ INSERT INTO ledger_transactions ...;   -- UNIQUE (step_id, kind)
 INSERT INTO ledger_entries ...;        -- balanced, checked at COMMIT
 INSERT INTO steps (...next step...);   -- or update workflow to terminal
 UPDATE workflows SET status = ..., version = version + 1 WHERE id = $wf;
-INSERT INTO outbox ...;               -- not built yet: M2 slice 2.4 (D13)
+INSERT INTO outbox ...;               -- terminal transitions only, since M2 slice 2.4 (D13)
 UPDATE step_attempts SET outcome = ..., finished_at = now() WHERE ...;
 COMMIT;
 ```
@@ -398,9 +398,9 @@ After a fully successful workflow, `provider_receivable` holds exactly the fee a
 `SIGTERM` → stop claiming → let in-flight steps finish within `shutdown_grace` → exit. Anything not finished falls through to the lease-expiry path; that's correct, just slower.
 
 ### 11.3 Outbox
-> **Not built in M1.** The outbox and its relay arrive in M2 slices 2.4 and 2.5; see the [M2 design](superpowers/specs/2026-11-10-milestone-2-design.md) §5.2–5.3 (D13, D14, D19).
+> **Built in M2 slice 2.4** (the relay that delivers events comes in 2.5); see the [M2 design](superpowers/specs/2026-11-10-milestone-2-design.md) §5.2–5.3 (D13, D14, D19).
 
-Workflow lifecycle events (`workflow.succeeded`, `workflow.compensated`, …) are written to `outbox` in the same transaction as the transition.
+A workflow's outcome (`workflow.succeeded`, `workflow.failed`, `workflow.compensated`) is written to `outbox` by `transitionWorkflow`, in the same transaction as the terminal transition, so an event exists if and only if its outcome committed. The payload is the shop's view of the workflow, from the SQL function `workflow_view`, which `GET /workflows/{id}` also returns. `UNIQUE (workflow_id, type)` makes a second event fail the transaction. Invariant I8 checks it after every chaos run and in `idem check`.
 
 ### 11.4 Admin actions (CLI, audited)
 As built in slice 1.6.
@@ -580,7 +580,7 @@ Each decision has an architecture decision record in [`docs/adr/`](adr/README.md
 | [D10](adr/0010-single-currency.md) | Single currency (EUR) in M1, `currency` column kept | Simplicity now, cheap to extend later | Multi-currency from day one |
 | [D11](adr/0011-platform-fees-in-integer-cents.md) | Platform fees kept; integer cents, half-to-even rounding, fixed at workflow creation | Realism; fee rounding is a classic source of ledger drift | No fees |
 | [D12](adr/0012-workers-poll-waiting-payouts.md) | (M2) Workers poll waiting payouts, not the sweeper | Workers already own every provider call, leases and fencing; the sweeper stays database-only | Sweeper polls |
-| [D13](adr/0013-outbox-written-in-transition.md) | (M2, planned 2.4) The outbox is written inside `transitionWorkflow`, in the transaction of the terminal transition | Every path that ends a workflow emits exactly one event, and none can forget | Publish from each code path (dual write) |
+| [D13](adr/0013-outbox-written-in-transition.md) | (M2, built 2.4) The outbox is written inside `transitionWorkflow`, in the transaction of the terminal transition | Every path that ends a workflow emits exactly one event, and none can forget | Publish from each code path (dual write) |
 | [D14](adr/0014-at-least-once-outbound-delivery.md) | (M2, planned 2.5) Outbound delivery is at least once, with a stable event ID the shop deduplicates on | Exactly-once over HTTP is impossible without the receiver; this is how real providers do it | At most once; claiming exactly once |
 | [D15](adr/0015-reconciliation-only-reports.md) | (M2, planned 2.6) Reconciliation only reports | When ledger and provider disagree, idem cannot know which is right; humans resolve with evidence | Auto-correct the ledger |
 | [D16](adr/0016-contradictory-news-never-flips-terminal-state.md) | (M2) Contradictory provider news never flips a terminal state; it is re-checked with the provider, and only a real disagreement pages | Late and reordered webhooks are normal; flipping on them is how money moves twice | Last event wins |
