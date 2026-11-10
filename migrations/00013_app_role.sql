@@ -1,7 +1,7 @@
 -- +goose Up
 -- The application role (slice 2.3b, design §10). Migrations run as the table
 -- owner; the API, workers and sweepers log in as a user that is a member of
--- idem_app (created by `idem migrate` from IDEM_APP_DB_USER/PASSWORD). That
+-- idem_app (created by the operator's infrastructure, not by idem). That
 -- role may read and append to the ledger but never UPDATE, DELETE or TRUNCATE
 -- it, so the ledger is append-only by privilege, not only by triggers the
 -- owner could drop.

@@ -65,13 +65,6 @@ func migrateCmd() *cobra.Command {
 			if dsn == "" {
 				return errors.New("IDEM_DATABASE_URL is required")
 			}
-			// Optional: the restricted login the API, workers and sweepers use
-			// (a member of idem_app, migration 00013). Migrations run as the
-			// owner in IDEM_DATABASE_URL.
-			appUser, appPassword := os.Getenv("IDEM_APP_DB_USER"), os.Getenv("IDEM_APP_DB_PASSWORD")
-			if (appUser == "") != (appPassword == "") {
-				return usageError{errors.New("IDEM_APP_DB_USER and IDEM_APP_DB_PASSWORD must be set together")}
-			}
 			logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 			pool, err := store.Open(cmd.Context(), dsn)
@@ -84,12 +77,6 @@ func migrateCmd() *cobra.Command {
 				return err
 			}
 			logger.Info("migrations applied")
-			if appUser != "" {
-				if err := store.EnsureAppUser(cmd.Context(), pool, appUser, appPassword); err != nil {
-					return err
-				}
-				logger.Info("application database user ready", "user", appUser, "role", "idem_app")
-			}
 			return nil
 		},
 	}

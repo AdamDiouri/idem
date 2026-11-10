@@ -145,8 +145,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	}()
 
 	migrate := exec.CommandContext(ctx, idem, "migrate") //nolint:gosec // harness-controlled binary
-	migrate.Env = append(os.Environ(), "IDEM_DATABASE_URL="+pg.DSN(),
-		"IDEM_APP_DB_USER="+appDBUser, "IDEM_APP_DB_PASSWORD="+appDBPassword)
+	migrate.Env = append(os.Environ(), "IDEM_DATABASE_URL="+pg.DSN())
 	if out, err := migrate.CombinedOutput(); err != nil {
 		return rep, fmt.Errorf("migrate: %w: %s", err, out)
 	}
@@ -156,6 +155,9 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		return rep, err
 	}
 	defer pool.Close()
+	if err := createAppUser(ctx, pool); err != nil {
+		return rep, err
+	}
 
 	sup := NewSupervisor(logger)
 	defer func() {

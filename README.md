@@ -229,8 +229,7 @@ go test -tags chaos ./internal/chaos/   # 30s chaos campaign as a test (after ma
 
 | Variable | Default | Notes |
 |---|---|---|
-| `IDEM_DATABASE_URL` | (required) | Postgres connection URL. For `migrate`: the table owner. For everything else: the application user (below), which cannot rewrite the ledger |
-| `IDEM_APP_DB_USER`, `IDEM_APP_DB_PASSWORD` | (none) | `migrate` only, set together: create (or update the password of) this login as a member of the restricted `idem_app` role. The owner must be allowed to create roles |
+| `IDEM_DATABASE_URL` | (required) | Postgres connection URL. For `migrate`: the table owner. For everything else: a login in the restricted `idem_app` role, which cannot rewrite the ledger. idem never creates logins: after `idem migrate`, run `CREATE ROLE idem_app_user LOGIN PASSWORD '…' IN ROLE idem_app` (compose does it for you) |
 | `IDEM_API_TOKENS` | (required for `api`) | `client=token,...`; tokens at least 16 characters, unique |
 | `IDEM_HTTP_ADDR` | `:8080` | |
 | `IDEM_IDEMPOTENCY_LOCK_TIMEOUT` | `5s` | Max wait on a concurrent duplicate request before `409`; must be below the request timeout |

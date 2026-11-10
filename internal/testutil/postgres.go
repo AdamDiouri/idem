@@ -49,6 +49,9 @@ func RunWithPostgres(m *testing.M, dsn *string) int {
 		return 1
 	}
 	err = store.Migrate(ctx, pool)
+	if err == nil {
+		err = CreateAppUser(ctx, pool, AppUser, AppPassword)
+	}
 	pool.Close()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
@@ -66,6 +69,14 @@ const (
 	AppUser     = "idem_app_user"
 	AppPassword = "idem_app_pw" //nolint:gosec // throwaway test container
 )
+
+// CreateAppUser creates the login user as a member of idem_app, as an
+// operator's infrastructure would (compose: deploy/postgres/initdb). idem
+// itself never creates logins. user and password are trusted constants.
+func CreateAppUser(ctx context.Context, owner *pgxpool.Pool, user, password string) error {
+	_, err := owner.Exec(ctx, fmt.Sprintf(`CREATE ROLE %s LOGIN PASSWORD '%s' IN ROLE idem_app`, user, password))
+	return err
+}
 
 // NewOwnerPool opens a pool as the owner in dsn (the migrations role): for
 // tests that change the schema or manage roles. It does not empty tables.
@@ -97,11 +108,6 @@ func NewPool(t *testing.T, dsn string) *pgxpool.Pool {
 	ctx := context.Background()
 
 	owner := NewOwnerPool(t, dsn)
-	// The membership is re-granted each time: a test that migrates down and
-	// up again (00013's Down revokes idem_app's grants) must not break the next.
-	if err := store.EnsureAppUser(ctx, owner, AppUser, AppPassword); err != nil {
-		t.Fatalf("ensure app user: %v", err)
-	}
 	// TRUNCATE bypasses the ledger's append-only row triggers; accounts are seed data.
 	if _, err := owner.Exec(ctx, `TRUNCATE admin_actions, ledger_entries, ledger_transactions, step_attempts,
 		api_idempotency_keys, steps, workflows CASCADE`); err != nil {

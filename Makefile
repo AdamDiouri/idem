@@ -3,7 +3,7 @@ export GOTOOLCHAIN := local
 
 GOLANGCI_LINT ?= $(shell command -v golangci-lint 2>/dev/null || echo $(shell go env GOPATH)/bin/golangci-lint)
 
-.PHONY: generate build build-release test lint up down reset chaos
+.PHONY: generate build build-release test lint up down reset app-user chaos
 
 generate:
 	go tool sqlc generate
@@ -39,6 +39,13 @@ down:
 # POSTGRES_PASSWORD in .env).
 reset:
 	docker compose down -v
+
+# Create or update idem_app_user (the restricted login) on an existing local
+# database, e.g. after changing IDEM_APP_DB_PASSWORD in .env. A new database
+# gets it automatically.
+app-user: .env
+	docker compose up -d --wait postgres
+	docker compose exec postgres /docker-entrypoint-initdb.d/10-app-user.sh
 
 # Chaos campaign against real processes (needs Docker). Example:
 #   make chaos CHAOS_ARGS="--seed 1 --duration 90s"

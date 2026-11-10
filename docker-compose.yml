@@ -1,8 +1,10 @@
 # Secrets and local settings come from .env (copy .env.example; `make up` does
 # it for you). Secrets use ${VAR:?…}, so compose refuses to start without them.
 # Migrations run as the owner (idem); everything else logs in as the restricted
-# application user that `idem migrate` creates (role idem_app: it cannot
-# UPDATE, DELETE or TRUNCATE the ledger).
+# application user idem_app_user (a member of role idem_app, which cannot
+# UPDATE, DELETE or TRUNCATE the ledger). Postgres creates that login from
+# deploy/postgres/initdb when it first creates its volume; `make app-user`
+# creates or updates it on an existing one.
 x-owner-database-url: &owner-database-url postgres://idem:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}@postgres:5432/idem?sslmode=disable
 x-database-url: &database-url postgres://idem_app_user:${IDEM_APP_DB_PASSWORD:?set IDEM_APP_DB_PASSWORD in .env (see .env.example)}@postgres:5432/idem?sslmode=disable
 
@@ -13,11 +15,13 @@ services:
       POSTGRES_USER: idem
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}
       POSTGRES_DB: idem
+      IDEM_APP_DB_PASSWORD: ${IDEM_APP_DB_PASSWORD:?set IDEM_APP_DB_PASSWORD in .env (see .env.example)}
     ports:
       - "5432:5432"
     volumes:
       # Postgres 18 images keep data under /var/lib/postgresql/<major>/docker.
       - pgdata:/var/lib/postgresql
+      - ./deploy/postgres/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U idem -d idem"]
       interval: 2s
@@ -29,8 +33,6 @@ services:
     command: ["migrate"]
     environment:
       IDEM_DATABASE_URL: *owner-database-url
-      IDEM_APP_DB_USER: idem_app_user
-      IDEM_APP_DB_PASSWORD: ${IDEM_APP_DB_PASSWORD:?set IDEM_APP_DB_PASSWORD in .env (see .env.example)}
     depends_on:
       postgres:
         condition: service_healthy

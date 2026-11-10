@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const readyTimeout = 60 * time.Second
@@ -67,11 +68,21 @@ func (pg *Postgres) removeEventually() {
 }
 
 // The restricted login idem's processes use (a member of idem_app, created by
-// `idem migrate`); the harness itself and migrations use the owner (DSN).
+// the harness as an operator's infrastructure would); the harness itself and
+// migrations use the owner (DSN).
 const (
 	appDBUser     = "idem_app_user"
 	appDBPassword = "idem_app_chaos" //nolint:gosec // throwaway container created by the harness
 )
+
+// createAppUser creates the application login as a member of idem_app. It runs
+// after migrations, which define what idem_app may do.
+func createAppUser(ctx context.Context, owner *pgxpool.Pool) error {
+	if _, err := owner.Exec(ctx, fmt.Sprintf(`CREATE ROLE %s LOGIN PASSWORD '%s' IN ROLE idem_app`, appDBUser, appDBPassword)); err != nil {
+		return fmt.Errorf("create app user: %w", err)
+	}
+	return nil
+}
 
 // AppDSN is the connection string for the application user.
 func (pg *Postgres) AppDSN() string {
