@@ -15,6 +15,23 @@ const (
 	ModePayoutFail          = "payout_fail" // payouts only: accepted (202), then settles failed with account_closed
 )
 
+// Webhook fault modes (endpoint "webhooks"), drawn once per payout.
+const (
+	ModeDupWebhook   = "dup_webhook"   // the event is delivered twice
+	ModeFastWebhook  = "fast_webhook"  // settles at once; webhook sent before the 202 is written
+	ModeDelayWebhook = "delay_webhook" // first delivery after 4 × WebhookRetryBase
+	ModeReorder      = "reorder"       // after the real event, a stale contradictory one
+	ModeDropWebhook  = "drop_webhook"  // never sent
+	ModeBadSignature = "bad_signature" // first attempt wrongly signed; retries are correct
+)
+
+const webhooksEndpoint = "webhooks"
+
+var webhookModes = map[string]bool{
+	ModeDupWebhook: true, ModeFastWebhook: true, ModeDelayWebhook: true,
+	ModeReorder: true, ModeDropWebhook: true, ModeBadSignature: true,
+}
+
 // Faults configures fault injection. The first matching rule wins.
 type Faults struct {
 	Seed  int64  `json:"seed"`
@@ -38,9 +55,15 @@ var validModes = map[string]bool{
 	ModeDecline:             true,
 	ModeRateLimit:           true,
 	ModePayoutFail:          true,
+	ModeDupWebhook:          true,
+	ModeFastWebhook:         true,
+	ModeDelayWebhook:        true,
+	ModeReorder:             true,
+	ModeDropWebhook:         true,
+	ModeBadSignature:        true,
 }
 
-var validEndpoints = map[string]bool{"charges": true, "payouts": true, "refunds": true}
+var validEndpoints = map[string]bool{"charges": true, "payouts": true, "refunds": true, webhooksEndpoint: true}
 
 // Validate rejects rules that would otherwise be silently ignored, so a typo
 // can never make a fault-injection run pass without injecting anything.
@@ -48,9 +71,11 @@ func (f Faults) Validate() error {
 	for i, r := range f.Rules {
 		switch {
 		case !validEndpoints[r.Endpoint]:
-			return fmt.Errorf("rule %d: unknown endpoint %q (want charges, payouts or refunds)", i, r.Endpoint)
+			return fmt.Errorf("rule %d: unknown endpoint %q (want charges, payouts, refunds or webhooks)", i, r.Endpoint)
 		case !validModes[r.Mode]:
 			return fmt.Errorf("rule %d: unknown mode %q", i, r.Mode)
+		case webhookModes[r.Mode] != (r.Endpoint == webhooksEndpoint):
+			return fmt.Errorf("rule %d: webhook modes go on endpoint webhooks, and only they do", i)
 		case r.Mode == ModePayoutFail && r.Endpoint != "payouts":
 			return fmt.Errorf("rule %d: mode payout_fail is only valid on payouts", i)
 		case r.Probability < 0 || r.Probability > 1:

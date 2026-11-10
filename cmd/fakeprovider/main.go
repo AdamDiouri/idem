@@ -45,14 +45,26 @@ func main() {
 		hang = d
 	}
 
+	// Signed payout webhooks (M2 §4.1): sent when a URL is configured.
+	webhookURL := os.Getenv("FAKEPROVIDER_WEBHOOK_URL")
+	webhookSecret := os.Getenv("FAKEPROVIDER_WEBHOOK_SECRET")
+	if webhookURL != "" && webhookSecret == "" {
+		logger.Error("FAKEPROVIDER_WEBHOOK_SECRET is required with FAKEPROVIDER_WEBHOOK_URL")
+		os.Exit(2)
+	}
+	provider := fakeprovider.New(fakeprovider.Options{
+		PayoutSettle: settle, Hang: hang, WebhookURL: webhookURL, WebhookSecret: []byte(webhookSecret),
+	})
+
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           fakeprovider.New(fakeprovider.Options{PayoutSettle: settle, Hang: hang}).Handler(),
+		Handler:           provider.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go provider.Run(ctx) // settles payouts and delivers webhooks
 
 	errCh := make(chan error, 1)
 	go func() {
