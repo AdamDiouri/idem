@@ -70,7 +70,7 @@ func (pg *Postgres) removeEventually() {
 // `idem migrate`); the harness itself and migrations use the owner (DSN).
 const (
 	appDBUser     = "idem_app_user"
-	appDBPassword = "idem_app_chaos"
+	appDBPassword = "idem_app_chaos" //nolint:gosec // throwaway container created by the harness
 )
 
 // AppDSN is the connection string for the application user.

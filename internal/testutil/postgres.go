@@ -64,7 +64,7 @@ func RunWithPostgres(m *testing.M, dsn *string) int {
 // production.
 const (
 	AppUser     = "idem_app_user"
-	AppPassword = "idem_app_pw"
+	AppPassword = "idem_app_pw" //nolint:gosec // throwaway test container
 )
 
 // NewOwnerPool opens a pool as the owner in dsn (the migrations role): for
