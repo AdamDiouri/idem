@@ -104,3 +104,37 @@ func TestIsLockTimeout(t *testing.T) {
 	require.False(t, store.IsLockTimeout(errors.New("x")))
 	require.False(t, store.IsLockTimeout(nil))
 }
+
+// Fix before merge: rolling back 00008 must work on a database that already
+// used async payouts. Waiting and unresolved payouts become in doubt (the
+// conservative pre-00008 meaning), not a failed migration.
+func TestMigrate_DownFrom00008WithAsyncRows(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.NewPool(t, dsn)
+	_, err := pool.Exec(ctx, `
+		INSERT INTO workflows (id, client_id, type, status, input) VALUES
+		  ('01936f3e-8c2a-7b1e-9f00-0000000000a1', 'c', 'payment_payout', 'RUNNING', '{}'),
+		  ('01936f3e-8c2a-7b1e-9f00-0000000000a2', 'c', 'payment_payout', 'NEEDS_ATTENTION', '{}');
+		INSERT INTO steps (id, workflow_id, name, status, idempotency_key, attempt_count, poll_count, max_attempts,
+		                   provider_ref, callback_deadline, dead_reason) VALUES
+		  ('01936f3e-8c2a-7b1e-9f00-0000000000b1', '01936f3e-8c2a-7b1e-9f00-0000000000a1', 'payout', 'AWAITING_CALLBACK',
+		   'k1', 1, 1, 8, 'po_1', now(), NULL),
+		  ('01936f3e-8c2a-7b1e-9f00-0000000000b2', '01936f3e-8c2a-7b1e-9f00-0000000000a2', 'payout', 'DEAD',
+		   'k2', 1, 3, 8, 'po_2', NULL, 'callback_unresolved');
+		INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id, kind, outcome, finished_at) VALUES
+		  ('01936f3e-8c2a-7b1e-9f00-0000000000b1', 1, 1, 'w', 'send', 'AWAITING_CALLBACK', now()),
+		  ('01936f3e-8c2a-7b1e-9f00-0000000000b1', 2, 2, 'w', 'poll', 'AWAITING_CALLBACK', now());`)
+	require.NoError(t, err)
+
+	require.NoError(t, store.MigrateDownTo(ctx, pool, 7))
+
+	var status, reason string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT status FROM steps WHERE id = '01936f3e-8c2a-7b1e-9f00-0000000000b1'`).Scan(&status))
+	require.Equal(t, "IN_DOUBT", status)
+	require.NoError(t, pool.QueryRow(ctx, `SELECT dead_reason FROM steps WHERE id = '01936f3e-8c2a-7b1e-9f00-0000000000b2'`).Scan(&reason))
+	require.Equal(t, "attempts_exhausted_in_doubt", reason)
+	var n int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM step_attempts WHERE outcome = 'IN_DOUBT'`).Scan(&n))
+	require.Equal(t, 2, n)
+	require.NoError(t, store.Migrate(ctx, pool), "and back up again")
+}

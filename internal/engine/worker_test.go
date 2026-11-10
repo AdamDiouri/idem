@@ -63,6 +63,7 @@ func (h harness) workerWith(id string, tweak func(*engine.WorkerOptions), steps 
 		Backoff:       engine.Backoff{}, // zero base: retry immediately
 		ShutdownGrace: 5 * time.Second,
 		Logger:        slog.New(slog.DiscardHandler),
+		MaxPolls:      8, // CallbackDeadline 0: an accepted payout is polled at once
 	}
 	if tweak != nil {
 		tweak(&opts)

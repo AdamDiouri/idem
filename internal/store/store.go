@@ -44,6 +44,14 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	})
 }
 
+// MigrateDownTo rolls back to version. Intended for tests.
+func MigrateDownTo(ctx context.Context, pool *pgxpool.Pool, version int64) error {
+	return withProvider(pool, func(p *goose.Provider) error {
+		_, err := p.DownTo(ctx, version)
+		return err
+	})
+}
+
 // MigrateDown rolls back every migration. Intended for tests.
 func MigrateDown(ctx context.Context, pool *pgxpool.Pool) error {
 	return withProvider(pool, func(p *goose.Provider) error {

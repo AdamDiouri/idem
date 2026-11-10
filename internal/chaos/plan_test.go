@@ -86,3 +86,23 @@ func TestPlan_FaultsAreValid(t *testing.T) {
 func TestWorkerEnv_DisablesMetricsListener(t *testing.T) {
 	require.Contains(t, workerEnv("postgres://x", "http://p"), "IDEM_METRICS_ADDR=off")
 }
+
+// Slice 2.1: payouts settle (300ms) well inside the poll budget, so a healthy
+// run never parks a payout as callback_unresolved.
+func TestWorkerEnv_SetsCallbackTimings(t *testing.T) {
+	env := workerEnv("postgres://x", "http://p")
+	require.Contains(t, env, "IDEM_CALLBACK_DEADLINE=500ms")
+	require.Contains(t, env, "IDEM_CALLBACK_MAX_POLLS=30")
+	require.Contains(t, env, "IDEM_CALLBACK_MAX_WAIT=30s")
+	require.Contains(t, env, "IDEM_CALLBACK_POLL_CAP=1s")
+}
+
+// Chaos compresses every timing about 10x; a provider that hangs for 30s while
+// the client gives up after 1s is harsher than any real provider and parked
+// healthy payouts. The hang is compressed too.
+func TestProviderEnv_CompressesHang(t *testing.T) {
+	env := providerEnv(9999)
+	require.Contains(t, env, "FAKEPROVIDER_ADDR=127.0.0.1:9999")
+	require.Contains(t, env, "FAKEPROVIDER_PAYOUT_SETTLE=300ms")
+	require.Contains(t, env, "FAKEPROVIDER_HANG=3s")
+}

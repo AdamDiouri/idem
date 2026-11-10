@@ -62,7 +62,7 @@ func (q *Queries) InsertAdminAction(ctx context.Context, arg InsertAdminActionPa
 
 const listParkedSteps = `-- name: ListParkedSteps :many
 SELECT DISTINCT ON (w.id)
-  w.id AS workflow_id, w.version, s.id AS step_id, s.name, s.status, s.dead_reason, s.last_error, s.attempt_count, w.input,
+  w.id AS workflow_id, w.version, s.id AS step_id, s.name, s.status, s.dead_reason, s.last_error, s.attempt_count, s.poll_count, w.input,
   (EXTRACT(EPOCH FROM (now() - w.updated_at)) * 1000)::bigint AS parked_ms
 FROM workflows w
 JOIN steps s ON s.workflow_id = w.id AND s.status IN ('DEAD', 'FAILED_PERMANENT')
@@ -79,6 +79,7 @@ type ListParkedStepsRow struct {
 	DeadReason   *string
 	LastError    *string
 	AttemptCount int32
+	PollCount    int32
 	Input        []byte
 	ParkedMs     int64
 }
@@ -104,6 +105,7 @@ func (q *Queries) ListParkedSteps(ctx context.Context) ([]ListParkedStepsRow, er
 			&i.DeadReason,
 			&i.LastError,
 			&i.AttemptCount,
+			&i.PollCount,
 			&i.Input,
 			&i.ParkedMs,
 		); err != nil {
@@ -119,7 +121,7 @@ func (q *Queries) ListParkedSteps(ctx context.Context) ([]ListParkedStepsRow, er
 
 const lockParkedStep = `-- name: LockParkedStep :one
 SELECT s.id, s.workflow_id, s.name, s.generation, s.status, s.dead_reason, s.idempotency_key,
-       s.refund_charge_ref, w.input, w.version AS workflow_version
+       s.refund_charge_ref, s.provider_ref, w.input, w.version AS workflow_version
 FROM steps s
 JOIN workflows w ON w.id = s.workflow_id
 WHERE s.id = $1
@@ -138,6 +140,7 @@ type LockParkedStepRow struct {
 	DeadReason      *string
 	IdempotencyKey  string
 	RefundChargeRef *string
+	ProviderRef     *string
 	Input           []byte
 	WorkflowVersion int64
 }
@@ -157,6 +160,7 @@ func (q *Queries) LockParkedStep(ctx context.Context, id uuid.UUID) (LockParkedS
 		&i.DeadReason,
 		&i.IdempotencyKey,
 		&i.RefundChargeRef,
+		&i.ProviderRef,
 		&i.Input,
 		&i.WorkflowVersion,
 	)
@@ -197,11 +201,20 @@ func (q *Queries) ParkedStepOfWorkflow(ctx context.Context, workflowID uuid.UUID
 }
 
 const providerRefInUse = `-- name: ProviderRefInUse :one
-SELECT EXISTS (SELECT 1 FROM steps WHERE provider_ref = $1)::bool AS used
+SELECT EXISTS (
+  SELECT 1 FROM steps WHERE provider_ref = $1 AND id <> $2
+)::bool AS used
 `
 
-func (q *Queries) ProviderRefInUse(ctx context.Context, providerRef *string) (bool, error) {
-	row := q.db.QueryRow(ctx, providerRefInUse, providerRef)
+type ProviderRefInUseParams struct {
+	ProviderRef *string
+	StepID      uuid.UUID
+}
+
+// Whether another step already records this provider reference. The step's own
+// reference (e.g. the payout ID it was waiting on) is not a reuse.
+func (q *Queries) ProviderRefInUse(ctx context.Context, arg ProviderRefInUseParams) (bool, error) {
+	row := q.db.QueryRow(ctx, providerRefInUse, arg.ProviderRef, arg.StepID)
 	var used bool
 	err := row.Scan(&used)
 	return used, err
@@ -234,11 +247,13 @@ func (q *Queries) ResetStepForRetry(ctx context.Context, arg ResetStepForRetryPa
 
 const stepHadInDoubtAttempt = `-- name: StepHadInDoubtAttempt :one
 SELECT EXISTS (
-  SELECT 1 FROM step_attempts WHERE step_id = $1 AND outcome IN ('IN_DOUBT', 'ABANDONED')
+  SELECT 1 FROM step_attempts
+  WHERE step_id = $1 AND kind = 'send' AND outcome IN ('IN_DOUBT', 'ABANDONED')
 )::bool AS had
 `
 
-// Whether any attempt of the step may have moved money (ambiguous or abandoned).
+// Whether any SEND attempt of the step may have moved money (ambiguous or
+// abandoned). Polls send nothing, so they never count (design D17).
 func (q *Queries) StepHadInDoubtAttempt(ctx context.Context, stepID uuid.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, stepHadInDoubtAttempt, stepID)
 	var had bool

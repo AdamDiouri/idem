@@ -4,6 +4,10 @@
 //
 // Three resources share one idempotency engine: charges (take money from a
 // customer), payouts (pay a merchant) and refunds (return a charge).
+//
+// Payouts are asynchronous (M2, design §4.1): POST /payouts answers 202
+// pending, and the payout settles later to paid (the money moves) or failed.
+// Settlement is lazy: it happens on the first read after PayoutSettle.
 package fakeprovider
 
 import (
@@ -16,6 +20,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +44,10 @@ type Options struct {
 	// (0 = forever). Like a real provider, an expired key is unknown: lookups
 	// return 404 and a new request with it performs a NEW effect.
 	KeyRetention time.Duration
+	// PayoutSettle is how long an accepted payout stays pending before it
+	// settles (paid, or failed under the payout_fail fault). 0 settles it at
+	// the first read after acceptance.
+	PayoutSettle time.Duration
 }
 
 // Effect is one real movement of money performed by the provider.
@@ -76,6 +85,8 @@ type resource struct {
 	rejectCode   string
 	// rejects reports whether req is refused on its merits. Called with p.mu held.
 	rejects func(p *Provider, req request) bool
+	// async: accepted with 202 pending; the effect happens at settlement.
+	async bool
 }
 
 var resources = []resource{
@@ -94,7 +105,7 @@ var resources = []resource{
 		rejects: func(_ *Provider, req request) bool { return strings.HasPrefix(req.CustomerID, declinePrefix) },
 	},
 	{
-		name: "payouts", effectType: "payout", idPrefix: "po_", successStatus: "paid",
+		name: "payouts", effectType: "payout", idPrefix: "po_", successStatus: "paid", async: true,
 		decode: decodeInto(func(r struct {
 			AmountCents int64  `json:"amount_cents"`
 			Currency    string `json:"currency"`
@@ -129,7 +140,22 @@ type keyState struct {
 	fingerprint string
 	status      int
 	body        []byte
+	payoutID    string // async payouts: the accepted payout, whose state lookups report
 }
+
+// payout is an accepted payout and its settlement.
+type payout struct {
+	id          string
+	key         string
+	req         request
+	status      string // pending | paid | failed
+	failureCode string
+	settleAt    time.Time
+	fail        bool // settles failed (payout_fail fault)
+}
+
+// failureAccountClosed is the failure_code of a payout the bank rejected.
+const failureAccountClosed = "account_closed"
 
 // Provider is the fake payment provider. Its zero value is not usable; use New.
 type Provider struct {
@@ -137,6 +163,7 @@ type Provider struct {
 
 	mu       sync.Mutex
 	keys     map[string]*keyState // "<resource>:<key>"
+	payouts  map[string]*payout   // by payout ID
 	effects  []Effect
 	calls    map[string]int
 	hits     map[string]int // "<endpoint>/<mode>" → faults fired
@@ -162,6 +189,7 @@ func (p *Provider) Handler() http.Handler {
 		mux.HandleFunc("POST /"+res.name, p.create(res))
 		mux.HandleFunc("GET /"+res.name, p.lookup(res))
 	}
+	mux.HandleFunc("GET /payouts/{id}", p.getPayout)
 	mux.HandleFunc("PUT /_faults", p.putFaults)
 	mux.HandleFunc("GET /_effects", p.getEffects)
 	mux.HandleFunc("GET /_fault_hits", p.getFaultHits)
@@ -194,6 +222,7 @@ func (p *Provider) setFaultsLocked(f Faults) {
 func (p *Provider) Effects() []Effect {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.settleDueLocked(time.Now())
 	return append([]Effect(nil), p.effects...)
 }
 
@@ -224,6 +253,7 @@ func (p *Provider) Reset() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.keys = map[string]*keyState{}
+	p.payouts = map[string]*payout{}
 	p.effects = nil
 	p.calls = map[string]int{}
 	p.hits = map[string]int{}
@@ -278,23 +308,26 @@ func (p *Provider) create(res resource) http.HandlerFunc {
 			w.Header().Set("Retry-After", "1")
 			status, b = http.StatusTooManyRequests, errorBody("rate_limited")
 		case ModeTimeoutAfterEffect:
-			status, b = p.perform(res, slot, key, req)
+			status, b = p.perform(res, slot, key, req, false)
 			p.hang(r.Context())
 		case ModeErrorAfterEffect:
-			p.perform(res, slot, key, req)
+			p.perform(res, slot, key, req, false)
 			status, b = http.StatusInternalServerError, errorBody("internal_error")
-		case ModeDecline, ModePayoutFail:
+		case ModeDecline:
 			status, b = p.reject(res, slot)
+		case ModePayoutFail:
+			status, b = p.perform(res, slot, key, req, true)
 		default:
-			status, b = p.perform(res, slot, key, req)
+			status, b = p.perform(res, slot, key, req, false)
 		}
 		writeRaw(w, status, b)
 	}
 }
 
 // perform moves the money (or refuses on the request's merits) and stores the
-// final response under slot.
-func (p *Provider) perform(res resource, slot, key string, req request) (int, []byte) {
+// final response under slot. An async resource is accepted instead: it settles
+// later, failed when fail is set.
+func (p *Provider) perform(res resource, slot, key string, req request, fail bool) (int, []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -302,6 +335,14 @@ func (p *Provider) perform(res resource, slot, key string, req request) (int, []
 		return p.rejectLocked(res, slot)
 	}
 	id := res.idPrefix + uuid.Must(uuid.NewV7()).String()
+	if res.async {
+		po := &payout{id: id, key: key, req: req, status: "pending", settleAt: time.Now().Add(p.opts.PayoutSettle), fail: fail}
+		p.payouts[id] = po
+		b := mustJSON(payoutJSON(po))
+		p.store(slot, http.StatusAccepted, b)
+		p.keys[slot].payoutID = id
+		return http.StatusAccepted, b
+	}
 	b := mustJSON(map[string]any{
 		"id":           id,
 		"status":       res.successStatus,
@@ -392,6 +433,11 @@ func (p *Provider) lookup(res resource) http.HandlerFunc {
 		var b []byte
 		if ok {
 			inFlight, status, b = ks.inFlight, ks.status, ks.body
+			if po := p.payouts[ks.payoutID]; po != nil {
+				// An accepted payout: report what it is now, not the 202.
+				p.settleDueLocked(time.Now())
+				status, b = http.StatusOK, mustJSON(payoutJSON(po))
+			}
 		}
 		p.mu.Unlock()
 
@@ -406,6 +452,78 @@ func (p *Provider) lookup(res resource) http.HandlerFunc {
 			writeRaw(w, status, b)
 		}
 	}
+}
+
+// SettleNow settles every pending payout immediately, whatever PayoutSettle
+// says. Tests use it to model a provider that finished while idem waited.
+func (p *Provider) SettleNow() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	for _, po := range p.payouts {
+		if po.status == "pending" {
+			po.settleAt = now
+		}
+	}
+	p.settleDueLocked(now)
+}
+
+// getPayout serves GET /payouts/{id}: the payout's current state.
+func (p *Provider) getPayout(w http.ResponseWriter, r *http.Request) {
+	p.count("GET /payouts/{id}")
+	p.mu.Lock()
+	p.settleDueLocked(time.Now())
+	po := p.payouts[r.PathValue("id")]
+	var b []byte
+	if po != nil {
+		b = mustJSON(payoutJSON(po))
+	}
+	p.mu.Unlock()
+	if po == nil {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	writeRaw(w, http.StatusOK, b)
+}
+
+// settleDueLocked settles every pending payout whose time has come. A paid
+// payout is the moment the money moves, so that is when its effect is
+// recorded. Callers must hold p.mu.
+func (p *Provider) settleDueLocked(now time.Time) {
+	var due []*payout
+	for _, po := range p.payouts {
+		if po.status == "pending" && !now.Before(po.settleAt) {
+			due = append(due, po)
+		}
+	}
+	// Effects stay in the order the money moved.
+	slices.SortFunc(due, func(a, b *payout) int {
+		if c := a.settleAt.Compare(b.settleAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.id, b.id)
+	})
+	for _, po := range due {
+		if po.fail {
+			po.status, po.failureCode = "failed", failureAccountClosed
+			continue
+		}
+		po.status = "paid"
+		p.effects = append(p.effects, Effect{
+			ID: po.id, Type: "payout", WorkflowID: po.req.WorkflowID, IdempotencyKey: po.key,
+			AmountCents: po.req.AmountCents, At: po.settleAt.UTC(),
+		})
+	}
+}
+
+func payoutJSON(po *payout) map[string]any {
+	m := map[string]any{
+		"id": po.id, "status": po.status, "amount_cents": po.req.AmountCents, "currency": po.req.Currency,
+	}
+	if po.failureCode != "" {
+		m["failure_code"] = po.failureCode
+	}
+	return m
 }
 
 func (p *Provider) putFaults(w http.ResponseWriter, r *http.Request) {

@@ -3,7 +3,7 @@
 -- w.version changes whenever the workflow leaves NEEDS_ATTENTION and comes back,
 -- so it identifies what the operator saw.
 SELECT DISTINCT ON (w.id)
-  w.id AS workflow_id, w.version, s.id AS step_id, s.name, s.status, s.dead_reason, s.last_error, s.attempt_count, w.input,
+  w.id AS workflow_id, w.version, s.id AS step_id, s.name, s.status, s.dead_reason, s.last_error, s.attempt_count, s.poll_count, w.input,
   (EXTRACT(EPOCH FROM (now() - w.updated_at)) * 1000)::bigint AS parked_ms
 FROM workflows w
 JOIN steps s ON s.workflow_id = w.id AND s.status IN ('DEAD', 'FAILED_PERMANENT')
@@ -15,7 +15,7 @@ ORDER BY w.id, s.created_at DESC;
 -- dead or refused, and the workflow's most recent step. Anything else (a step a
 -- worker may run, a superseded step) yields no row.
 SELECT s.id, s.workflow_id, s.name, s.generation, s.status, s.dead_reason, s.idempotency_key,
-       s.refund_charge_ref, w.input, w.version AS workflow_version
+       s.refund_charge_ref, s.provider_ref, w.input, w.version AS workflow_version
 FROM steps s
 JOIN workflows w ON w.id = s.workflow_id
 WHERE s.id = sqlc.arg(id)
@@ -58,10 +58,16 @@ VALUES (sqlc.arg(id), sqlc.arg(actor), sqlc.arg(action), sqlc.arg(workflow_id), 
         sqlc.arg(reason), sqlc.arg(details));
 
 -- name: StepHadInDoubtAttempt :one
--- Whether any attempt of the step may have moved money (ambiguous or abandoned).
+-- Whether any SEND attempt of the step may have moved money (ambiguous or
+-- abandoned). Polls send nothing, so they never count (design D17).
 SELECT EXISTS (
-  SELECT 1 FROM step_attempts WHERE step_id = sqlc.arg(step_id) AND outcome IN ('IN_DOUBT', 'ABANDONED')
+  SELECT 1 FROM step_attempts
+  WHERE step_id = sqlc.arg(step_id) AND kind = 'send' AND outcome IN ('IN_DOUBT', 'ABANDONED')
 )::bool AS had;
 
 -- name: ProviderRefInUse :one
-SELECT EXISTS (SELECT 1 FROM steps WHERE provider_ref = sqlc.arg(provider_ref))::bool AS used;
+-- Whether another step already records this provider reference. The step's own
+-- reference (e.g. the payout ID it was waiting on) is not a reuse.
+SELECT EXISTS (
+  SELECT 1 FROM steps WHERE provider_ref = sqlc.arg(provider_ref) AND id <> sqlc.arg(step_id)
+)::bool AS used;

@@ -53,6 +53,13 @@ const (
 	leaseTTL = 4 * time.Second
 )
 
+// providerEnv compresses the fake provider's timings like the engine's: payouts
+// settle in 300ms, and a timeout fault hangs 3s (with a 1s client timeout)
+// instead of 30s, which no real provider holds a key for.
+func providerEnv(port int) []string {
+	return []string{fmt.Sprintf("FAKEPROVIDER_ADDR=127.0.0.1:%d", port), "FAKEPROVIDER_PAYOUT_SETTLE=300ms", "FAKEPROVIDER_HANG=3s"}
+}
+
 // workerEnv tunes the engine for chaos: short leases and retries so a short
 // campaign exercises many recoveries. It satisfies the config rules
 // (timeout + 2s < lease, grace >= timeout + 2s).
@@ -69,6 +76,12 @@ func workerEnv(dsn, providerURL string) []string {
 		"IDEM_POLL_INTERVAL=50ms",
 		"IDEM_STUCK_AFTER=30s",
 		"IDEM_METRICS_ADDR=off", // several processes per host; nothing scrapes them
+		// Payouts settle in 300ms (fake provider), far inside 30 polls: a healthy
+		// run never parks a payout as callback_unresolved.
+		"IDEM_CALLBACK_DEADLINE=500ms",
+		"IDEM_CALLBACK_MAX_POLLS=30",
+		"IDEM_CALLBACK_MAX_WAIT=30s",
+		"IDEM_CALLBACK_POLL_CAP=1s",
 	}
 }
 
@@ -132,7 +145,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	}
 	providerURL := fmt.Sprintf("http://127.0.0.1:%d", providerPort)
 	if _, err := sup.Start(ProcSpec{Name: "fakeprovider", Path: provider, LogPath: logPath("fakeprovider"),
-		Env: []string{fmt.Sprintf("FAKEPROVIDER_ADDR=127.0.0.1:%d", providerPort)}}); err != nil {
+		Env: providerEnv(providerPort)}); err != nil {
 		return rep, err
 	}
 	if err := waitHTTP(ctx, providerURL+"/_effects"); err != nil {
@@ -275,7 +288,14 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM steps s
 		WHERE s.status = 'SUCCEEDED' AND EXISTS (
-			SELECT 1 FROM step_attempts a WHERE a.step_id = s.id AND a.outcome IN ('IN_DOUBT', 'ABANDONED'))`).Scan(&rep.InDoubtResolved); err != nil {
+			SELECT 1 FROM step_attempts a
+			WHERE a.step_id = s.id AND a.kind = 'send' AND a.outcome IN ('IN_DOUBT', 'ABANDONED'))`).Scan(&rep.InDoubtResolved); err != nil {
+		return rep, err
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM step_attempts WHERE kind = 'poll'),
+		       (SELECT count(DISTINCT step_id) FROM step_attempts WHERE kind = 'poll')`).
+		Scan(&rep.CallbackPolls, &rep.PayoutsWaited); err != nil {
 		return rep, err
 	}
 	rep.FencedCommits = countLogLines(cfg.RunDir, "worker-", "lease lost before completion")

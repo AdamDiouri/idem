@@ -43,7 +43,12 @@ func Claim(ctx context.Context, pool *pgxpool.Pool, workerID string, names []str
 		IdempotencyKey: row.IdempotencyKey,
 		LeaseEpoch:     row.LeaseEpoch,
 		Attempt:        row.AttemptCount,
+		AttemptNo:      row.AttemptCount + row.PollCount,
+		PollCount:      row.PollCount,
+		PollsSinceSend: row.PollsSinceSend,
+		WaitedFor:      time.Duration(row.WaitedMs) * time.Millisecond,
 		MaxAttempts:    row.MaxAttempts,
+		SendDoubt:      row.SendDoubt,
 		KeyAge:         time.Duration(row.KeyAgeMs) * time.Millisecond,
 	}
 	if row.RefundChargeRef != nil {
@@ -52,15 +57,23 @@ func Claim(ctx context.Context, pool *pgxpool.Pool, workerID string, names []str
 	if row.PriorStatus != nil {
 		s.PriorStatus = *row.PriorStatus
 	}
+	if row.ProviderRef != nil {
+		s.ProviderRef = *row.ProviderRef
+	}
+	kind := "send"
+	if s.PriorStatus == string(ResultAwaitingCallback) {
+		kind = "poll" // a poll sends nothing (design D17)
+	}
 	if err := json.Unmarshal(row.Input, &s.Input); err != nil {
 		return ClaimedStep{}, false, fmt.Errorf("decode workflow input: %w", err)
 	}
 
 	if err := q.InsertStepAttempt(ctx, db.InsertStepAttemptParams{
 		StepID:     s.ID,
-		AttemptNo:  s.Attempt,
+		AttemptNo:  s.AttemptNo,
 		LeaseEpoch: s.LeaseEpoch,
 		WorkerID:   workerID,
+		Kind:       kind,
 	}); err != nil {
 		return ClaimedStep{}, false, fmt.Errorf("record attempt: %w", err)
 	}

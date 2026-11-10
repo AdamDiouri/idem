@@ -39,6 +39,11 @@ const (
 	// NoEffect: this request provably did not reach the provider (refused
 	// connection, DNS failure) or was rejected before processing (429).
 	NoEffect
+	// Accepted: the provider took the request (202) and will settle it later;
+	// ProviderRef identifies it. Async payouts only (design §4.2).
+	Accepted
+	// Pending: a status poll found the request accepted but not settled yet.
+	Pending
 )
 
 func (c Class) String() string {
@@ -51,6 +56,10 @@ func (c Class) String() string {
 		return "ambiguous"
 	case NoEffect:
 		return "no_effect"
+	case Accepted:
+		return "accepted"
+	case Pending:
+		return "pending"
 	}
 	return fmt.Sprintf("Class(%d)", int(c))
 }
@@ -105,39 +114,89 @@ type expect struct {
 	AmountCents   int64
 	Currency      string
 	SuccessStatus string
+	// AcceptedStatus, when set, is the status of an accepted-but-unsettled
+	// request: a 202 with it is Accepted (as is a 200 with it from a lookup).
+	AcceptedStatus string
+	acceptOnOK     bool
 }
 
 // CreateCharge asks the provider to charge the customer, using idempotencyKey
 // so that retries of the same intended charge are deduplicated by the provider.
 func (c *Client) CreateCharge(ctx context.Context, idempotencyKey string, req ChargeRequest) Outcome {
-	return c.create(ctx, "/charges", idempotencyKey, req, expect{req.AmountCents, req.Currency, "succeeded"})
+	return c.create(ctx, "/charges", idempotencyKey, req, expect{AmountCents: req.AmountCents, Currency: req.Currency, SuccessStatus: "succeeded"})
 }
 
 // LookupCharge asks what happened to the charge sent with idempotencyKey.
 // found is false when the provider has no record (404, Class Permanent) or
 // the lookup itself failed (Class Ambiguous).
 func (c *Client) LookupCharge(ctx context.Context, idempotencyKey string, want ChargeRequest) (Outcome, bool) {
-	return c.lookup(ctx, "/charges", idempotencyKey, expect{want.AmountCents, want.Currency, "succeeded"})
+	return c.lookup(ctx, "/charges", idempotencyKey, expect{AmountCents: want.AmountCents, Currency: want.Currency, SuccessStatus: "succeeded"})
 }
 
 // CreatePayout asks the provider to pay the merchant.
 func (c *Client) CreatePayout(ctx context.Context, idempotencyKey string, req PayoutRequest) Outcome {
-	return c.create(ctx, "/payouts", idempotencyKey, req, expect{req.AmountCents, req.Currency, "paid"})
+	return c.create(ctx, "/payouts", idempotencyKey, req, payoutExpect(req))
+}
+
+func payoutExpect(req PayoutRequest) expect {
+	return expect{AmountCents: req.AmountCents, Currency: req.Currency, SuccessStatus: "paid", AcceptedStatus: "pending"}
+}
+
+// GetPayout polls the current state of an accepted payout (design §4.5):
+// paid → Success, failed → Permanent (Err carries the failure code), pending →
+// Pending. A poll sends nothing, so every other answer (404, garbage, a
+// mismatch, a transport failure) only means "we still don't know".
+func (c *Client) GetPayout(ctx context.Context, payoutID string, want PayoutRequest) Outcome {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/payouts/"+url.PathEscape(payoutID), nil)
+	if err != nil {
+		return Outcome{Class: Ambiguous, Err: fmt.Errorf("build poll: %w", err)}
+	}
+	status, _, body, out, ok := c.do(httpReq, "GET /payouts/{id}")
+	if !ok {
+		return out
+	}
+	if status != http.StatusOK {
+		return Outcome{Class: Ambiguous, HTTPStatus: status, Err: fmt.Errorf("payout poll returned %d %s", status, errorCode(body))}
+	}
+	var r struct {
+		ID          string `json:"id"`
+		Status      string `json:"status"`
+		FailureCode string `json:"failure_code"`
+		AmountCents int64  `json:"amount_cents"`
+		Currency    string `json:"currency"`
+	}
+	out = Outcome{HTTPStatus: status}
+	switch {
+	case json.Unmarshal(body, &r) != nil || r.ID != payoutID:
+		out.Class, out.Err = Ambiguous, fmt.Errorf("unexpected payout poll response: id=%q", r.ID)
+	case r.AmountCents != want.AmountCents || (r.Currency != "" && r.Currency != want.Currency):
+		out.Class, out.Err = Ambiguous, fmt.Errorf("payout amount mismatch: requested %d %s, provider reports %d %s",
+			want.AmountCents, want.Currency, r.AmountCents, r.Currency)
+	case r.Status == "paid":
+		out.Class, out.ProviderRef = Success, r.ID
+	case r.Status == "failed":
+		out.Class, out.Err = Permanent, fmt.Errorf("payout failed: %s", r.FailureCode)
+	case r.Status == "pending":
+		out.Class, out.ProviderRef, out.Err = Pending, r.ID, errors.New("payout still pending")
+	default:
+		out.Class, out.Err = Ambiguous, fmt.Errorf("unknown payout status %q", r.Status)
+	}
+	return out
 }
 
 // LookupPayout asks what happened to the payout sent with idempotencyKey.
 func (c *Client) LookupPayout(ctx context.Context, idempotencyKey string, want PayoutRequest) (Outcome, bool) {
-	return c.lookup(ctx, "/payouts", idempotencyKey, expect{want.AmountCents, want.Currency, "paid"})
+	return c.lookup(ctx, "/payouts", idempotencyKey, payoutExpect(want))
 }
 
 // CreateRefund asks the provider to return (part of) a charge to the customer.
 func (c *Client) CreateRefund(ctx context.Context, idempotencyKey string, req RefundRequest) Outcome {
-	return c.create(ctx, "/refunds", idempotencyKey, req, expect{req.AmountCents, req.Currency, "succeeded"})
+	return c.create(ctx, "/refunds", idempotencyKey, req, expect{AmountCents: req.AmountCents, Currency: req.Currency, SuccessStatus: "succeeded"})
 }
 
 // LookupRefund asks what happened to the refund sent with idempotencyKey.
 func (c *Client) LookupRefund(ctx context.Context, idempotencyKey string, want RefundRequest) (Outcome, bool) {
-	return c.lookup(ctx, "/refunds", idempotencyKey, expect{want.AmountCents, want.Currency, "succeeded"})
+	return c.lookup(ctx, "/refunds", idempotencyKey, expect{AmountCents: want.AmountCents, Currency: want.Currency, SuccessStatus: "succeeded"})
 }
 
 func (c *Client) create(ctx context.Context, path, idempotencyKey string, body any, want expect) Outcome {
@@ -177,7 +236,9 @@ func (c *Client) lookup(ctx context.Context, path, idempotencyKey string, want e
 		return Outcome{Class: Permanent, HTTPStatus: status, Err: errors.New("idempotency key unknown to provider")}, false
 	case http.StatusOK, http.StatusPaymentRequired, http.StatusUnprocessableEntity:
 		// A stored outcome: success, or a definitive refusal (declined card,
-		// invalid account, invalid refund).
+		// invalid account, invalid refund); for an async payout, possibly
+		// accepted and not settled yet.
+		want.acceptOnOK = true
 		out := classify(status, header, respBody, want)
 		return out, out.Class != Ambiguous
 	default:
@@ -243,6 +304,13 @@ func classify(status int, header http.Header, body []byte, want expect) Outcome 
 		switch {
 		case json.Unmarshal(body, &r) != nil:
 			out.Class, out.Err = Ambiguous, fmt.Errorf("unparseable %d response", status)
+		case r.ID != "" && want.AcceptedStatus != "" && r.Status == want.AcceptedStatus &&
+			(status == http.StatusAccepted || want.acceptOnOK) &&
+			r.AmountCents == want.AmountCents && (r.Currency == "" || r.Currency == want.Currency):
+			out.Class, out.ProviderRef = Accepted, r.ID
+		case want.acceptOnOK && want.AcceptedStatus != "" && r.ID != "" && r.Status == "failed":
+			// A lookup found the accepted request settled failed: a definite refusal.
+			out.Class, out.Err = Permanent, fmt.Errorf("provider reports %s failed: %s", r.ID, failureCode(body))
 		case r.ID == "" || r.Status != want.SuccessStatus:
 			out.Class, out.Err = Ambiguous, fmt.Errorf("unexpected response: id=%q status=%q", r.ID, r.Status)
 		case r.AmountCents != want.AmountCents:
@@ -291,6 +359,14 @@ func retryAfter(h http.Header) time.Duration {
 		return maxRetryAfter
 	}
 	return time.Duration(secs) * time.Second
+}
+
+func failureCode(body []byte) string {
+	var f struct {
+		FailureCode string `json:"failure_code"`
+	}
+	_ = json.Unmarshal(body, &f) // best effort, for messages only
+	return f.FailureCode
 }
 
 func errorCode(body []byte) string {

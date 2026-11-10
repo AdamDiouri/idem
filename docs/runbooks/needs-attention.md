@@ -21,7 +21,8 @@ idem admin list --json                   # with amounts, customer and merchant
 | `STEP` | the step that parked the workflow: `charge`, `payout` or `refund` |
 | `STATUS` | `DEAD` (gave up) or `FAILED_PERMANENT` (a refund the provider refused) |
 | `REASON` | the `dead_reason`; for a refused refund, `refused`. The sections below are named after these reasons |
-| `ATTEMPTS` | how many times it was tried |
+| `ATTEMPTS` | how many times it was sent |
+| `POLLS` | how many times idem asked the provider about an accepted payout |
 | `LAST ERROR` | the last error the worker saw |
 
 Useful context for any workflow:
@@ -107,6 +108,15 @@ The **pivot safety rule**. A payout was refused (e.g. `422 invalid_account`) *af
 
 In chaos runs these are the *expected* parkings. The fake provider always replays, so a human would find "not paid" and compensate.
 
+### callback_unresolved
+
+The provider **accepted** the payout (`202`, a `po_…` reference), but it was still `pending`, or could not be polled, for `IDEM_CALLBACK_MAX_WAIT` (default 72h) since acceptance, or after `IDEM_CALLBACK_MAX_POLLS` polls if that limit is set. **Money may have moved**, or may still move. Worker logs show each poll (`waiting for the provider's result`, with `poll_count` and `waited`).
+
+1. Look up the step's `provider_ref` (`po_…`) at the provider (fake provider: `GET /payouts/<po_…>`).
+2. **Paid:** run `idem admin confirm-step <step> --provider-ref <po_…> --expect-version <V> --reason …`. Use the step's **own** reference (`provider_ref`): the same key always returns the same payout, so any other reference is refused as a likely typo. The workflow ends `SUCCEEDED`.
+3. **Failed:** run `idem admin compensate <workflow> --expect-version <V> --confirm-no-effect --reason …`. The workflow ends `COMPENSATED`.
+4. **Still pending** (the provider is slow): run `idem admin retry-step <step> --expect-version <V> --reason …`. The same key is re-sent, the provider replays the same payout, and polling resumes. Never use `new-generation` while the old payout can still settle: that could pay twice.
+
 ### refused (refund `FAILED_PERMANENT`)
 
 The customer was charged and the provider **refused** the refund (e.g. `422 invalid_refund`): wrong charge reference, amount above what is left, or the charge already refunded elsewhere.
@@ -171,8 +181,8 @@ curl -s -X POST localhost:8080/workflows -H 'Authorization: Bearer demo-token-01
   -H 'Idempotency-Key: rb-1' -d '{"amount_cents":10000,"currency":"EUR","customer_id":"cus_1","merchant_id":"mer_invalid_1"}'
 
 docker compose run --rm --entrypoint /idem worker admin list
-# WORKFLOW  VERSION  STEP    STATUS  REASON                    ATTEMPTS  PARKED FOR  LAST ERROR
-# 01a1…     3        payout  DEAD    permanent_after_in_doubt  2         12s         provider refused request: 422 invalid_account
+# WORKFLOW  VERSION  STEP    STATUS  REASON                    ATTEMPTS  POLLS  PARKED FOR  LAST ERROR
+# 01a1…     3        payout  DEAD    permanent_after_in_doubt  2         0      12s         provider refused request: 422 invalid_account
 
 curl -s localhost:9091/api/v1/alerts            # IdemWorkflowsNeedAttention, IdemMoneyMayHaveMoved firing
 

@@ -623,3 +623,126 @@ func TestChargeProviderRef_PicksHighestGeneration(t *testing.T) {
 	require.NoError(t, engine.Complete(ctx, pool, s, engine.Result{Kind: engine.ResultFailedPermanent, HTTPStatus: 422}, engine.NewPayoutStep(nil)))
 	require.Equal(t, "ch_b", scalar[string](t, pool, `SELECT refund_charge_ref FROM steps WHERE workflow_id = $1 AND name = 'refund'`, wf))
 }
+
+// awaitingStep makes a fresh workflow's charge step look like an accepted
+// async request: one finished send attempt (sendOutcome), AWAITING_CALLBACK
+// with provider_ref po_test, pollable at now() + runAfter.
+func awaitingStep(t *testing.T, pool *pgxpool.Pool, runAfter, sendOutcome string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	wf := submit(t, pool, "cus_1")
+	step := scalar[uuid.UUID](t, pool, `SELECT id FROM steps WHERE workflow_id = $1`, wf)
+	_, err := pool.Exec(ctx, `UPDATE workflows SET status = 'RUNNING' WHERE id = $1`, wf)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_test-'||id::text, attempt_count = 1,
+		first_attempted_at = now(), run_after = now() + $2::interval, callback_deadline = now() + $2::interval WHERE id = $1`, step, runAfter)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id, outcome, finished_at)
+		VALUES ($1, 1, 1, 'w0', $2, now())`, step, sendOutcome)
+	require.NoError(t, err)
+	return step
+}
+
+// Slice 2.1: an accepted step is pollable only once its callback deadline passed.
+func TestClaim_AwaitingCallbackOnlyAfterDeadline(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.NewPool(t, dsn)
+	step := awaitingStep(t, pool, "1 hour", "AWAITING_CALLBACK")
+	_, ok, err := engine.Claim(ctx, pool, "w1", charge, time.Minute)
+	require.NoError(t, err)
+	require.False(t, ok, "not before the deadline")
+
+	_, err = pool.Exec(ctx, `UPDATE steps SET run_after = now() - interval '1 second' WHERE id = $1`, step)
+	require.NoError(t, err)
+	s := mustClaim(t, pool, "w1", time.Minute)
+	require.Equal(t, step, s.ID)
+	require.Equal(t, "AWAITING_CALLBACK", s.PriorStatus)
+	require.Equal(t, int32(1), s.PollCount)
+	require.Equal(t, int32(1), s.Attempt, "a poll is not a send attempt")
+	require.Equal(t, int32(2), s.AttemptNo)
+	require.Equal(t, "po_test-"+step.String(), s.ProviderRef)
+	require.False(t, s.SendDoubt)
+}
+
+// The time budget runs from the acceptance: the latest send attempt's end.
+func TestClaim_WaitedForSinceAcceptance(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	step := awaitingStep(t, pool, "-1 second", "AWAITING_CALLBACK")
+	_, err := pool.Exec(context.Background(), `UPDATE step_attempts SET finished_at = now() - interval '2 hours' WHERE step_id = $1`, step)
+	require.NoError(t, err)
+	s := mustClaim(t, pool, "w1", time.Minute)
+	require.InDelta(t, (2 * time.Hour).Seconds(), s.WaitedFor.Seconds(), 60)
+}
+
+func TestClaim_PollAttemptRecordedAsPoll(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	step := awaitingStep(t, pool, "-1 second", "AWAITING_CALLBACK")
+	s := mustClaim(t, pool, "w1", time.Minute)
+	require.Equal(t, "poll", scalar[string](t, pool, `SELECT kind FROM step_attempts WHERE step_id = $1 AND attempt_no = $2`, step, s.AttemptNo))
+	require.Equal(t, "send", scalar[string](t, pool, `SELECT kind FROM step_attempts WHERE step_id = $1 AND attempt_no = 1`, step))
+}
+
+func TestComplete_AwaitingCallbackSetsDeadline(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.NewPool(t, dsn)
+	submit(t, pool, "cus_1")
+	s := mustClaim(t, pool, "w1", time.Minute)
+	require.NoError(t, engine.Complete(ctx, pool, s,
+		engine.Result{Kind: engine.ResultAwaitingCallback, ProviderRef: "po_1", RetryDelay: time.Minute}, &stubStep{}))
+
+	r := readStep(t, pool, s.ID)
+	require.Equal(t, "AWAITING_CALLBACK", r.status)
+	require.Equal(t, "po_1", r.providerRef)
+	require.Empty(t, r.leaseOwner)
+	require.True(t, scalar[bool](t, pool, `SELECT callback_deadline = run_after AND run_after BETWEEN now() + interval '50 seconds' AND now() + interval '70 seconds' FROM steps WHERE id = $1`, s.ID))
+	require.Equal(t, "AWAITING_CALLBACK", *attemptOutcome(t, pool, s.ID, s.AttemptNo))
+}
+
+// Review focus 1: a crashed poll sent nothing, so it must not create doubt.
+func TestReclaim_PollReturnsToAwaitingCallback(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	step := awaitingStep(t, pool, "-1 second", "AWAITING_CALLBACK")
+	s := mustClaim(t, pool, "w1", 10*time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
+	n, err := engine.ReclaimExpiredLeases(context.Background(), pool)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, n)
+	require.Equal(t, "AWAITING_CALLBACK", readStep(t, pool, step).status)
+	require.True(t, scalar[bool](t, pool, `SELECT run_after <= now() AND callback_deadline <= now() FROM steps WHERE id = $1`, step))
+	require.Equal(t, "ABANDONED", *attemptOutcome(t, pool, step, s.AttemptNo))
+	require.Equal(t, "poll", scalar[string](t, pool, `SELECT kind FROM step_attempts WHERE step_id = $1 AND attempt_no = $2`, step, s.AttemptNo))
+}
+
+func TestClaim_SendDoubtFromHistory(t *testing.T) {
+	ctx := context.Background()
+	t.Run("an ambiguous send attempt", func(t *testing.T) {
+		pool := testutil.NewPool(t, dsn)
+		awaitingStep(t, pool, "-1 second", "IN_DOUBT")
+		require.True(t, mustClaim(t, pool, "w1", time.Minute).SendDoubt)
+	})
+	t.Run("only an abandoned poll", func(t *testing.T) {
+		pool := testutil.NewPool(t, dsn)
+		step := awaitingStep(t, pool, "-1 second", "AWAITING_CALLBACK")
+		mustClaim(t, pool, "w1", 10*time.Millisecond)
+		time.Sleep(30 * time.Millisecond)
+		_, err := engine.ReclaimExpiredLeases(ctx, pool)
+		require.NoError(t, err)
+		require.Equal(t, "AWAITING_CALLBACK", readStep(t, pool, step).status)
+		require.False(t, mustClaim(t, pool, "w1", time.Minute).SendDoubt, "a poll never creates doubt")
+	})
+}
+
+// Review focus 3: confirming a step with its own provider reference is not a reuse.
+func TestProviderRefInUse_ExcludesOwnStep(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.NewPool(t, dsn)
+	step := awaitingStep(t, pool, "1 hour", "AWAITING_CALLBACK")
+	ref := "po_test-" + step.String()
+	q := db.New(pool)
+	used, err := q.ProviderRefInUse(ctx, db.ProviderRefInUseParams{ProviderRef: &ref, StepID: step})
+	require.NoError(t, err)
+	require.False(t, used)
+	used, err = q.ProviderRefInUse(ctx, db.ProviderRefInUseParams{ProviderRef: &ref, StepID: uuid.New()})
+	require.NoError(t, err)
+	require.True(t, used)
+}

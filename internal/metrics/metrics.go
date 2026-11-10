@@ -29,6 +29,7 @@ type Metrics struct {
 	Parked           *prometheus.GaugeVec   // reason
 	LastSnapshot     prometheus.Gauge       // unix time of the last successful sweeper snapshot
 	Submissions      *prometheus.CounterVec // result
+	CallbackPolls    *prometheus.CounterVec // step, result
 }
 
 // New registers every metric, plus the Go runtime and process collectors.
@@ -80,10 +81,14 @@ func New() *Metrics {
 			Name: "idem_workflow_submissions_total",
 			Help: "POST /workflows results: created, replayed, validation_failed, key_reused, key_in_use, timeout, error.",
 		}, []string{"result"}),
+		CallbackPolls: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "idem_callback_polls_total",
+			Help: "Status polls of accepted async requests (payouts) by result: paid, failed, pending, error.",
+		}, []string{"step", "result"}),
 	}
 	for _, c := range []prometheus.Collector{
 		m.StepAttempts, m.ProviderDuration, m.KeyLookups, m.LeasesReclaimed, m.Workflows, m.Steps,
-		m.UnsettledIdle, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions,
+		m.UnsettledIdle, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions, m.CallbackPolls,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	} {
 		f(c)
@@ -165,6 +170,14 @@ func (m *Metrics) SetSnapshot(s Snapshot) {
 		m.Parked.WithLabelValues(reason).Set(float64(n))
 	}
 	m.LastSnapshot.SetToCurrentTime()
+}
+
+// ObservePoll counts one status poll of an accepted async request.
+func (m *Metrics) ObservePoll(step, result string) {
+	if m == nil {
+		return
+	}
+	m.CallbackPolls.WithLabelValues(step, result).Inc()
 }
 
 // ObserveSubmission counts a POST /workflows result.

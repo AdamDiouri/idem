@@ -40,6 +40,8 @@ services:
   fakeprovider:
     build: .
     entrypoint: ["/fakeprovider"]
+    environment:
+      FAKEPROVIDER_PAYOUT_SETTLE: 2s # accepted payouts settle 2s later
     ports:
       - "9090:9090"
 
@@ -50,6 +52,7 @@ services:
     environment: &worker-env
       IDEM_DATABASE_URL: postgres://idem:idem@postgres:5432/idem?sslmode=disable
       IDEM_PROVIDER_URL: http://fakeprovider:9090
+      IDEM_CALLBACK_DEADLINE: 5s # demo: poll a waiting payout after 5s (default 10m)
     depends_on: &worker-deps
       migrate:
         condition: service_completed_successfully

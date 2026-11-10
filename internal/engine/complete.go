@@ -47,8 +47,9 @@ func Complete(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, r Result, 
 		if err := runHook(func() error { return step.OnPermanentFailure(ctx, q, s) }); err != nil {
 			return fmt.Errorf("%s on permanent failure: %w", s.Name, err)
 		}
-	case ResultInDoubt, ResultRetryNoEffect:
-		// No hook: nothing is known to have happened, so nothing else may change.
+	case ResultInDoubt, ResultRetryNoEffect, ResultAwaitingCallback:
+		// No hook: nothing is known to have happened (or not yet), so nothing
+		// else may change.
 	case ResultDead:
 		if err := transitionWorkflow(ctx, q, s.WorkflowID, []string{wfRunning, wfCompensating}, wfNeedsAttention); err != nil {
 			return err
@@ -62,12 +63,16 @@ func Complete(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, r Result, 
 		v := int32(r.HTTPStatus) //nolint:gosec // HTTP status codes fit in int32
 		httpStatus = &v
 	}
+	outcome := r.Kind
+	if r.AttemptOutcome != "" {
+		outcome = r.AttemptOutcome
+	}
 	if err := q.FinishStepAttempt(ctx, db.FinishStepAttemptParams{
-		Outcome:    string(r.Kind),
+		Outcome:    string(outcome),
 		HttpStatus: httpStatus,
 		Error:      optional(r.Error),
 		StepID:     s.ID,
-		AttemptNo:  s.Attempt,
+		AttemptNo:  s.AttemptNo,
 	}); err != nil {
 		return fmt.Errorf("finish attempt: %w", err)
 	}

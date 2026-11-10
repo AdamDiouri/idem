@@ -31,6 +31,15 @@ type WorkerOptions struct {
 	// InFlightDelay is the retry delay after a 409 (the provider is still
 	// processing the same key). Zero means Backoff.Base.
 	InFlightDelay time.Duration
+	// CallbackDeadline is how long an accepted async request (a payout) waits
+	// for its result before workers poll it (design §4.5).
+	CallbackDeadline time.Duration
+	// PollBackoff spaces polls of a waiting step (Base, growing to Cap);
+	// MaxWait and MaxPolls bound them before the step is DEAD with
+	// callback_unresolved (design §4.5). Zero limits mean none.
+	PollBackoff Backoff
+	MaxWait     time.Duration
+	MaxPolls    int32
 	// KeyRetention is how long the provider remembers idempotency keys;
 	// KeyRetentionMargin is the safety margin before it. Zero disables lookups.
 	KeyRetention       time.Duration
@@ -55,6 +64,8 @@ var outcomeNames = map[ResultKind]string{
 	ResultInDoubt:         "in_doubt",
 	ResultRetryNoEffect:   "retry_no_effect",
 	ResultDead:            "dead",
+	// An accepted async request (or a poll that found it still unsettled).
+	ResultAwaitingCallback: "awaiting_callback",
 }
 
 // Worker claims and executes steps.
@@ -100,7 +111,19 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 	var out provider.Outcome
 	failpoint.Hit(FPBeforeProviderCall)
 	callStart := time.Now()
-	if w.nearKeyRetention(s) {
+	_, canPoll := step.(Poller)
+	switch {
+	case s.PriorStatus == string(ResultAwaitingCallback):
+		// A poll of an accepted request (design §4.5): it sends nothing.
+		out, r = w.poll(ctx, step, s, log)
+	case w.nearKeyRetention(s) && canPoll && s.ProviderRef != "":
+		// In doubt near key retention, but the provider already accepted this
+		// request and we hold its reference: ask about that request directly
+		// instead of looking it up by a key the provider may have forgotten.
+		log.Warn("idempotency key near provider retention; resolving by polling the accepted request",
+			"key_age", s.KeyAge.String(), "provider_ref", s.ProviderRef)
+		out, r = w.poll(ctx, step, s, log)
+	case w.nearKeyRetention(s):
 		// Re-sending could reach a provider that has forgotten the key and
 		// charge twice. Ask what happened instead (design §9.4).
 		log.Warn("idempotency key near provider retention; resolving by lookup", "key_age", s.KeyAge.String())
@@ -110,14 +133,14 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 		if !found && out.Class == provider.Permanent {
 			r = Result{Kind: ResultDead, DeadReason: DeadKeyExpiredUnknown, HTTPStatus: out.HTTPStatus, Error: errString(out.Err)}
 		}
-	} else {
+	default:
 		out = w.execute(ctx, step, s)
 	}
 	w.opts.Metrics.ObserveProvider(s.Name, out.Class.String(), time.Since(callStart))
 	failpoint.Hit(FPAfterProviderCall)
 
 	if r.Kind == "" {
-		r = decide(s, out, w.opts.Backoff, w.opts.InFlightDelay, step.Pivot())
+		r = decide(s, out, w.opts.Backoff, w.opts.InFlightDelay, w.opts.CallbackDeadline, step.Pivot())
 	}
 
 	completeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), completeTimeout)
@@ -141,6 +164,10 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 		log.Error("step is DEAD; workflow needs attention",
 			"dead_reason", r.DeadReason, "money_may_have_moved", MoneyMayHaveMoved(r.DeadReason),
 			"http_status", r.HTTPStatus, "error", r.Error)
+	case ResultAwaitingCallback:
+		log.Info("waiting for the provider's result", "provider_ref", r.ProviderRef,
+			"next_poll_in", r.RetryDelay.String(), "poll_count", s.PollCount, "polls_since_send", s.PollsSinceSend,
+			"waited", s.WaitedFor.Round(time.Second).String(), "error", r.Error)
 	case ResultInDoubt, ResultRetryNoEffect:
 		log.Warn("step will be retried", "outcome", outcome, "retry_in", r.RetryDelay.String(),
 			"http_status", r.HTTPStatus, "error", r.Error)
@@ -162,6 +189,48 @@ func (w *Worker) execute(ctx context.Context, step Step, s ClaimedStep) (out pro
 		}
 	}()
 	return step.Execute(ctx, s)
+}
+
+// poll asks for the state of an accepted request and decides from it. A step
+// that cannot be polled can never settle: it is DEAD for a human.
+func (w *Worker) poll(ctx context.Context, step Step, s ClaimedStep, log *slog.Logger) (out provider.Outcome, r Result) {
+	poller, ok := step.(Poller)
+	if !ok {
+		log.Error("waiting step cannot be polled; parking it", "step", s.Name)
+		return provider.Outcome{Class: provider.Ambiguous}, Result{
+			Kind: ResultDead, DeadReason: DeadCallbackUnresolved, ProviderRef: s.ProviderRef,
+			Error: "step " + s.Name + " has no poller",
+		}
+	}
+	out = w.callPoll(ctx, poller, s)
+	w.opts.Metrics.ObservePoll(s.Name, pollResult(out.Class))
+	return out, decidePoll(s, out, w.opts.PollBackoff, PollLimits{MaxPolls: w.opts.MaxPolls, MaxWait: w.opts.MaxWait}, step.Pivot())
+}
+
+// callPoll is execute's counterpart for Poller.Poll.
+func (w *Worker) callPoll(ctx context.Context, poller Poller, s ClaimedStep) (out provider.Outcome) {
+	defer func() {
+		if r := recover(); r != nil {
+			if failpoint.IsCrash(r) {
+				panic(r)
+			}
+			out = provider.Outcome{Class: provider.Ambiguous, Err: fmt.Errorf("panic: %v", r)}
+		}
+	}()
+	return poller.Poll(ctx, s)
+}
+
+func pollResult(c provider.Class) string {
+	switch c {
+	case provider.Success:
+		return "paid"
+	case provider.Permanent:
+		return "failed"
+	case provider.Pending:
+		return "pending"
+	default:
+		return "error"
+	}
 }
 
 // nearKeyRetention reports whether an in-doubt step's key is old enough that

@@ -156,14 +156,14 @@ func adminListCmd() *cobra.Command {
 					return enc.Encode(parked)
 				}
 				tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-				_, _ = fmt.Fprintln(tw, "WORKFLOW\tVERSION\tSTEP\tSTATUS\tREASON\tATTEMPTS\tPARKED FOR\tLAST ERROR")
+				_, _ = fmt.Fprintln(tw, "WORKFLOW\tVERSION\tSTEP\tSTATUS\tREASON\tATTEMPTS\tPOLLS\tPARKED FOR\tLAST ERROR")
 				for _, p := range parked {
 					why := p.DeadReason
 					if why == "" {
 						why = "refused"
 					}
-					_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%s\t%s\n", p.WorkflowID, p.Version, p.Step, p.StepStatus, why,
-						p.Attempts, p.ParkedFor.Round(time.Second), truncate(p.LastError, 60))
+					_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n", p.WorkflowID, p.Version, p.Step, p.StepStatus, why,
+						p.Attempts, p.Polls, p.ParkedFor.Round(time.Second), truncate(p.LastError, 60))
 				}
 				return tw.Flush()
 			})

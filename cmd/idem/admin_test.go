@@ -68,6 +68,7 @@ func TestAdminCLI_ListTable(t *testing.T) {
 	require.Contains(t, out, "WORKFLOW")
 	require.Contains(t, out, "REASON")
 	require.Contains(t, out, "VERSION")
+	require.Contains(t, out, "POLLS")
 	require.Contains(t, out, wf.String())
 	require.Contains(t, out, "attempts_exhausted_no_effect")
 }

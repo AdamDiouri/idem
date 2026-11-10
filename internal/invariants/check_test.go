@@ -153,9 +153,12 @@ func only(vs []invariants.Violation, invariant string) []invariants.Violation {
 
 func (e env) payout(t *testing.T, wf uuid.UUID, key string) {
 	t.Helper()
-	out := e.client.CreatePayout(context.Background(), key,
-		provider.PayoutRequest{AmountCents: 9825, Currency: "EUR", MerchantID: "mer_1", WorkflowID: wf})
-	require.Equal(t, provider.Success, out.Class, "err: %v", out.Err)
+	req := provider.PayoutRequest{AmountCents: 9825, Currency: "EUR", MerchantID: "mer_1", WorkflowID: wf}
+	out := e.client.CreatePayout(context.Background(), key, req)
+	require.Equal(t, provider.Accepted, out.Class, "err: %v", out.Err)
+	// Payouts are async (M2): the money moves when the payout settles.
+	paid := e.client.GetPayout(context.Background(), out.ProviderRef, req)
+	require.Equal(t, provider.Success, paid.Class, "err: %v", paid.Err)
 }
 
 func (e env) postKind(t *testing.T, wf, step uuid.UUID, kind string, entries []ledger.Entry) {
@@ -286,6 +289,25 @@ func TestCheckLiveness_ReportsStuck(t *testing.T) {
 	v, err = invariants.CheckLiveness(ctx, e.pool)
 	require.NoError(t, err)
 	require.Empty(t, v)
+}
+
+// Slice 2.1, I4 extended: after quiescence no step may still wait for a callback.
+func TestCheckLiveness_ReportsAwaitingCallback(t *testing.T) {
+	ctx := context.Background()
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	e.setStatus(t, wf, "RUNNING")
+	_, err := e.pool.Exec(ctx, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_1', callback_deadline = now() WHERE id = $1`, step)
+	require.NoError(t, err)
+
+	v, err := invariants.CheckLiveness(ctx, e.pool)
+	require.NoError(t, err)
+	require.NotEmpty(t, v)
+	var details []string
+	for _, x := range v {
+		details = append(details, x.Detail)
+	}
+	require.Contains(t, strings.Join(details, "\n"), "AWAITING_CALLBACK")
 }
 
 func TestCheck_I6_KeyWithoutWorkflow(t *testing.T) {
