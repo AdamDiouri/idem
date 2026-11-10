@@ -432,3 +432,23 @@ func TestAdmin_ResolveConflict(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, conflicts)
 }
+
+// Slice 2.3b (review R9): one definition of "an earlier send may have moved
+// money". The admin check used to leave out attempts recorded DEAD, which the
+// claim and inbox queries count.
+func TestMayHaveMoved_DeadSendAttemptCounts(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	wf := parkCharge(t, h, fakeprovider.ModeRateLimit) // provably no effect so far
+	step := h.parkedStep(t, wf).StepID
+	_, err := h.pool.Exec(ctx, `
+		UPDATE steps SET status = 'FAILED_PERMANENT', dead_reason = NULL WHERE id = $1;`, step)
+	require.NoError(t, err)
+	_, err = h.pool.Exec(ctx, `
+		UPDATE step_attempts SET outcome = 'DEAD'
+		WHERE step_id = $1 AND kind = 'send' AND attempt_no = (SELECT min(attempt_no) FROM step_attempts WHERE step_id = $1)`, step)
+	require.NoError(t, err)
+
+	err = h.admin().Fail(ctx, wf, h.version(t, wf), "looks uncharged", false)
+	require.ErrorIs(t, err, engine.ErrConfirmationRequired)
+}
