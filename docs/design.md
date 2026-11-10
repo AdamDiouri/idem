@@ -150,7 +150,7 @@ What the system must tolerate in M1, and what it explicitly doesn't.
                                                            └─────────────┘
 ```
 
-- The webhook arrow (provider → API) arrives in **M2**; in M1 all provider interaction is request/response.
+- The webhook arrow (provider → API) is live since **M2 slice 2.2**: `POST /webhooks/provider` verifies and stores events in `webhook_inbox`, and an inbox processor in each worker applies them. Polling (slice 2.1) stays as the safety net.
 - **Local runtime:** `docker compose` in M1; `minikube` from M4.
 - **One binary** `idem` with subcommands `api | worker | sweeper | all`. Each role is stateless; all state lives in Postgres. Running several of each must be safe.
 - **`fakeprovider`** — a separate Go HTTP service imitating a Stripe-like provider, with fault injection and an "effects oracle" (§14.1).
@@ -439,11 +439,11 @@ The heart of the design. Every row should eventually map to at least one automat
 | F12 | Worker paused past lease (`SIGSTOP`), resumes, commits | Sweeper bumped epoch; new owner finished. Stale commit matches 0 rows | Stale result discarded; `fenced_commits_total`++ | chaos: pause |
 | F13 | Paused worker resumes and *sends* the provider call late | Same idempotency key → provider dedupes | No duplicate effect | chaos: pause + oracle |
 | F14 | Postgres down mid-flight | No claims → no new calls; in-flight completes can't commit → lease path after recovery | No loss, no duplicates; delayed | chaos: stop DB |
-| F15 | **(M2)** Duplicate webhook | Inbox `ON CONFLICT DO NOTHING` | Processed once | provider fault `dup_webhook` |
-| F16 | **(M2)** Webhook arrives before our `AWAITING_CALLBACK` commit | Inbox row left unprocessed and retried | Applied once step is ready | provider fault `fast_webhook` |
-| F17 | **(M2)** Webhooks out of order / contradictory | Terminal states never flip; conflict → `NEEDS_ATTENTION` | Loud, not wrong | provider fault `reorder` |
+| F15 | **(M2, built 2.2)** Duplicate webhook | Inbox primary key; a second event for a decided step is a no-op | Processed once | provider fault `dup_webhook` |
+| F16 | **(M2, built 2.2)** Webhook arrives before our `AWAITING_CALLBACK` commit | Matched by idempotency key; deferred until the step is waiting | Applied once step is ready | provider fault `fast_webhook` |
+| F17 | **(M2, built 2.2)** Webhooks out of order / contradictory | Terminal states never flip; re-checked with the provider: stale → ignored, real → `CONFLICT` (pages); parked step → evidence for the operator | Loud, not wrong | provider fault `reorder` |
 | F18 | **(M2)** Webhook never arrives | Callback deadline → poll | Resolved by polling | provider fault `drop_webhook` |
-| F19 | **(M2)** Forged or replayed webhook | Signature / timestamp check fails | `401`; nothing stored | unit + integration |
+| F19 | **(M2, built 2.2)** Forged or replayed webhook | Signature / timestamp check fails | `400`; nothing stored | unit + integration |
 | F20 | Payout permanently fails after successful charge | `refund` step created; reversal posted on success | Workflow `COMPENSATED`; ledger nets to 0 | provider fault `payout_fail` |
 | F21 | Refund keeps failing | Up to 20 attempts → `DEAD` | `NEEDS_ATTENTION` + alert | provider fault |
 | F22 | Retries exhausted on any step | `DEAD` | `NEEDS_ATTENTION`; alert says whether money may have moved | unit |
@@ -570,6 +570,8 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 | D10 | Single currency (EUR) in M1, `currency` column kept | Simplicity now, cheap to extend later | Multi-currency from day one |
 | D11 | Platform fees kept; integer cents, half-to-even rounding, fixed at workflow creation | Realism; fee rounding is a classic source of ledger drift | No fees |
 | D12 | (M2) Workers poll waiting payouts, not the sweeper | Workers already own every provider call, leases and fencing; the sweeper stays database-only | Sweeper polls |
+| D16 | (M2) Contradictory provider news never flips a terminal state; it is re-checked with the provider, and only a real disagreement pages | Late and reordered webhooks are normal; flipping on them is how money moves twice | Last event wins |
+| D18 | (M2) Provider news about a parked step is evidence for a human, never an automatic resolution | Money decisions made under doubt end with a human, who sees the answer | Auto-resolve parked steps |
 | D17 | (M2) Polls are attempts of kind `poll` and never create doubt; the pivot rule reads the history of send attempts | A `GET` cannot move money; counting a crashed poll as doubt would park clean failures | Treat every attempt alike |
 
 **Calls made by Claude while drafting (please check):** D2, D4, D7, D8; fee defaults and rounding rule; retry defaults; one hard-coded workflow type; static API token; in-memory fake provider; `generation` mechanism for deliberate new keys.

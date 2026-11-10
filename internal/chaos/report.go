@@ -60,6 +60,7 @@ type Report struct {
 	InDoubtResolved int                    `json:"in_doubt_resolved"`
 	CallbackPolls   int                    `json:"callback_polls"` // polls of accepted payouts (slice 2.1)
 	PayoutsWaited   int                    `json:"payouts_waited"` // payout steps polled at least once
+	Webhooks        WebhookCounts          `json:"webhooks"`       // provider webhooks (slice 2.2)
 	Violations      []invariants.Violation `json:"violations"`
 	Liveness        []invariants.Violation `json:"liveness"`
 	Restarts        map[string]int         `json:"restarts"` // process → crash restarts
@@ -205,6 +206,7 @@ func (r *Report) Text() string {
 	fmt.Fprintf(&b, "failpoint exits: %d\n", r.FailpointExits)
 	fmt.Fprintf(&b, "fenced commits: %d\nin-doubt resolved: %d\n", r.FencedCommits, r.InDoubtResolved)
 	fmt.Fprintf(&b, "callback polls: %d (payouts that waited: %d)\n", r.CallbackPolls, r.PayoutsWaited)
+	fmt.Fprintf(&b, "webhooks: %d applied, %d duplicates, %d deferred\n", r.Webhooks.Applied, r.Webhooks.Duplicates, r.Webhooks.Deferred)
 
 	fmt.Fprintf(&b, "crash restarts:\n")
 	for _, name := range slices.Sorted(maps.Keys(r.Restarts)) {
@@ -255,4 +257,12 @@ func (r *Report) Write(dir string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "report.txt"), []byte(r.Text()), 0o644) //nolint:gosec // report file
+}
+
+// WebhookCounts summarise the inbox after a run: events applied to a waiting
+// payout, duplicates absorbed, and events that needed more than one attempt.
+type WebhookCounts struct {
+	Applied    int `json:"applied"`
+	Duplicates int `json:"duplicates"`
+	Deferred   int `json:"deferred"`
 }

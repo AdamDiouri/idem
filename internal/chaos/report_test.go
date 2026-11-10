@@ -125,5 +125,7 @@ func TestReport_TextShowsRecoveryCounts(t *testing.T) {
 	text := r.Text()
 	require.Contains(t, text, "fenced commits: 3")
 	require.Contains(t, text, "callback polls: 0 (payouts that waited: 0)")
+	r.Webhooks = WebhookCounts{Applied: 3, Duplicates: 1, Deferred: 2}
+	require.Contains(t, r.Text(), "webhooks: 3 applied, 1 duplicates, 2 deferred")
 	require.Contains(t, text, "in-doubt resolved: 7")
 }

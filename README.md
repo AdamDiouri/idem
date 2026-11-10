@@ -56,7 +56,7 @@ FAILED          refund ──ok──▶ COMPENSATED
 
 Magic test IDs in the fake provider: customers starting with `cus_decline` are declined; merchants starting with `mer_invalid` have an invalid account, so the payout fails and the customer is refunded.
 
-Payouts are **asynchronous**, like real ones. The provider answers `202 pending`, and the payout settles `FAKEPROVIDER_PAYOUT_SETTLE` later (default `2s`). The payout step waits in `AWAITING_CALLBACK`, and workers poll `GET /payouts/{id}` after `IDEM_CALLBACK_DEADLINE`. The `payout_fail` fault makes an accepted payout settle `failed`. `FAKEPROVIDER_HANG` (default `30s`) sets how long timeout faults hang; chaos uses `3s`. Watch a compensation:
+Payouts are **asynchronous**, like real ones. The provider answers `202 pending`, and the payout settles `FAKEPROVIDER_PAYOUT_SETTLE` later (default `2s`). The payout step waits in `AWAITING_CALLBACK`, and workers poll `GET /payouts/{id}` after `IDEM_CALLBACK_DEADLINE`. The `payout_fail` fault makes an accepted payout settle `failed`. With `FAKEPROVIDER_WEBHOOK_URL` and `FAKEPROVIDER_WEBHOOK_SECRET`, the fake provider also announces each settled payout by **signed webhook**; idem's API verifies it (`IDEM_PROVIDER_WEBHOOK_SECRETS`: current secret first, then the previous one while rotating; the endpoint is off without one), stores it in an inbox, and workers apply it. Compose wires this up, so a payout completes about 2 seconds after it is accepted. `FAKEPROVIDER_HANG` (default `30s`) sets how long timeout faults hang; chaos uses `3s`. Watch a compensation:
 
 ```bash
 curl -s -X POST localhost:8080/workflows -H 'Authorization: Bearer demo-token-0123456789' \
@@ -226,6 +226,7 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_CALLBACK_POLL_CAP` | `1h` | Polls back off from `IDEM_RETRY_BASE` up to this; at least `IDEM_RETRY_BASE` |
 | `IDEM_CALLBACK_MAX_WAIT` | `72h` | Total wait since the provider accepted a payout before it is `callback_unresolved` (bank payouts take hours or days); longer than the deadline |
 | `IDEM_CALLBACK_MAX_POLLS` | `0` | Optional limit on polls per acceptance; `0` means none |
+| `IDEM_INBOX_ORPHAN_AFTER` | `1h` | A provider webhook that matches no payout this long is ignored as an orphan |
 | `IDEM_WORKER_ID` | `hostname-pid` | |
 | `IDEM_METRICS_ADDR` | `:8090` | Where worker/sweeper serve `/metrics`; `off` disables |
 | `IDEM_FAILPOINTS` | (none) | `name=exit\|panic\|sleep:<d>[@probability],...` |

@@ -53,11 +53,25 @@ const (
 	leaseTTL = 4 * time.Second
 )
 
+// webhookSecret signs the chaos provider's webhooks to the chaos API.
+const webhookSecret = "whsec_chaos_0123456789"
+
 // providerEnv compresses the fake provider's timings like the engine's: payouts
 // settle in 300ms, and a timeout fault hangs 3s (with a 1s client timeout)
-// instead of 30s, which no real provider holds a key for.
-func providerEnv(port int) []string {
-	return []string{fmt.Sprintf("FAKEPROVIDER_ADDR=127.0.0.1:%d", port), "FAKEPROVIDER_PAYOUT_SETTLE=300ms", "FAKEPROVIDER_HANG=3s"}
+// instead of 30s, which no real provider holds a key for. Settled payouts are
+// announced by signed webhook to the API (slice 2.2); polling stays the net.
+func providerEnv(port, apiPort int) []string {
+	return []string{
+		fmt.Sprintf("FAKEPROVIDER_ADDR=127.0.0.1:%d", port), "FAKEPROVIDER_PAYOUT_SETTLE=300ms", "FAKEPROVIDER_HANG=3s",
+		fmt.Sprintf("FAKEPROVIDER_WEBHOOK_URL=http://127.0.0.1:%d/webhooks/provider", apiPort),
+		"FAKEPROVIDER_WEBHOOK_SECRET=" + webhookSecret,
+	}
+}
+
+// apiEnv configures the chaos API, which receives the provider's webhooks.
+func apiEnv(dsn string, port int) []string {
+	return []string{"IDEM_DATABASE_URL=" + dsn, "IDEM_API_TOKENS=chaos=" + apiToken,
+		fmt.Sprintf("IDEM_HTTP_ADDR=127.0.0.1:%d", port), "IDEM_PROVIDER_WEBHOOK_SECRETS=" + webhookSecret}
 }
 
 // workerEnv tunes the engine for chaos: short leases and retries so a short
@@ -143,22 +157,22 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	if err != nil {
 		return rep, err
 	}
+	apiPort, err := FreePort()
+	if err != nil {
+		return rep, err
+	}
 	providerURL := fmt.Sprintf("http://127.0.0.1:%d", providerPort)
 	if _, err := sup.Start(ProcSpec{Name: "fakeprovider", Path: provider, LogPath: logPath("fakeprovider"),
-		Env: providerEnv(providerPort)}); err != nil {
+		Env: providerEnv(providerPort, apiPort)}); err != nil {
 		return rep, err
 	}
 	if err := waitHTTP(ctx, providerURL+"/_effects"); err != nil {
 		return rep, fmt.Errorf("fake provider: %w", err)
 	}
 
-	apiPort, err := FreePort()
-	if err != nil {
-		return rep, err
-	}
 	apiURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
 	apiProc, err := sup.Start(ProcSpec{Name: "api", Path: idem, Args: []string{"api"}, LogPath: logPath("api"),
-		Env: []string{"IDEM_DATABASE_URL=" + pg.DSN(), "IDEM_API_TOKENS=chaos=" + apiToken, fmt.Sprintf("IDEM_HTTP_ADDR=127.0.0.1:%d", apiPort)}})
+		Env: apiEnv(pg.DSN(), apiPort)})
 	if err != nil {
 		return rep, err
 	}
@@ -296,6 +310,13 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		SELECT (SELECT count(*) FROM step_attempts WHERE kind = 'poll'),
 		       (SELECT count(DISTINCT step_id) FROM step_attempts WHERE kind = 'poll')`).
 		Scan(&rep.CallbackPolls, &rep.PayoutsWaited); err != nil {
+		return rep, err
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE status = 'PROCESSED' AND note = 'applied'),
+		       count(*) FILTER (WHERE status = 'PROCESSED' AND note = 'duplicate'),
+		       count(*) FILTER (WHERE attempts > 1)
+		FROM webhook_inbox`).Scan(&rep.Webhooks.Applied, &rep.Webhooks.Duplicates, &rep.Webhooks.Deferred); err != nil {
 		return rep, err
 	}
 	rep.FencedCommits = countLogLines(cfg.RunDir, "worker-", "lease lost before completion")

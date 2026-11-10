@@ -31,6 +31,7 @@ services:
     environment:
       IDEM_DATABASE_URL: postgres://idem:idem@postgres:5432/idem?sslmode=disable
       IDEM_API_TOKENS: demo=demo-token-0123456789
+      IDEM_PROVIDER_WEBHOOK_SECRETS: whsec_demo_0123456789
     ports:
       - "8080:8080"
     depends_on:
@@ -42,6 +43,9 @@ services:
     entrypoint: ["/fakeprovider"]
     environment:
       FAKEPROVIDER_PAYOUT_SETTLE: 2s # accepted payouts settle 2s later
+      # ...and are announced by signed webhook (slice 2.2); polling stays the net
+      FAKEPROVIDER_WEBHOOK_URL: http://api:8080/webhooks/provider
+      FAKEPROVIDER_WEBHOOK_SECRET: whsec_demo_0123456789
     ports:
       - "9090:9090"
 

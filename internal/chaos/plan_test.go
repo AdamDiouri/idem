@@ -101,8 +101,18 @@ func TestWorkerEnv_SetsCallbackTimings(t *testing.T) {
 // the client gives up after 1s is harsher than any real provider and parked
 // healthy payouts. The hang is compressed too.
 func TestProviderEnv_CompressesHang(t *testing.T) {
-	env := providerEnv(9999)
+	env := providerEnv(9999, 8888)
 	require.Contains(t, env, "FAKEPROVIDER_ADDR=127.0.0.1:9999")
 	require.Contains(t, env, "FAKEPROVIDER_PAYOUT_SETTLE=300ms")
 	require.Contains(t, env, "FAKEPROVIDER_HANG=3s")
+}
+
+// Slice 2.2: the chaos provider sends signed webhooks to the chaos API, which
+// shares the secret.
+func TestProviderEnv_SendsWebhooksToAPI(t *testing.T) {
+	env := providerEnv(1, 2)
+	require.Contains(t, env, "FAKEPROVIDER_WEBHOOK_URL=http://127.0.0.1:2/webhooks/provider")
+	require.Contains(t, env, "FAKEPROVIDER_WEBHOOK_SECRET="+webhookSecret)
+	require.Contains(t, apiEnv("postgres://x", 2), "IDEM_PROVIDER_WEBHOOK_SECRETS="+webhookSecret)
+	require.GreaterOrEqual(t, len(webhookSecret), 16)
 }

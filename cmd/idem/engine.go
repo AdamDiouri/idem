@@ -99,14 +99,12 @@ func workerCmd() *cobra.Command {
 				id = fmt.Sprintf("%s-%d", host, os.Getpid())
 			}
 			client := provider.NewClient(e.cfg.ProviderURL, e.cfg.ProviderTimeout)
-			return engine.NewWorker(e.pool, engine.WorkerOptions{
-				ID: id,
-				Steps: []engine.Step{
-					engine.NewChargeStep(client),
-					engine.NewPayoutStep(client),
-					engine.NewRefundStep(client),
-				},
-				Metrics:            e.serveMetrics(),
+			steps := []engine.Step{engine.NewChargeStep(client), engine.NewPayoutStep(client), engine.NewRefundStep(client)}
+			m := e.serveMetrics() // one listener, shared by both loops
+			worker := engine.NewWorker(e.pool, engine.WorkerOptions{
+				ID:                 id,
+				Steps:              steps,
+				Metrics:            m,
 				LeaseTTL:           e.cfg.LeaseTTL,
 				PollInterval:       e.cfg.PollInterval,
 				Backoff:            engine.Backoff{Base: e.cfg.RetryBase, Cap: e.cfg.RetryCap},
@@ -118,7 +116,21 @@ func workerCmd() *cobra.Command {
 				MaxPolls:           e.cfg.CallbackMaxPolls,
 				ShutdownGrace:      e.cfg.ShutdownGrace,
 				Logger:             e.logger,
-			}).Run(e.ctx)
+			})
+			// Provider webhooks from the inbox (slice 2.2), next to the step loop.
+			inbox := engine.NewInboxProcessor(e.pool, engine.InboxOptions{
+				ID:           id + "-inbox",
+				Steps:        steps,
+				LeaseTTL:     e.cfg.LeaseTTL,
+				PollInterval: e.cfg.PollInterval,
+				OrphanAfter:  e.cfg.InboxOrphanAfter,
+				Retry:        engine.Backoff{Base: e.cfg.RetryBase, Cap: e.cfg.RetryCap},
+				Metrics:      m,
+				Logger:       e.logger,
+			})
+			inboxErr := make(chan error, 1)
+			go func() { inboxErr <- inbox.Run(e.ctx) }()
+			return errors.Join(worker.Run(e.ctx), <-inboxErr)
 		},
 	}
 }
