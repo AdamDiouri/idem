@@ -3,6 +3,7 @@ package fakeprovider_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -221,4 +222,46 @@ func TestWebhook_NoURLMeansNoDelivery(t *testing.T) {
 	require.Eventually(t, func() bool { return len(p.Effects()) == 1 }, 2*time.Second, 5*time.Millisecond)
 	require.Equal(t, id, p.Effects()[0].ID)
 	require.Empty(t, p.Webhooks())
+}
+
+// Minor fix: fast_webhook must arrive before the 202 even while Run is
+// ticking (it used to be able to settle and send it first, asynchronously).
+func TestWebhook_FastBeatsTheResponseEvenWithRun(t *testing.T) {
+	rcv := &receiver{respond: func(int) int { time.Sleep(20 * time.Millisecond); return http.StatusOK }}
+	rsrv := httptest.NewServer(http.HandlerFunc(rcv.handler))
+	t.Cleanup(rsrv.Close)
+	p, srv := newServerWith(t, fakeprovider.Options{
+		WebhookURL: rsrv.URL, WebhookSecret: whSecret, WebhookRetryBase: 20 * time.Millisecond, Tick: time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go p.Run(ctx)
+	p.SetFaults(faults(fakeprovider.Rule{Endpoint: "webhooks", Mode: fakeprovider.ModeFastWebhook}))
+	for i := range 30 {
+		post(t, srv.URL, "/payouts", fmt.Sprintf("k%d", i), payoutBody("mer_1", 9825))
+		require.Len(t, rcv.all(), i+1, "payout %d: its webhook must be delivered before the 202", i)
+	}
+}
+
+// Minor fix: one slow receiver must not hold up every other webhook.
+func TestWebhook_DeliveriesDoNotQueueBehindASlowOne(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	rcv := &receiver{}
+	rcv.respond = func(n int) int {
+		if n == 1 {
+			<-release // the first delivery hangs
+		}
+		return http.StatusOK
+	}
+	_, url := webhookProvider(t, rcv, 8, true)
+	// Registered after the servers' cleanups, so it runs first (LIFO): a
+	// receiver still blocked would otherwise keep its server from closing.
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	post(t, url, "/payouts", "k1", payoutBody("mer_1", 9825))
+	require.Eventually(t, func() bool { return len(rcv.all()) == 1 }, time.Second, 5*time.Millisecond)
+	post(t, url, "/payouts", "k2", payoutBody("mer_1", 9825))
+	require.Eventually(t, func() bool { return len(rcv.all()) == 2 }, time.Second, 5*time.Millisecond,
+		"the second webhook arrives while the first is still hanging")
+	once.Do(func() { close(release) })
 }

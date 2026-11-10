@@ -163,6 +163,7 @@ type payout struct {
 	settleAt     time.Time
 	fail         bool   // settles failed (payout_fail fault)
 	webhookFault string // drawn once, at acceptance
+	fastHold     bool   // fast_webhook: only its own POST may settle and send it
 }
 
 // failureAccountClosed is the failure_code of a payout the bank rejected.
@@ -344,7 +345,7 @@ func (p *Provider) create(res resource) http.HandlerFunc {
 			status, b = p.perform(res, slot, key, req, false)
 		}
 		if res.async {
-			p.deliverFast(r.Context()) // fast_webhook: before the 202 is written
+			p.deliverFast(r.Context(), slot) // fast_webhook: before the 202 is written
 		}
 		writeRaw(w, status, b)
 	}
@@ -366,7 +367,9 @@ func (p *Provider) perform(res resource, slot, key string, req request, fail boo
 		if p.opts.WebhookURL != "" {
 			po.webhookFault = p.pickFault(webhooksEndpoint)
 			if po.webhookFault == ModeFastWebhook {
-				po.settleAt = time.Now() // settles, and its webhook is sent, before the 202
+				// Settles, and its webhook is sent, by this request before the
+				// 202; Run must not take it first.
+				po.settleAt, po.fastHold = time.Now(), true
 			}
 		}
 		p.payouts[id] = po
@@ -524,7 +527,7 @@ func (p *Provider) getPayout(w http.ResponseWriter, r *http.Request) {
 func (p *Provider) settleDueLocked(now time.Time) {
 	var due []*payout
 	for _, po := range p.payouts {
-		if po.status == "pending" && !now.Before(po.settleAt) {
+		if po.status == "pending" && !po.fastHold && !now.Before(po.settleAt) {
 			due = append(due, po)
 		}
 	}

@@ -90,19 +90,31 @@ func (p *Provider) Run(ctx context.Context) {
 		due := p.takeDueLocked(func(d *delivery) bool { return !now.Before(d.nextAt) })
 		p.mu.Unlock()
 		for _, d := range due {
-			p.send(ctx, d)
+			go p.send(ctx, d) // a slow receiver must not hold up the others
 		}
 	}
 }
 
-// deliverFast sends fast_webhook events inline (before the 202 is written).
-func (p *Provider) deliverFast(ctx context.Context) {
+// deliverFast sends the fast_webhook event of the payout accepted under slot
+// inline, before the 202 is written. The payout was held back from Run, so
+// nothing else can settle or send it first.
+func (p *Provider) deliverFast(ctx context.Context, slot string) {
 	if p.opts.WebhookURL == "" {
 		return
 	}
 	p.mu.Lock()
+	ks := p.keys[slot]
+	var po *payout
+	if ks != nil {
+		po = p.payouts[ks.payoutID]
+	}
+	if po == nil || !po.fastHold {
+		p.mu.Unlock()
+		return
+	}
+	po.fastHold = false
 	p.settleDueLocked(time.Now())
-	due := p.takeDueLocked(func(d *delivery) bool { return d.fast && d.attempts == 0 })
+	due := p.takeDueLocked(func(d *delivery) bool { return d.fast && d.attempts == 0 && d.event.Data.PayoutID == po.id })
 	p.mu.Unlock()
 	for _, d := range due {
 		p.send(context.WithoutCancel(ctx), d)
