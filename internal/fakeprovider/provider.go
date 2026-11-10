@@ -635,7 +635,7 @@ func errorBody(code string) []byte {
 func writeRaw(w http.ResponseWriter, status int, b []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = w.Write(b)
+	_, _ = w.Write(b) //nolint:gosec // G705: a JSON body served as application/json, never rendered as HTML
 }
 
 func writeError(w http.ResponseWriter, status int, code string) {

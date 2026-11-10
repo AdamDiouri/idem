@@ -1,6 +1,6 @@
-FROM golang:1.25 AS build
+FROM golang:1.27.4 AS build
 WORKDIR /src
-ENV GOTOOLCHAIN=local CGO_ENABLED=0
+ENV CGO_ENABLED=0
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .

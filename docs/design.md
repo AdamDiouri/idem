@@ -176,7 +176,7 @@ docs/adr/
 ### Tech stack (confirmed 2026-11-09)
 | Concern | Choice | Why |
 |---|---|---|
-| Language | Go 1.25 (`go 1.25` in `go.mod`) | Installed locally (1.25.6). |
+| Language | Go 1.27 (`toolchain go1.27.4` in `go.mod`) | Moved from 1.25 when CI began scanning: 1.25 was out of upstream support, with unpatched reachable vulnerabilities. |
 | Database | Postgres 18 (docker compose) | D1. |
 | Driver | `jackc/pgx/v5` + `pgxpool` | Postgres-native; exposes SQLSTATE error codes (needed to detect unique-violation vs. serialization failure). |
 | Query layer | `sqlc` (generates typed Go from `.sql` files) | You still write every query by hand — locking clauses stay visible — but no manual row scanning. **No ORM.** |
@@ -596,7 +596,7 @@ None open.
 - Single currency: **EUR** (D10).
 - Fees: **kept** (D11).
 - Async payouts: **moved to M2** (D9).
-- Go: **1.25** (1.25.6 installed).
+- Go: **1.25** (1.25.6 installed). Moved to 1.27 on 2026-11-10 (§ stack table).
 - Local runtime: **docker compose** for M1, **minikube** for M4.
 
 ---

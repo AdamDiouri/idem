@@ -9,7 +9,7 @@ See [`docs/design.md`](docs/design.md) for the design, guarantees, fault model a
 
 ## Prerequisites
 
-- Go 1.25 (dependencies are pinned to versions that support it; the Makefile sets `GOTOOLCHAIN=local`)
+- Go 1.21 or later to start with: `go.mod` pins the exact toolchain (Go 1.27.4), which the go command downloads if it is not installed
 - Docker (for `docker compose` and for the integration tests, which run a real Postgres 18)
 - [`golangci-lint`](https://golangci-lint.run/) v2 for `make lint`
 
