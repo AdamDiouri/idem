@@ -37,9 +37,15 @@ func TestDecide(t *testing.T) {
 		{"ambiguous with attempts left", step(3, 8, "PENDING"),
 			provider.Outcome{Class: provider.Ambiguous, HTTPStatus: 500, Err: boom},
 			Result{Kind: ResultInDoubt, HTTPStatus: 500, Error: "boom", RetryDelay: 2 * time.Second}, false}, // 0.5 × 4s
-		{"ambiguous in flight retries soon", step(3, 8, "PENDING"),
+		// Pre-existing issue fixed before merge: a provider still processing
+		// the key must not burn the whole attempt budget in a second. In-flight
+		// retries start soon (inFlightDelay) and back off with equal jitter.
+		{"first in-flight retry is soon", step(1, 8, "PENDING"),
 			provider.Outcome{Class: provider.Ambiguous, InFlight: true, HTTPStatus: 409, Err: boom},
-			Result{Kind: ResultInDoubt, HTTPStatus: 409, Error: "boom", RetryDelay: inFlight}, false},
+			Result{Kind: ResultInDoubt, HTTPStatus: 409, Error: "boom", RetryDelay: 225 * time.Millisecond}, false}, // 300ms/2 + 0.5 × 300ms/2
+		{"later in-flight retries back off", step(3, 8, "PENDING"),
+			provider.Outcome{Class: provider.Ambiguous, InFlight: true, HTTPStatus: 409, Err: boom},
+			Result{Kind: ResultInDoubt, HTTPStatus: 409, Error: "boom", RetryDelay: 900 * time.Millisecond}, false}, // 1.2s/2 + 0.5 × 1.2s/2
 		{"no effect with attempts left", step(1, 8, "PENDING"),
 			provider.Outcome{Class: provider.NoEffect, HTTPStatus: 429, Err: boom},
 			Result{Kind: ResultRetryNoEffect, HTTPStatus: 429, Error: "boom", RetryDelay: 500 * time.Millisecond}, false},

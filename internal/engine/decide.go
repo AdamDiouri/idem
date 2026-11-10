@@ -58,7 +58,10 @@ func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay, callb
 		r.Kind = ResultInDoubt
 		r.RetryDelay = b.Delay(s.Attempt)
 		if out.InFlight {
-			r.RetryDelay = inFlightDelay
+			// The provider is still processing this key: retry soon (from
+			// inFlightDelay), but back off with equal jitter so a long-busy
+			// provider can't burn the attempt budget in a second.
+			r.RetryDelay = Backoff{Base: inFlightDelay, Cap: b.Cap, Rand: b.Rand}.EqualJitter(s.Attempt)
 		}
 	}
 	return r

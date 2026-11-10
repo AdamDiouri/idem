@@ -43,3 +43,14 @@ func TestBackoff_DefaultRandWithinBounds(t *testing.T) {
 		require.LessOrEqual(t, d, 8*time.Second)
 	}
 }
+
+// Equal jitter keeps at least half of the exponential ceiling, so a run of
+// retries has a guaranteed minimum total wait.
+func TestBackoff_EqualJitter(t *testing.T) {
+	b := Backoff{Base: time.Second, Cap: 5 * time.Second, Rand: func() float64 { return 0 }}
+	require.Equal(t, 2*time.Second, b.EqualJitter(3)) // ceiling 4s
+	b.Rand = func() float64 { return 1 }
+	require.Equal(t, 4*time.Second, b.EqualJitter(3))
+	require.Equal(t, 5*time.Second, b.EqualJitter(10), "capped")
+	require.Zero(t, Backoff{}.EqualJitter(3))
+}

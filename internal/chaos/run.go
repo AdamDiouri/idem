@@ -53,6 +53,13 @@ const (
 	leaseTTL = 4 * time.Second
 )
 
+// providerEnv compresses the fake provider's timings like the engine's: payouts
+// settle in 300ms, and a timeout fault hangs 3s (with a 1s client timeout)
+// instead of 30s, which no real provider holds a key for.
+func providerEnv(port int) []string {
+	return []string{fmt.Sprintf("FAKEPROVIDER_ADDR=127.0.0.1:%d", port), "FAKEPROVIDER_PAYOUT_SETTLE=300ms", "FAKEPROVIDER_HANG=3s"}
+}
+
 // workerEnv tunes the engine for chaos: short leases and retries so a short
 // campaign exercises many recoveries. It satisfies the config rules
 // (timeout + 2s < lease, grace >= timeout + 2s).
@@ -138,7 +145,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	}
 	providerURL := fmt.Sprintf("http://127.0.0.1:%d", providerPort)
 	if _, err := sup.Start(ProcSpec{Name: "fakeprovider", Path: provider, LogPath: logPath("fakeprovider"),
-		Env: []string{fmt.Sprintf("FAKEPROVIDER_ADDR=127.0.0.1:%d", providerPort), "FAKEPROVIDER_PAYOUT_SETTLE=300ms"}}); err != nil {
+		Env: providerEnv(providerPort)}); err != nil {
 		return rep, err
 	}
 	if err := waitHTTP(ctx, providerURL+"/_effects"); err != nil {
