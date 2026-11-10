@@ -204,7 +204,7 @@ violations: 0
   - provider faults must actually have hit requests
   - every webhook fault that was in force for at least 5 seconds while work was in flight (measured on the executed timeline) must actually have fired; in runs of a minute or more, **every** webhook fault must have had such a window and fired
   - every armed failpoint must actually have fired (failpoints name themselves when they do)
-  - with several API replicas, every replica must have answered clients, accepted new webhooks, and recognised duplicates (evidence of deduplication across replicas)
+  - with several API replicas, every replica must have answered clients and accepted new webhooks, and, in runs of a minute or more, recognised duplicates (evidence of deduplication across replicas)
   - a binary built with `-tags nofailpoint` refuses `IDEM_FAILPOINTS` instead of running silently
 - **Skipped events:** a kill or pause aimed at a worker that was already restarting is *skipped*. That is harmless, and it is neither counted nor treated as a failure.
 - **`NEEDS_ATTENTION`** entries list the step and reason. In a healthy run they are all `payout permanent_after_in_doubt`: payouts refused after an ambiguous attempt, parked for a human by the pivot safety rule instead of being refunded on a guess.

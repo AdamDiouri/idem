@@ -184,6 +184,7 @@ func TestReport_WebhookFaultArmedButNeverFiredIsVacuous(t *testing.T) {
 func TestReport_ReplicaWithoutTrafficIsVacuous(t *testing.T) {
 	r := healthy()
 	r.Config.APIs = 2
+	r.Config.Duration = 90 * time.Second // the duplicate rule needs the dedicated dup window (runs >= 1m)
 	r.Clients.PerReplica = map[string]int{"api-0": 5}
 	r.WebhooksAccepted = map[string]int{"api-0": 3}
 	r.WebhooksDuplicate = map[string]int{"api-0": 1}
@@ -302,4 +303,17 @@ func TestReport_TextShowsConflicts(t *testing.T) {
 	require.Contains(t, r.Text(), "conflicts: 0")
 	r.Violations = []invariants.Violation{{Invariant: "I10", WorkflowID: "wf"}, {Invariant: "I1", WorkflowID: "wf"}}
 	require.Contains(t, r.Text(), "conflicts: 1")
+}
+
+// Found by the chaos-tagged short campaign (flaky): in a run under a minute
+// there is no dedicated dup_webhook window, so a replica may legitimately see
+// no duplicate; only runs of a minute or more require cross-replica dedup.
+func TestReport_ShortRunNeedsNoDuplicatesPerReplica(t *testing.T) {
+	r := healthy() // 30s
+	r.Config.APIs = 2
+	r.Clients.PerReplica = map[string]int{"api-0": 5, "api-1": 4}
+	r.WebhooksAccepted = map[string]int{"api-0": 3, "api-1": 2}
+	r.WebhooksDuplicate = map[string]int{"api-0": 1}
+	r.Evaluate()
+	require.NotContains(t, strings.Join(r.Reasons, "\n"), "deduplicated no webhook")
 }

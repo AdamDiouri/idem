@@ -180,7 +180,9 @@ func (r *Report) Evaluate() {
 			if r.WebhooksAccepted[name] == 0 {
 				add("vacuous: API replica %s accepted no new webhook", name)
 			}
-			if r.WebhooksDuplicate[name] == 0 {
+			// Runs of a minute or more have the dedicated dup_webhook window,
+			// whose copies go to the next replica; shorter runs may see none.
+			if r.Config.Duration >= time.Minute && r.WebhooksDuplicate[name] == 0 {
 				add("vacuous: API replica %s deduplicated no webhook (no evidence of deduplication across replicas)", name)
 			}
 		}
