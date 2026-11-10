@@ -8,3 +8,8 @@ WHERE w.id = sqlc.arg(workflow_id)::uuid AND workflow_event_type(w.status) IS NO
 
 -- name: OutboxEventsForWorkflow :many
 SELECT id, type, payload, status FROM outbox WHERE workflow_id = sqlc.arg(workflow_id)::uuid ORDER BY created_at;
+
+-- name: WorkflowViewForClient :one
+-- GET /workflows/{id}: the shop's view, only for the workflow's own client.
+SELECT workflow_view(id)::text AS view FROM workflows
+WHERE id = sqlc.arg(id)::uuid AND client_id = sqlc.arg(client_id)::text;

@@ -68,3 +68,21 @@ func (q *Queries) OutboxEventsForWorkflow(ctx context.Context, workflowID uuid.U
 	}
 	return items, nil
 }
+
+const workflowViewForClient = `-- name: WorkflowViewForClient :one
+SELECT workflow_view(id)::text AS view FROM workflows
+WHERE id = $1::uuid AND client_id = $2::text
+`
+
+type WorkflowViewForClientParams struct {
+	ID       uuid.UUID
+	ClientID string
+}
+
+// GET /workflows/{id}: the shop's view, only for the workflow's own client.
+func (q *Queries) WorkflowViewForClient(ctx context.Context, arg WorkflowViewForClientParams) (string, error) {
+	row := q.db.QueryRow(ctx, workflowViewForClient, arg.ID, arg.ClientID)
+	var view string
+	err := row.Scan(&view)
+	return view, err
+}

@@ -30,6 +30,7 @@ type Metrics struct {
 	Parked             *prometheus.GaugeVec   // reason
 	LastSnapshot       prometheus.Gauge       // unix time of the last successful sweeper snapshot
 	Submissions        *prometheus.CounterVec // result
+	StatusRequests     *prometheus.CounterVec // result
 	CallbackPolls      *prometheus.CounterVec // step, result
 	WebhooksReceived   *prometheus.CounterVec // result
 	WebhooksApplied    *prometheus.CounterVec // outcome
@@ -88,6 +89,10 @@ func New() *Metrics {
 			Name: "idem_workflow_submissions_total",
 			Help: "POST /workflows results: created, replayed, validation_failed, key_reused, key_in_use, timeout, error.",
 		}, []string{"result"}),
+		StatusRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "idem_workflow_status_requests_total",
+			Help: "GET /workflows/{id} results: found, not_found, invalid_id, timeout, error.",
+		}, []string{"result"}),
 		WebhooksReceived: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "idem_webhooks_received_total",
 			Help: "POST /webhooks/provider results: accepted, duplicate, bad_signature, stale, malformed, too_large, store_error.",
@@ -115,7 +120,7 @@ func New() *Metrics {
 	}
 	for _, c := range []prometheus.Collector{
 		m.StepAttempts, m.ProviderDuration, m.KeyLookups, m.LeasesReclaimed, m.Workflows, m.Steps,
-		m.UnsettledIdle, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions, m.CallbackPolls, m.WebhooksReceived, m.WebhooksApplied,
+		m.UnsettledIdle, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions, m.StatusRequests, m.CallbackPolls, m.WebhooksReceived, m.WebhooksApplied,
 		m.InboxPending, m.InboxOldestPending, m.ConflictsOpen, m.CallbacksOverdue,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	} {
@@ -248,6 +253,14 @@ func (m *Metrics) ObserveWebhook(result string) {
 		return
 	}
 	m.WebhooksReceived.WithLabelValues(result).Inc()
+}
+
+// ObserveStatusRequest counts one GET /workflows/{id} by result.
+func (m *Metrics) ObserveStatusRequest(result string) {
+	if m == nil {
+		return
+	}
+	m.StatusRequests.WithLabelValues(result).Inc()
 }
 
 // ObserveSubmission counts a POST /workflows result.
