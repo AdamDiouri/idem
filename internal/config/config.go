@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"time"
 
@@ -31,6 +32,9 @@ type Config struct {
 	// first, then the previous one during a rotation. Empty: endpoint off.
 	ProviderWebhookSecrets []string `env:"IDEM_PROVIDER_WEBHOOK_SECRETS"`
 	Failpoints             string   `env:"IDEM_FAILPOINTS"` // see failpoint.EnableFromEnv
+	// DebugAddr, when not "off", serves pprof on a separate internal-only
+	// listener; the public API port never does.
+	DebugAddr string `env:"IDEM_DEBUG_ADDR" envDefault:"off"`
 }
 
 // Load parses and validates the environment. Errors name the offending variable.
@@ -87,6 +91,11 @@ func (c Config) validate() error {
 	for _, s := range c.ProviderWebhookSecrets {
 		if len(s) < minTokenLength {
 			return fmt.Errorf("IDEM_PROVIDER_WEBHOOK_SECRETS: a secret is empty or shorter than %d characters", minTokenLength)
+		}
+	}
+	if c.DebugAddr != "off" {
+		if _, _, err := net.SplitHostPort(c.DebugAddr); err != nil {
+			return fmt.Errorf("IDEM_DEBUG_ADDR must be host:port or \"off\": %w", err)
 		}
 	}
 	if err := failpoint.ValidateSpec(c.Failpoints, api.FailpointNames...); err != nil {

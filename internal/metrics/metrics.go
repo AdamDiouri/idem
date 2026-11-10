@@ -7,6 +7,7 @@ package metrics
 
 import (
 	"net/http"
+	"net/http/pprof"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -126,6 +127,23 @@ func New() *Metrics {
 // Handler serves the registry in the Prometheus text format.
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{})
+}
+
+// InternalHandler serves /metrics (when m is set) and Go's profiling endpoints
+// under /debug/pprof/ (CPU, heap, goroutines, mutex, block, execution trace).
+// It belongs on an internal-only listener: profiles reveal internals, and a
+// CPU profile costs the process while it runs.
+func InternalHandler(m *Metrics) http.Handler {
+	mux := http.NewServeMux()
+	if m != nil {
+		mux.Handle("GET /metrics", m.Handler())
+	}
+	mux.HandleFunc("GET /debug/pprof/", pprof.Index) // also serves heap, goroutine, block, mutex, allocs
+	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+	return mux
 }
 
 // Gatherer exposes the registry (for tests and checks).

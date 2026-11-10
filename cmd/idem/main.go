@@ -127,6 +127,17 @@ func apiCmd() *cobra.Command {
 				Inbox:          webhook.NewInbox(pool),
 			}, workflow.NewSubmitter(pool, cfg.IdempotencyLockTimeout, fees), pool)
 
+			if cfg.DebugAddr != "off" {
+				dbg := &http.Server{Addr: cfg.DebugAddr, Handler: metrics.InternalHandler(nil), ReadHeaderTimeout: 5 * time.Second}
+				go func() {
+					logger.Info("pprof listening (internal only)", "addr", cfg.DebugAddr)
+					if err := dbg.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+						logger.Error("debug server", "error", err)
+					}
+				}()
+				defer func() { _ = dbg.Close() }()
+			}
+
 			srv := &http.Server{
 				Addr:              cfg.HTTPAddr,
 				Handler:           handler,

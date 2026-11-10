@@ -138,6 +138,14 @@ Every change needs `--reason` and `--expect-version` (the `VERSION` column of `l
 - refunding a customer whose merchant was paid pays out twice
 - failing a charge that happened loses the customer's money
 
+**Profiling (pprof):** workers and sweepers serve Go's profiler next to `/metrics` on their internal port; compose publishes them on localhost only (worker `:8090`, sweeper `:8091`). The API serves it only on `IDEM_DEBUG_ADDR`, never on its public port.
+
+```bash
+go tool pprof -http=:0 'http://localhost:8090/debug/pprof/profile?seconds=10'   # worker CPU for 10s
+go tool pprof -http=:0 http://localhost:8090/debug/pprof/heap                    # worker memory
+curl -s 'http://localhost:8090/debug/pprof/goroutine?debug=1' | head            # what every goroutine is doing
+```
+
 **Metrics:**
 - `/metrics` on the API (`:8080`) and on workers and sweepers (`IDEM_METRICS_ADDR`, default `:8090`).
 - Prometheus in compose: <http://localhost:9091>.
@@ -223,6 +231,7 @@ go test -tags chaos ./internal/chaos/   # 30s chaos campaign as a test (after ma
 | `IDEM_FEE_FIXED_CENTS` | `25` | Fixed fee in cents |
 | `IDEM_PROVIDER_WEBHOOK_SECRETS` | (none: endpoint off) | Secrets that verify `POST /webhooks/provider`: the current one first, then the previous one while rotating; each at least 16 characters, spaces trimmed |
 | `IDEM_FAILPOINTS` | (none) | On the API: `webhook_after_insert=…` (see failpoints above) |
+| `IDEM_DEBUG_ADDR` | `off` | On the API: serves Go profiling (`/debug/pprof/`) on this internal-only address; never on the public port |
 | `IDEM_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
 Worker, sweeper and `check` (no API tokens needed):

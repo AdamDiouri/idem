@@ -202,3 +202,14 @@ func TestWebhooks_CrashAfterInsertIsRetriedSafely_F28(t *testing.T) {
 	require.NoError(t, pool.QueryRow(context.Background(), `SELECT count(*) FROM webhook_inbox`).Scan(&n))
 	require.Equal(t, 1, n)
 }
+
+// The public API port never serves profiles (they reveal internals, and a CPU
+// profile costs the server): pprof lives on IDEM_DEBUG_ADDR only.
+func TestServer_NoPprofOnPublicPort(t *testing.T) {
+	srv := httptest.NewServer(api.NewServer(options(), nil, nil))
+	t.Cleanup(srv.Close)
+	resp, err := http.Get(srv.URL + "/debug/pprof/") //nolint:noctx // test
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
