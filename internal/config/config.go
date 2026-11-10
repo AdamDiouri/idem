@@ -8,6 +8,8 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
+	"github.com/AdamDiouri/idem/internal/api"
+	"github.com/AdamDiouri/idem/internal/failpoint"
 	"github.com/AdamDiouri/idem/internal/workflow"
 )
 
@@ -24,6 +26,10 @@ type Config struct {
 	FeeRateBps             int64             `env:"IDEM_FEE_RATE_BPS" envDefault:"150"`
 	FeeFixedCents          int64             `env:"IDEM_FEE_FIXED_CENTS" envDefault:"25"`
 	LogLevel               string            `env:"IDEM_LOG_LEVEL" envDefault:"info"`
+	// ProviderWebhookSecrets verify provider webhooks: the current secret
+	// first, then the previous one during a rotation. Empty: endpoint off.
+	ProviderWebhookSecrets []string `env:"IDEM_PROVIDER_WEBHOOK_SECRETS"`
+	Failpoints             string   `env:"IDEM_FAILPOINTS"` // see failpoint.EnableFromEnv
 }
 
 // Load parses and validates the environment. Errors name the offending variable.
@@ -74,6 +80,14 @@ func (c Config) validate() error {
 		return fmt.Errorf("IDEM_FEE_FIXED_CENTS must be between 0 and %d", workflow.MaxAmountCents)
 	}
 
+	for _, s := range c.ProviderWebhookSecrets {
+		if len(s) < minTokenLength {
+			return fmt.Errorf("IDEM_PROVIDER_WEBHOOK_SECRETS: a secret is shorter than %d characters", minTokenLength)
+		}
+	}
+	if err := failpoint.ValidateSpec(c.Failpoints, api.FailpointNames...); err != nil {
+		return fmt.Errorf("IDEM_FAILPOINTS: %w", err)
+	}
 	if _, err := c.SlogLevel(); err != nil {
 		return err
 	}

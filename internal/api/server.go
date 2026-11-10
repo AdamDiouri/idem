@@ -33,6 +33,17 @@ type Options struct {
 	RequestTimeout time.Duration
 	// Metrics, if set, are updated per request and served on GET /metrics.
 	Metrics *metrics.Metrics
+	// WebhookSecrets verify POST /webhooks/provider (current first, then the
+	// previous one during a rotation); Inbox stores verified events. The
+	// endpoint exists only when both are set.
+	WebhookSecrets [][]byte
+	Inbox          WebhookInbox
+}
+
+// WebhookInbox stores a verified provider event; inserted is false for a
+// duplicate. Satisfied by *webhook.Inbox.
+type WebhookInbox interface {
+	Store(ctx context.Context, eventID, eventType string, payload []byte) (inserted bool, err error)
 }
 
 const defaultRequestTimeout = 10 * time.Second
@@ -56,6 +67,9 @@ func NewServer(opts Options, sub Submitter, db Pinger) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /workflows", requireToken(opts.Tokens, http.HandlerFunc(s.postWorkflows)))
+	if len(opts.WebhookSecrets) > 0 && opts.Inbox != nil {
+		mux.HandleFunc("POST /webhooks/provider", s.postProviderWebhook)
+	}
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	if opts.Metrics != nil {

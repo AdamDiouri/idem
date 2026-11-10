@@ -87,6 +87,23 @@ type StepAttempt struct {
 	Kind       string
 }
 
+type WebhookInbox struct {
+	ProviderEventID string
+	Type            string
+	Payload         []byte
+	ReceivedAt      pgtype.Timestamptz
+	Status          string
+	Attempts        int32
+	NextAttemptAt   pgtype.Timestamptz
+	LeaseOwner      *string
+	LeaseEpoch      int64
+	LeaseExpiresAt  pgtype.Timestamptz
+	ProcessedAt     pgtype.Timestamptz
+	StepID          *uuid.UUID
+	Note            *string
+	LastError       *string
+}
+
 type Workflow struct {
 	ID        uuid.UUID
 	ClientID  string
