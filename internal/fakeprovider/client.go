@@ -6,7 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 )
+
+// oracleClient reads the fake provider's oracle endpoints. Every call is
+// bounded, so a hung provider cannot stall the chaos harness (its settle phase
+// is bounded by its own deadline only if each read is).
+var oracleClient = &http.Client{Timeout: 10 * time.Second}
 
 // FetchEffects reads the effects oracle of a provider running at baseURL.
 func FetchEffects(ctx context.Context, baseURL string) ([]Effect, error) {
@@ -14,7 +20,7 @@ func FetchEffects(ctx context.Context, baseURL string) ([]Effect, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oracleClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch effects: %w", err)
 	}
@@ -39,7 +45,7 @@ func PutFaults(ctx context.Context, baseURL string, f Faults) error {
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oracleClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("put faults: %w", err)
 	}
@@ -56,7 +62,7 @@ func FetchFaultHits(ctx context.Context, baseURL string) (map[string]int, error)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oracleClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch fault hits: %w", err)
 	}
@@ -78,7 +84,7 @@ func FetchWebhooks(ctx context.Context, baseURL string) ([]WebhookDelivery, erro
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oracleClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch webhooks: %w", err)
 	}

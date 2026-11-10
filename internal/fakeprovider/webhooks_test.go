@@ -307,3 +307,18 @@ func TestGetWebhooks_ReportsGaveUp(t *testing.T) {
 	require.True(t, ds[0].GaveUp)
 	require.False(t, ds[0].Delivered)
 }
+
+// Final review, minor 7: the chaos settle loop is bounded by its deadline only
+// if every read of the provider's oracle is bounded too.
+func TestFetchWebhooks_TimesOutOnAHungProvider(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	defer fakeprovider.SetFetchTimeout(200 * time.Millisecond)()
+
+	start := time.Now()
+	_, err := fakeprovider.FetchWebhooks(context.Background(), srv.URL)
+	require.Error(t, err)
+	require.Less(t, time.Since(start), 2*time.Second)
+}
