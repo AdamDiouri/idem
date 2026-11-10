@@ -20,9 +20,11 @@ import (
 //     whose first attempt is the only one); the inbox holds no event the
 //     provider never sent; an event marked applied left its trace on the step
 //     (an attempt of kind webhook).
-//   - I10 (with the CONFLICT check in Check): a true event ends PROCESSED, a
-//     stale (reordered) one ends IGNORED as stale, and either may be EVIDENCE
-//     only on a workflow that needs attention. Anything else (orphan,
+//   - I10 (with the CONFLICT check in Check): a true event ends PROCESSED; a
+//     stale (reordered) one ends IGNORED as stale, or PROCESSED when it reached
+//     a step still waiting (applied with the provider's re-checked state, never
+//     its own claim); either may be EVIDENCE only on a workflow that needs
+//     attention. Anything else (orphan,
 //     malformed, unsupported, mismatch, a true event dismissed as stale) means
 //     idem misread its news.
 func CheckWebhooks(ctx context.Context, pool *pgxpool.Pool, deliveries []fakeprovider.WebhookDelivery) ([]Violation, error) {
@@ -77,9 +79,12 @@ func checkWebhookRows(rows []db.InboxRowsForCheckRow, deliveries []fakeprovider.
 		case r.Status == "CONFLICT":
 			// Reported by Check (I10), with its workflow.
 		case d.Stale && r.Status == "IGNORED" && r.Note == "stale":
-		case !d.Stale && r.Status == "PROCESSED":
+		case r.Status == "PROCESSED":
+			// A stale event that reached a step still waiting is applied too,
+			// with the provider's re-checked state, never the event's claim;
+			// I3 and I7 judge the money that resulted.
 		case d.Stale:
-			add("I10", "stale event %s ended %s (%s), want IGNORED as stale", r.ProviderEventID, r.Status, r.Note)
+			add("I10", "stale event %s ended %s (%s), want IGNORED as stale or PROCESSED", r.ProviderEventID, r.Status, r.Note)
 		default:
 			add("I10", "event %s ended %s (%s), want PROCESSED", r.ProviderEventID, r.Status, r.Note)
 		}

@@ -50,12 +50,17 @@ func TestCheckWebhooks(t *testing.T) {
 		e.webhookAttempt(t, step)
 		e.inboxRow(t, "evt_dup", "PROCESSED", "duplicate", &step)
 		e.inboxRow(t, "evt_stale", "IGNORED", "stale", &step)
+		// A stale event that reached a step still waiting is applied with the
+		// provider's re-checked state, never its own claim (I3/I7 judge the result).
+		e.inboxRow(t, "evt_stale_waiting", "PROCESSED", "duplicate", &step)
 		e.inboxRow(t, "evt_evidence", "EVIDENCE", "provider says paid po_1", &step)
 		stale := delivered("evt_stale")
 		stale.Stale = true
+		staleWaiting := delivered("evt_stale_waiting")
+		staleWaiting.Stale = true
 		bad := delivered("evt_dup")
 		bad.Fault, bad.Attempts = fakeprovider.ModeBadSignature, 2
-		ds := []fakeprovider.WebhookDelivery{delivered("evt_applied"), bad, stale, delivered("evt_evidence"),
+		ds := []fakeprovider.WebhookDelivery{delivered("evt_applied"), bad, stale, staleWaiting, delivered("evt_evidence"),
 			{EventID: "evt_dropped", GaveUp: true, Fault: fakeprovider.ModeDropWebhook}}
 		require.Empty(t, e.checkWebhooks(t, ds))
 	})
@@ -105,8 +110,8 @@ func TestCheckWebhooks(t *testing.T) {
 			invariant: "I10", detail: "evt_t",
 		},
 		{
-			name:      "a stale event applied",
-			rows:      func(e env, step uuid.UUID) { e.inboxRow(t, "evt_s", "PROCESSED", "duplicate", &step) },
+			name:      "a stale event ignored for another reason",
+			rows:      func(e env, step uuid.UUID) { e.inboxRow(t, "evt_s", "IGNORED", "orphan", &step) },
 			ds:        []fakeprovider.WebhookDelivery{{EventID: "evt_s", Delivered: true, Attempts: 1, Stale: true}},
 			invariant: "I10", detail: "evt_s",
 		},

@@ -194,7 +194,7 @@ violations: 0
 
 **How to read the result:**
 - **`PASSED` requires all of:**
-  - zero invariant violations (I1–I11). The webhook inbox is checked event by event against the provider's delivery log: every acknowledged event stored, none accepted on a forged signature alone, none the provider never sent, an "applied" event leaving a webhook attempt on its step, stale events ignored as stale and true ones processed. Any webhook `CONFLICT` is a violation, since the fake provider never truly contradicts itself
+  - zero invariant violations (I1–I11). The webhook inbox is checked event by event against the provider's delivery log: every acknowledged event stored, none accepted on a forged signature alone, none the provider never sent, an "applied" event leaving a webhook attempt on its step, true events processed, and stale ones ignored as stale (or, on a payout still waiting, applied with what the provider says on a re-check, never with their own claim). Any webhook `CONFLICT` is a violation, since the fake provider never truly contradicts itself
   - every workflow terminal or parked, with no step left `RUNNING`/`IN_DOUBT`
   - no idempotency key that ever returned two different workflows
   - every workflow a client was told about exists in the database under the same ID
