@@ -322,13 +322,13 @@ func TestInbox_StateChangedDuringRecheckDefers(t *testing.T) {
 	h.fake.SettleNow()
 	id := h.storeEvent(t, wf, webhook.EventPayoutPaid, "")
 	p := h.inboxProcessor()
-	engine.SetInboxAfterRecheck(p, func() {
+	engine.SetInboxAfterRead(p, func() {
 		pk := h.parkedStep(t, wf)
 		require.NoError(t, h.admin().Compensate(ctx, wf, pk.Version, "operator, concurrently", true))
 	})
 
 	require.Equal(t, "deferred", h.inboxOnce(t, p))
-	engine.SetInboxAfterRecheck(p, nil)
+	engine.SetInboxAfterRead(p, nil)
 	h.makeDue(t)
 	require.Equal(t, "conflict", h.inboxOnce(t, p), "re-evaluated: paid after the operator refunded")
 	status, _ := h.inboxRow(t, id)
@@ -382,4 +382,57 @@ func TestInbox_MalformedPayloadIgnored(t *testing.T) {
 	status, note := h.inboxRow(t, "evt_bad")
 	require.Equal(t, "IGNORED", status)
 	require.Equal(t, "malformed", note)
+}
+
+// Minor fix: a valid event of a type idem does not handle is "unsupported",
+// not "malformed".
+func TestInbox_UnsupportedEventType(t *testing.T) {
+	h := asyncHarness(t, time.Hour)
+	_, err := webhook.NewInbox(h.pool).Store(context.Background(), "evt_created", "payout.created",
+		[]byte(`{"id":"evt_created","type":"payout.created","data":{"payout_id":"po_1","status":"pending"}}`))
+	require.NoError(t, err)
+	require.Equal(t, "unsupported", h.inboxOnce(t, h.inboxProcessor()))
+	status, note := h.inboxRow(t, "evt_created")
+	require.Equal(t, "IGNORED", status)
+	require.Equal(t, "unsupported event type payout.created", note)
+}
+
+// Minor fix: an event whose amount or currency does not match the payout is
+// a provider bug or a misdirected event; it is ignored and logged, never applied.
+func TestInbox_AmountMismatchIgnored(t *testing.T) {
+	h := asyncHarness(t, time.Hour)
+	wf := waitingPayout(t, h)
+	h.fake.SettleNow()
+	id := h.storeEvent(t, wf, webhook.EventPayoutPaid, "")
+	_, err := h.pool.Exec(context.Background(), `UPDATE webhook_inbox SET payload = replace(convert_from(payload, 'UTF8'), '"amount_cents":9825', '"amount_cents":1')::bytea WHERE provider_event_id = $1`, id)
+	require.NoError(t, err)
+
+	require.Equal(t, "mismatch", h.inboxOnce(t, h.inboxProcessor()))
+	status, note := h.inboxRow(t, id)
+	require.Equal(t, "IGNORED", status)
+	require.Contains(t, note, "does not match the payout")
+	require.Equal(t, "AWAITING_CALLBACK", h.stepStatus(t, wf, "payout"))
+}
+
+// Minor fix: when the step moves between the read and the apply without any
+// re-check having run, the defer reason says so (not "during re-check").
+func TestInbox_ChangeWithoutRecheckSaysSo(t *testing.T) {
+	ctx := context.Background()
+	h := asyncHarness(t, time.Hour)
+	wf := waitingPayout(t, h)
+	h.fake.SettleNow()
+	_, err := h.pool.Exec(ctx, `UPDATE steps SET run_after = now(), callback_deadline = now() WHERE workflow_id = $1 AND name = 'payout'`, wf)
+	require.NoError(t, err)
+	poll, ok, err := engine.Claim(ctx, h.pool, "w1", []string{"payout"}, time.Minute) // RUNNING: no re-check
+	require.NoError(t, err)
+	require.True(t, ok)
+	id := h.storeEvent(t, wf, webhook.EventPayoutFailed, "")
+	p := h.inboxProcessor()
+	engine.SetInboxAfterRead(p, func() {
+		require.NoError(t, engine.Complete(ctx, h.pool, poll, engine.Result{Kind: engine.ResultSucceeded, ProviderRef: poll.ProviderRef}, h.payoutStep()))
+	})
+
+	require.Equal(t, "deferred", h.inboxOnce(t, p))
+	require.Equal(t, "step changed since it was read",
+		scalar[string](t, h.pool, `SELECT last_error FROM webhook_inbox WHERE provider_event_id = $1`, id))
 }

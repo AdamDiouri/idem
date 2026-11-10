@@ -28,15 +28,17 @@ var errInboxFenced = errors.New("inbox lease lost: result discarded")
 
 // Inbox outcomes (idem_webhooks_applied_total{outcome}).
 const (
-	inboxApplied   = "applied"
-	inboxNoop      = "noop"
-	inboxDeferred  = "deferred"
-	inboxOrphaned  = "orphaned"
-	inboxStale     = "stale"
-	inboxEvidence  = "evidence"
-	inboxConflict  = "conflict"
-	inboxMalformed = "malformed"
-	inboxFenced    = "fenced"
+	inboxApplied     = "applied"
+	inboxNoop        = "noop"
+	inboxDeferred    = "deferred"
+	inboxOrphaned    = "orphaned"
+	inboxStale       = "stale"
+	inboxEvidence    = "evidence"
+	inboxConflict    = "conflict"
+	inboxMalformed   = "malformed"
+	inboxUnsupported = "unsupported"
+	inboxMismatch    = "mismatch"
+	inboxFenced      = "fenced"
 )
 
 // InboxOptions configures an InboxProcessor.
@@ -53,7 +55,7 @@ type InboxOptions struct {
 	Metrics *metrics.Metrics
 	Logger  *slog.Logger
 
-	afterRecheck func() // test seam: runs between the provider re-check and the apply
+	afterRead func() // test seam: runs after the read phase (snapshot, re-check), before the apply
 }
 
 // InboxResult is what one RunOnce did.
@@ -168,9 +170,12 @@ func (p *InboxProcessor) RunOnce(ctx context.Context) (InboxResult, error) {
 
 func (p *InboxProcessor) process(ctx context.Context, row db.ClaimInboxEventRow, log *slog.Logger) (string, error) {
 	var ev webhook.ProviderEvent
-	paid, ok := parseEvent(row.Payload, &ev)
-	if !ok {
+	paid, verdict := parseEvent(row.Payload, &ev)
+	switch verdict {
+	case inboxMalformed:
 		return inboxMalformed, p.finish(ctx, db.New(p.pool), row, "IGNORED", "malformed", nil)
+	case inboxUnsupported:
+		return inboxUnsupported, p.finish(ctx, db.New(p.pool), row, "IGNORED", "unsupported event type "+ev.Type, nil)
 	}
 
 	snap, err := db.New(p.pool).StepForEvent(ctx, db.StepForEventParams{PayoutID: ev.Data.PayoutID, IdempotencyKey: ev.Data.IdempotencyKey})
@@ -185,6 +190,10 @@ func (p *InboxProcessor) process(ctx context.Context, row db.ClaimInboxEventRow,
 		return "", fmt.Errorf("find step for event: %w", err)
 	}
 	before := eventStep{snap}
+	if note := before.mismatch(ev); note != "" {
+		log.Warn("provider event does not match its payout; ignored", "detail", note, "step_id", before.ID)
+		return inboxMismatch, p.finish(ctx, db.New(p.pool), row, "IGNORED", note, &before.ID)
+	}
 
 	// A re-check asks the provider for the truth, outside any transaction.
 	var recheck *provider.Outcome
@@ -195,9 +204,9 @@ func (p *InboxProcessor) process(ctx context.Context, row db.ClaimInboxEventRow,
 				"re-check with the provider: "+errString(out.Err))
 		}
 		recheck = &out
-		if p.opts.afterRecheck != nil {
-			p.opts.afterRecheck()
-		}
+	}
+	if p.opts.afterRead != nil {
+		p.opts.afterRead()
 	}
 
 	tx, err := p.pool.Begin(ctx)
@@ -227,7 +236,13 @@ func (p *InboxProcessor) process(ctx context.Context, row db.ClaimInboxEventRow,
 		// or reordered "failed" must never refund a paid payout.
 		outcome, err = inboxApplied, p.apply(ctx, q, row, now, *recheck)
 	case planRecheck:
-		if recheck == nil || !sameState(before, now) {
+		if recheck == nil {
+			// The step moved into a decided state after we read it, so no
+			// re-check ran: read again.
+			outcome, err = inboxDeferred, p.deferEvent(ctx, q, row, p.opts.Retry.Base, "step changed since it was read")
+			break
+		}
+		if !sameState(before, now) {
 			// The step moved since we looked: never act on old state (review focus 5).
 			outcome, err = inboxDeferred, p.deferEvent(ctx, q, row, p.opts.Retry.Base, "state changed during re-check")
 			break
@@ -366,18 +381,44 @@ func (p *InboxProcessor) deferEvent(ctx context.Context, q *db.Queries, row db.C
 	return nil
 }
 
-// parseEvent decodes a payout event; paid reports its result.
-func parseEvent(payload []byte, ev *webhook.ProviderEvent) (paid, ok bool) {
-	if json.Unmarshal(payload, ev) != nil || (ev.Data.PayoutID == "" && ev.Data.IdempotencyKey == "") {
-		return false, false
+// parseEvent decodes a payout event; paid reports its result. verdict is ""
+// for a usable event, inboxUnsupported for a well-formed event of a type idem
+// does not act on, and inboxMalformed otherwise.
+func parseEvent(payload []byte, ev *webhook.ProviderEvent) (paid bool, verdict string) {
+	if json.Unmarshal(payload, ev) != nil || ev.Type == "" || (ev.Data.PayoutID == "" && ev.Data.IdempotencyKey == "") {
+		return false, inboxMalformed
 	}
-	switch {
-	case ev.Type == webhook.EventPayoutPaid && ev.Data.Status == "paid":
-		return true, true
-	case ev.Type == webhook.EventPayoutFailed && ev.Data.Status == "failed":
-		return false, true
+	switch ev.Type {
+	case webhook.EventPayoutPaid:
+		if ev.Data.Status == "paid" {
+			return true, ""
+		}
+	case webhook.EventPayoutFailed:
+		if ev.Data.Status == "failed" {
+			return false, ""
+		}
+	default:
+		return false, inboxUnsupported
 	}
-	return false, false
+	return false, inboxMalformed // a paid/failed event whose status says otherwise
+}
+
+// mismatch describes how the event's amount or currency differs from the
+// payout it matched (a provider bug or a misdirected event), or "".
+func (st eventStep) mismatch(ev webhook.ProviderEvent) string {
+	if st.Name != stepPayout {
+		return ""
+	}
+	s, err := st.claimed()
+	if err != nil {
+		return ""
+	}
+	want := payoutRequest(s)
+	if ev.Data.AmountCents == want.AmountCents && (ev.Data.Currency == "" || ev.Data.Currency == want.Currency) {
+		return ""
+	}
+	return fmt.Sprintf("event says %d %s, which does not match the payout (%d %s)",
+		ev.Data.AmountCents, ev.Data.Currency, want.AmountCents, want.Currency)
 }
 
 // sameState reports whether the step is as it was when the re-check began.

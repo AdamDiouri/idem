@@ -102,3 +102,16 @@ func TestLoad_WebhookSecretsAndFailpoints(t *testing.T) {
 	_, err = config.Load()
 	require.ErrorContains(t, err, "IDEM_FAILPOINTS")
 }
+
+// Minor fix: secrets are trimmed, and an empty entry is refused, so
+// "a, b" does not silently keep a secret that can never match.
+func TestLoad_WebhookSecretsTrimmed(t *testing.T) {
+	setRequired(t)
+	t.Setenv("IDEM_PROVIDER_WEBHOOK_SECRETS", " whsec_new_0123456789 , whsec_old_0123456789")
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	require.Equal(t, []string{"whsec_new_0123456789", "whsec_old_0123456789"}, cfg.ProviderWebhookSecrets)
+	t.Setenv("IDEM_PROVIDER_WEBHOOK_SECRETS", "whsec_new_0123456789,,")
+	_, err = config.Load()
+	require.ErrorContains(t, err, "IDEM_PROVIDER_WEBHOOK_SECRETS")
+}

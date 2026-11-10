@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -37,6 +38,9 @@ func Load() (Config, error) {
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
 		return Config{}, fmt.Errorf("load config: %w", err)
+	}
+	for i, s := range cfg.ProviderWebhookSecrets {
+		cfg.ProviderWebhookSecrets[i] = strings.TrimSpace(s) // "a, b" must not keep " b"
 	}
 	if err := cfg.validate(); err != nil {
 		return Config{}, fmt.Errorf("load config: %w", err)
@@ -82,7 +86,7 @@ func (c Config) validate() error {
 
 	for _, s := range c.ProviderWebhookSecrets {
 		if len(s) < minTokenLength {
-			return fmt.Errorf("IDEM_PROVIDER_WEBHOOK_SECRETS: a secret is shorter than %d characters", minTokenLength)
+			return fmt.Errorf("IDEM_PROVIDER_WEBHOOK_SECRETS: a secret is empty or shorter than %d characters", minTokenLength)
 		}
 	}
 	if err := failpoint.ValidateSpec(c.Failpoints, api.FailpointNames...); err != nil {
