@@ -31,6 +31,7 @@ type Metrics struct {
 	Submissions      *prometheus.CounterVec // result
 	CallbackPolls    *prometheus.CounterVec // step, result
 	WebhooksReceived *prometheus.CounterVec // result
+	WebhooksApplied  *prometheus.CounterVec // outcome
 }
 
 // New registers every metric, plus the Go runtime and process collectors.
@@ -86,6 +87,10 @@ func New() *Metrics {
 			Name: "idem_webhooks_received_total",
 			Help: "POST /webhooks/provider results: accepted, duplicate, bad_signature, stale, malformed, too_large, store_error.",
 		}, []string{"result"}),
+		WebhooksApplied: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "idem_webhooks_applied_total",
+			Help: "Inbox events processed by outcome: applied, noop, deferred, orphaned, stale, evidence, conflict, malformed, fenced.",
+		}, []string{"outcome"}),
 		CallbackPolls: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "idem_callback_polls_total",
 			Help: "Status polls of accepted async requests (payouts) by result: paid, failed, pending, error.",
@@ -93,7 +98,7 @@ func New() *Metrics {
 	}
 	for _, c := range []prometheus.Collector{
 		m.StepAttempts, m.ProviderDuration, m.KeyLookups, m.LeasesReclaimed, m.Workflows, m.Steps,
-		m.UnsettledIdle, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions, m.CallbackPolls, m.WebhooksReceived,
+		m.UnsettledIdle, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions, m.CallbackPolls, m.WebhooksReceived, m.WebhooksApplied,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	} {
 		f(c)
@@ -183,6 +188,14 @@ func (m *Metrics) ObservePoll(step, result string) {
 		return
 	}
 	m.CallbackPolls.WithLabelValues(step, result).Inc()
+}
+
+// ObserveInbox counts one processed inbox event.
+func (m *Metrics) ObserveInbox(outcome string) {
+	if m == nil || outcome == "" {
+		return
+	}
+	m.WebhooksApplied.WithLabelValues(outcome).Inc()
 }
 
 // ObserveWebhook counts one POST /webhooks/provider result.

@@ -26,7 +26,8 @@ const (
 )
 
 // FailpointNames lists every failpoint the engine hits, for config validation.
-var FailpointNames = []string{FPAfterClaim, FPBeforeProviderCall, FPAfterProviderCall, FPBeforeCommit, FPAfterCommit}
+var FailpointNames = []string{FPAfterClaim, FPBeforeProviderCall, FPAfterProviderCall, FPBeforeCommit, FPAfterCommit,
+	FPInboxBeforeCommit}
 
 // ErrFenced means the worker lost its lease before completing: another owner
 // has the step now. The caller must discard its result and write nothing.

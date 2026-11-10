@@ -7,7 +7,151 @@ package db
 
 import (
 	"context"
+
+	"github.com/google/uuid"
 )
+
+const applyCallbackToStep = `-- name: ApplyCallbackToStep :execrows
+UPDATE steps
+SET status            = $1::text,
+    provider_ref      = COALESCE($2::text, provider_ref),
+    dead_reason       = $3::text,
+    last_error        = $4::text,
+    lease_epoch       = lease_epoch + 1,
+    poll_count        = poll_count + 1,
+    callback_deadline = NULL
+WHERE id = $5 AND status = 'AWAITING_CALLBACK'
+`
+
+type ApplyCallbackToStepParams struct {
+	Status      string
+	ProviderRef *string
+	DeadReason  *string
+	LastError   *string
+	ID          uuid.UUID
+}
+
+// Applies a provider callback to a waiting step: compare-and-swap on
+// AWAITING_CALLBACK, a new owner generation (lease_epoch + 1). poll_count is
+// the counter for non-send attempt numbers (polls and webhooks).
+func (q *Queries) ApplyCallbackToStep(ctx context.Context, arg ApplyCallbackToStepParams) (int64, error) {
+	result, err := q.db.Exec(ctx, applyCallbackToStep,
+		arg.Status,
+		arg.ProviderRef,
+		arg.DeadReason,
+		arg.LastError,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const claimInboxEvent = `-- name: ClaimInboxEvent :one
+UPDATE webhook_inbox
+SET lease_owner      = $1::text,
+    lease_epoch      = lease_epoch + 1,
+    lease_expires_at = now() + ($2::bigint * interval '1 millisecond'),
+    attempts         = attempts + 1
+WHERE provider_event_id = (
+  SELECT provider_event_id FROM webhook_inbox
+  WHERE status = 'PENDING' AND next_attempt_at <= now()
+    AND (lease_expires_at IS NULL OR lease_expires_at < now())
+  ORDER BY next_attempt_at
+  LIMIT 1
+  FOR UPDATE SKIP LOCKED
+)
+RETURNING provider_event_id, type, payload, lease_epoch, attempts,
+          (EXTRACT(EPOCH FROM (now() - received_at)) * 1000)::bigint AS age_ms
+`
+
+type ClaimInboxEventParams struct {
+	Owner   string
+	LeaseMs int64
+}
+
+type ClaimInboxEventRow struct {
+	ProviderEventID string
+	Type            string
+	Payload         []byte
+	LeaseEpoch      int64
+	Attempts        int32
+	AgeMs           int64
+}
+
+// Takes the next due inbox event under a lease (lease_epoch + 1 fences the
+// previous holder). SKIP LOCKED lets several workers process the inbox.
+func (q *Queries) ClaimInboxEvent(ctx context.Context, arg ClaimInboxEventParams) (ClaimInboxEventRow, error) {
+	row := q.db.QueryRow(ctx, claimInboxEvent, arg.Owner, arg.LeaseMs)
+	var i ClaimInboxEventRow
+	err := row.Scan(
+		&i.ProviderEventID,
+		&i.Type,
+		&i.Payload,
+		&i.LeaseEpoch,
+		&i.Attempts,
+		&i.AgeMs,
+	)
+	return i, err
+}
+
+const deferInboxEvent = `-- name: DeferInboxEvent :execrows
+UPDATE webhook_inbox
+SET next_attempt_at = now() + ($1::bigint * interval '1 millisecond'),
+    last_error = $2::text, lease_owner = NULL, lease_expires_at = NULL
+WHERE provider_event_id = $3 AND lease_epoch = $4
+`
+
+type DeferInboxEventParams struct {
+	DelayMs         int64
+	LastError       *string
+	ProviderEventID string
+	LeaseEpoch      int64
+}
+
+func (q *Queries) DeferInboxEvent(ctx context.Context, arg DeferInboxEventParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deferInboxEvent,
+		arg.DelayMs,
+		arg.LastError,
+		arg.ProviderEventID,
+		arg.LeaseEpoch,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const finishInboxEvent = `-- name: FinishInboxEvent :execrows
+UPDATE webhook_inbox
+SET status = $1::text, note = $2::text, step_id = $3,
+    processed_at = now(), last_error = NULL, lease_owner = NULL, lease_expires_at = NULL
+WHERE provider_event_id = $4 AND lease_epoch = $5
+`
+
+type FinishInboxEventParams struct {
+	Status          string
+	Note            *string
+	StepID          *uuid.UUID
+	ProviderEventID string
+	LeaseEpoch      int64
+}
+
+// Fenced by the inbox lease: a processor that lost it writes nothing.
+func (q *Queries) FinishInboxEvent(ctx context.Context, arg FinishInboxEventParams) (int64, error) {
+	result, err := q.db.Exec(ctx, finishInboxEvent,
+		arg.Status,
+		arg.Note,
+		arg.StepID,
+		arg.ProviderEventID,
+		arg.LeaseEpoch,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
 
 const insertInboxEvent = `-- name: InsertInboxEvent :execrows
 INSERT INTO webhook_inbox (provider_event_id, type, payload)
@@ -28,4 +172,150 @@ func (q *Queries) InsertInboxEvent(ctx context.Context, arg InsertInboxEventPara
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const insertWebhookAttempt = `-- name: InsertWebhookAttempt :exec
+INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id, kind, outcome, error, finished_at)
+VALUES ($1, $2, $3, $4, 'webhook',
+        $5, $6, now())
+`
+
+type InsertWebhookAttemptParams struct {
+	StepID     uuid.UUID
+	AttemptNo  int32
+	LeaseEpoch int64
+	WorkerID   string
+	Outcome    *string
+	Error      *string
+}
+
+func (q *Queries) InsertWebhookAttempt(ctx context.Context, arg InsertWebhookAttemptParams) error {
+	_, err := q.db.Exec(ctx, insertWebhookAttempt,
+		arg.StepID,
+		arg.AttemptNo,
+		arg.LeaseEpoch,
+		arg.WorkerID,
+		arg.Outcome,
+		arg.Error,
+	)
+	return err
+}
+
+const lockStepForEvent = `-- name: LockStepForEvent :one
+SELECT s.id, s.workflow_id, s.name, s.status, s.dead_reason, s.idempotency_key, s.provider_ref,
+       s.refund_charge_ref, s.lease_epoch, s.attempt_count, s.poll_count, s.max_attempts,
+       w.status AS workflow_status, w.input,
+       (NOT EXISTS (SELECT 1 FROM steps o WHERE o.workflow_id = s.workflow_id AND o.created_at > s.created_at))::bool AS newest,
+       EXISTS (SELECT 1 FROM step_attempts a
+               WHERE a.step_id = s.id AND a.kind = 'send' AND a.outcome IN ('IN_DOUBT', 'ABANDONED', 'DEAD'))::bool AS send_doubt
+FROM steps s JOIN workflows w ON w.id = s.workflow_id
+WHERE s.id = $1
+FOR UPDATE OF s, w
+`
+
+type LockStepForEventRow struct {
+	ID              uuid.UUID
+	WorkflowID      uuid.UUID
+	Name            string
+	Status          string
+	DeadReason      *string
+	IdempotencyKey  string
+	ProviderRef     *string
+	RefundChargeRef *string
+	LeaseEpoch      int64
+	AttemptCount    int32
+	PollCount       int32
+	MaxAttempts     int32
+	WorkflowStatus  string
+	Input           []byte
+	Newest          bool
+	SendDoubt       bool
+}
+
+// The same view, locked with its workflow, for the apply transaction.
+func (q *Queries) LockStepForEvent(ctx context.Context, id uuid.UUID) (LockStepForEventRow, error) {
+	row := q.db.QueryRow(ctx, lockStepForEvent, id)
+	var i LockStepForEventRow
+	err := row.Scan(
+		&i.ID,
+		&i.WorkflowID,
+		&i.Name,
+		&i.Status,
+		&i.DeadReason,
+		&i.IdempotencyKey,
+		&i.ProviderRef,
+		&i.RefundChargeRef,
+		&i.LeaseEpoch,
+		&i.AttemptCount,
+		&i.PollCount,
+		&i.MaxAttempts,
+		&i.WorkflowStatus,
+		&i.Input,
+		&i.Newest,
+		&i.SendDoubt,
+	)
+	return i, err
+}
+
+const stepForEvent = `-- name: StepForEvent :one
+SELECT s.id, s.workflow_id, s.name, s.status, s.dead_reason, s.idempotency_key, s.provider_ref,
+       s.refund_charge_ref, s.lease_epoch, s.attempt_count, s.poll_count, s.max_attempts,
+       w.status AS workflow_status, w.input,
+       (NOT EXISTS (SELECT 1 FROM steps o WHERE o.workflow_id = s.workflow_id AND o.created_at > s.created_at))::bool AS newest,
+       EXISTS (SELECT 1 FROM step_attempts a
+               WHERE a.step_id = s.id AND a.kind = 'send' AND a.outcome IN ('IN_DOUBT', 'ABANDONED', 'DEAD'))::bool AS send_doubt
+FROM steps s JOIN workflows w ON w.id = s.workflow_id
+WHERE s.provider_ref = $1::text OR s.idempotency_key = $2::text
+ORDER BY (s.provider_ref IS NOT DISTINCT FROM $1::text) DESC, s.generation DESC
+LIMIT 1
+`
+
+type StepForEventParams struct {
+	PayoutID       string
+	IdempotencyKey string
+}
+
+type StepForEventRow struct {
+	ID              uuid.UUID
+	WorkflowID      uuid.UUID
+	Name            string
+	Status          string
+	DeadReason      *string
+	IdempotencyKey  string
+	ProviderRef     *string
+	RefundChargeRef *string
+	LeaseEpoch      int64
+	AttemptCount    int32
+	PollCount       int32
+	MaxAttempts     int32
+	WorkflowStatus  string
+	Input           []byte
+	Newest          bool
+	SendDoubt       bool
+}
+
+// The step an event is about: by the provider's reference, else by our
+// idempotency key (the webhook may beat our own commit of the reference).
+func (q *Queries) StepForEvent(ctx context.Context, arg StepForEventParams) (StepForEventRow, error) {
+	row := q.db.QueryRow(ctx, stepForEvent, arg.PayoutID, arg.IdempotencyKey)
+	var i StepForEventRow
+	err := row.Scan(
+		&i.ID,
+		&i.WorkflowID,
+		&i.Name,
+		&i.Status,
+		&i.DeadReason,
+		&i.IdempotencyKey,
+		&i.ProviderRef,
+		&i.RefundChargeRef,
+		&i.LeaseEpoch,
+		&i.AttemptCount,
+		&i.PollCount,
+		&i.MaxAttempts,
+		&i.WorkflowStatus,
+		&i.Input,
+		&i.Newest,
+		&i.SendDoubt,
+	)
+	return i, err
 }
