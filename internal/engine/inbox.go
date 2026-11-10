@@ -64,10 +64,12 @@ type InboxResult struct {
 }
 
 // InboxProcessor applies provider webhooks from the inbox (M2 design §4.4).
-// An event for a waiting step is applied through the step's own CAS path and
+// A webhook is a prompt to ask, never the truth itself: events arrive late,
+// duplicated and out of order, so before acting the processor re-checks the
+// payout with the provider (GET) and acts on what the provider says now. For
+// a waiting step that result is applied through the step's own CAS path and
 // hooks; news that disagrees with a decided result, or concerns a parked step,
-// is first re-checked with the provider (GET), and becomes stale, evidence
-// (D18) or a conflict (D16). Terminal states never flip.
+// becomes stale, evidence (D18) or a conflict (D16). Terminal states never flip.
 type InboxProcessor struct {
 	pool   *pgxpool.Pool
 	opts   InboxOptions
@@ -186,8 +188,8 @@ func (p *InboxProcessor) process(ctx context.Context, row db.ClaimInboxEventRow,
 
 	// A re-check asks the provider for the truth, outside any transaction.
 	var recheck *provider.Outcome
-	if classify(before, paid) == planRecheck {
-		out, ok := p.recheck(ctx, before)
+	if pl := classify(before, paid); pl == planApply || pl == planRecheck {
+		out, ok := p.recheck(ctx, before, ev.Data.PayoutID)
 		if !ok {
 			return inboxDeferred, p.deferEvent(ctx, db.New(p.pool), row, p.opts.Retry.Delay(row.Attempts),
 				"re-check with the provider: "+errString(out.Err))
@@ -217,7 +219,13 @@ func (p *InboxProcessor) process(ctx context.Context, row db.ClaimInboxEventRow,
 	case planNoop:
 		outcome, err = inboxNoop, p.finish(ctx, q, row, "PROCESSED", "duplicate", &now.ID)
 	case planApply:
-		outcome, err = inboxApplied, p.apply(ctx, q, row, now, ev, paid)
+		if recheck == nil || !sameState(before, now) {
+			outcome, err = inboxDeferred, p.deferEvent(ctx, q, row, p.opts.Retry.Base, "step changed since it was read")
+			break
+		}
+		// Apply what the provider says now, not what the event says: a stale
+		// or reordered "failed" must never refund a paid payout.
+		outcome, err = inboxApplied, p.apply(ctx, q, row, now, *recheck)
 	case planRecheck:
 		if recheck == nil || !sameState(before, now) {
 			// The step moved since we looked: never act on old state (review focus 5).
@@ -243,7 +251,7 @@ func (p *InboxProcessor) process(ctx context.Context, row db.ClaimInboxEventRow,
 
 // apply records the provider's result on a waiting step, exactly as a poll
 // with that answer would: CAS, attempt (kind webhook), hooks.
-func (p *InboxProcessor) apply(ctx context.Context, q *db.Queries, row db.ClaimInboxEventRow, st eventStep, ev webhook.ProviderEvent, paid bool) error {
+func (p *InboxProcessor) apply(ctx context.Context, q *db.Queries, row db.ClaimInboxEventRow, st eventStep, out provider.Outcome) error {
 	step, ok := p.steps[st.Name]
 	if !ok {
 		return fmt.Errorf("no step %q for event %s", st.Name, row.ProviderEventID)
@@ -251,10 +259,6 @@ func (p *InboxProcessor) apply(ctx context.Context, q *db.Queries, row db.ClaimI
 	s, err := st.claimed()
 	if err != nil {
 		return err
-	}
-	out := provider.Outcome{Class: provider.Success, ProviderRef: ev.Data.PayoutID}
-	if !paid {
-		out = provider.Outcome{Class: provider.Permanent, Err: fmt.Errorf("payout failed: %s", ev.Data.FailureCode)}
 	}
 	r := decidePoll(s, out, Backoff{}, PollLimits{}, step.Pivot())
 
@@ -312,17 +316,25 @@ func (p *InboxProcessor) resolveNews(ctx context.Context, q *db.Queries, row db.
 	return inboxConflict, p.finish(ctx, q, row, "CONFLICT", says+", idem recorded "+recorded, &st.ID)
 }
 
-// recheck asks the provider for the payout's current state. ok is false unless
-// the answer is final (paid or failed).
-func (p *InboxProcessor) recheck(ctx context.Context, st eventStep) (provider.Outcome, bool) {
+// recheck asks the provider for the payout's current state. It uses the step's
+// own reference, or the event's when the step never recorded one (every send
+// timed out though the provider accepted it); GetPayout checks the answer's
+// ID and amount against the step. ok is false unless the answer is final.
+func (p *InboxProcessor) recheck(ctx context.Context, st eventStep, eventRef string) (provider.Outcome, bool) {
 	step, ok := p.steps[st.Name]
 	poller, canPoll := step.(Poller)
-	if !ok || !canPoll || st.ProviderRef == nil {
+	if !ok || !canPoll {
 		return provider.Outcome{Class: provider.Ambiguous, Err: errors.New("step cannot be polled")}, false
 	}
 	s, err := st.claimed()
 	if err != nil {
 		return provider.Outcome{Class: provider.Ambiguous, Err: err}, false
+	}
+	if s.ProviderRef == "" {
+		s.ProviderRef = eventRef
+	}
+	if s.ProviderRef == "" {
+		return provider.Outcome{Class: provider.Ambiguous, Err: errors.New("no payout reference to re-check")}, false
 	}
 	out := poller.Poll(ctx, s)
 	return out, out.Class == provider.Success || out.Class == provider.Permanent

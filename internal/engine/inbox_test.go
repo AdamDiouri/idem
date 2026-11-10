@@ -209,21 +209,78 @@ func TestInbox_StaleContradictionIgnored_F17(t *testing.T) {
 	require.Equal(t, "SUCCEEDED", h.workflowStatus(t, wf), "never flip a terminal state")
 }
 
-// F17: a real contradiction — idem applied a failure, the provider now says paid.
+// F17: a real contradiction. idem recorded a failure (here: a poll misread,
+// simulated by completing the poll as failed) while the provider paid.
 func TestInbox_RealContradictionIsConflict_F17(t *testing.T) {
+	ctx := context.Background()
 	h := asyncHarness(t, time.Hour)
 	wf := waitingPayout(t, h)
 	h.fake.SettleNow() // the provider paid it
-	h.storeEvent(t, wf, webhook.EventPayoutFailed, "")
-	p := h.inboxProcessor()
-	require.Equal(t, "applied", h.inboxOnce(t, p)) // a wrong failure, applied: idem believes "not paid"
+	_, err := h.pool.Exec(ctx, `UPDATE steps SET run_after = now(), callback_deadline = now() WHERE workflow_id = $1 AND name = 'payout'`, wf)
+	require.NoError(t, err)
+	poll, ok, err := engine.Claim(ctx, h.pool, "w1", []string{"payout"}, time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, engine.Complete(ctx, h.pool, poll,
+		engine.Result{Kind: engine.ResultFailedPermanent, Error: "misread"}, h.payoutStep())) // idem believes "not paid"
 	id := h.storeEvent(t, wf, webhook.EventPayoutPaid, "")
 
-	require.Equal(t, "conflict", h.inboxOnce(t, p))
+	require.Equal(t, "conflict", h.inboxOnce(t, h.inboxProcessor()))
 	status, note := h.inboxRow(t, id)
 	require.Equal(t, "CONFLICT", status)
 	require.Contains(t, note, "provider says paid")
 	require.Equal(t, "FAILED_PERMANENT", h.stepStatus(t, wf, "payout"), "never flip")
+}
+
+// Final review, Critical: a stale or reordered "failed" event for a waiting
+// payout the provider actually paid must not refund the customer. A webhook is
+// a prompt to ask; idem applies what the provider says now.
+func TestInbox_StaleFailedEventOnWaitingStepAppliesProviderState(t *testing.T) {
+	h := asyncHarness(t, time.Hour)
+	wf := waitingPayout(t, h)
+	h.fake.SettleNow() // paid
+	h.storeEvent(t, wf, webhook.EventPayoutFailed, "")
+
+	require.Equal(t, "applied", h.inboxOnce(t, h.inboxProcessor()))
+	require.Equal(t, "SUCCEEDED", h.stepStatus(t, wf, "payout"), "what the provider says now: paid")
+	require.Zero(t, h.count(t, `SELECT count(*) FROM steps WHERE workflow_id = $1 AND name = 'refund'`, wf), "no refund")
+	require.Equal(t, 1, h.payoutPostings(t, wf))
+	h.assertNoViolations(t)
+}
+
+// An event about a waiting payout the provider has not settled yet (it cannot
+// be true yet) is deferred, not applied.
+func TestInbox_EventAheadOfProviderIsDeferred(t *testing.T) {
+	h := asyncHarness(t, time.Hour)
+	wf := waitingPayout(t, h) // still pending at the provider
+	h.storeEvent(t, wf, webhook.EventPayoutPaid, "")
+
+	require.Equal(t, "deferred", h.inboxOnce(t, h.inboxProcessor()))
+	require.Equal(t, "AWAITING_CALLBACK", h.stepStatus(t, wf, "payout"))
+}
+
+// Final review, Important: a payout parked with no reference of its own (every
+// send timed out, though the provider accepted and paid it) still gets
+// evidence, re-checked by the event's payout ID.
+func TestInbox_ParkedStepWithoutRefGetsEvidence(t *testing.T) {
+	h := asyncHarness(t, time.Hour)
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	h.drain(t, h.workerWith("w1", nil, h.chargeStep()))
+	h.setStepMaxAttempts(t, wf, "payout", 1)
+	h.setFaults(fakeprovider.Rule{Endpoint: "payouts", Mode: fakeprovider.ModeTimeoutAfterEffect, Times: 1})
+	h.drain(t, h.workerWith("w1", nil, h.allSteps()...))
+	h.setFaults()
+	require.Equal(t, engine.DeadAttemptsExhaustedInDoubt, h.parkedStep(t, wf).DeadReason)
+	require.True(t, scalar[bool](t, h.pool, `SELECT provider_ref IS NULL FROM steps WHERE workflow_id = $1 AND name = 'payout'`, wf))
+	h.fake.SettleNow()
+	paid := h.effectsOf(wf, "payout")
+	require.Len(t, paid, 1)
+	id := h.storeEvent(t, wf, webhook.EventPayoutPaid, paid[0].ID)
+
+	require.Equal(t, "evidence", h.inboxOnce(t, h.inboxProcessor()))
+	status, note := h.inboxRow(t, id)
+	require.Equal(t, "EVIDENCE", status)
+	require.Equal(t, "provider says paid "+paid[0].ID, note)
 }
 
 // D18: news about a parked step is evidence for a human, not a resolution.
