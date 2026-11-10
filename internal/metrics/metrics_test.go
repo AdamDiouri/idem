@@ -88,3 +88,9 @@ func TestInternalHandler_NilMetricsServesOnlyPprof(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/debug/pprof/", nil))
 	require.Equal(t, 200, rec.Code)
 }
+
+// Review focus 4: with metrics off (nil), watching the pool is a no-op.
+func TestWatchPool_NilMetricsIsNoop(t *testing.T) {
+	var m *metrics.Metrics
+	require.NotPanics(t, func() { m.WatchPool(nil) })
+}

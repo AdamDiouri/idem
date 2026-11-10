@@ -100,6 +100,7 @@ func workerCmd() *cobra.Command {
 			client := provider.NewClient(e.cfg.ProviderURL, e.cfg.ProviderTimeout)
 			steps := []engine.Step{engine.NewChargeStep(client), engine.NewPayoutStep(client), engine.NewRefundStep(client)}
 			m := e.serveMetrics() // one listener, shared by both loops
+			m.WatchPool(e.pool)
 			worker := engine.NewWorker(e.pool, engine.WorkerOptions{
 				ID:                 id,
 				Steps:              steps,
@@ -145,8 +146,10 @@ func sweeperCmd() *cobra.Command {
 			}
 			defer cleanup()
 			e.logger.Info("sweeper started", "interval", e.cfg.SweepInterval.String())
+			m := e.serveMetrics()
+			m.WatchPool(e.pool)
 			return engine.RunSweeper(e.ctx, e.pool, engine.SweeperOptions{
-				Interval: e.cfg.SweepInterval, StuckAfter: e.cfg.StuckAfter, Logger: e.logger, Metrics: e.serveMetrics(),
+				Interval: e.cfg.SweepInterval, StuckAfter: e.cfg.StuckAfter, Logger: e.logger, Metrics: m,
 				InboxRetention: e.cfg.InboxRetention,
 			})
 		},

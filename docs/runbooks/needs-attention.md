@@ -204,6 +204,14 @@ Find them with `SELECT provider_event_id, received_at, payload FROM webhook_inbo
 - `mismatch`: an event whose amount or currency differs from the payout it names; logged as a warning, never applied
 - `malformed`: an event that is not a valid payout event
 
+### IdemDBPoolSaturated
+
+Processes of one kind (`job`) keep waiting for a free database connection: over 100ms of waiting per second for 10 minutes. Requests and steps slow down even though the database itself may be fine. Look at `idem_db_pool_acquired_conns` against `idem_db_pool_max_conns` (each process opens at most 20), and at the database's own load. Try, in order:
+1. **Shorter transactions:** a slow query or a lock wait holds a connection longer (check Postgres for slow queries and locks).
+2. **More connections per process:** only if Postgres has headroom (`max_connections`, default 100).
+3. **Fewer or more processes:** fewer, if the database is the limit; more, if each process is starved but the database is idle.
+4. **PgBouncer** (transaction pooling) in front of Postgres, when many replicas multiply connections beyond what Postgres allows.
+
 ### IdemCallbacksOverdue
 
 Waiting payouts are more than 5 minutes past their next poll: the workers are not keeping up, or are down. Webhooks may still settle them; if not, the stuck alert follows.

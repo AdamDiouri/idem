@@ -118,6 +118,7 @@ func apiCmd() *cobra.Command {
 
 			fees := workflow.FeeConfig{RateBps: cfg.FeeRateBps, FixedCents: cfg.FeeFixedCents}
 			m := metrics.New() // served on the API's own address at /metrics
+			m.WatchPool(pool)
 			handler := api.NewServer(api.Options{
 				Metrics:        m,
 				Tokens:         cfg.TokenToClient(),

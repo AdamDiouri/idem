@@ -138,6 +138,8 @@ Every change needs `--reason` and `--expect-version` (the `VERSION` column of `l
 - refunding a customer whose merchant was paid pays out twice
 - failing a charge that happened loses the customer's money
 
+**Database pool:** every process exports its connection pool (`idem_db_pool_*`): connections in use, idle and maximum, and how often and how long requests waited for one. `IdemDBPoolSaturated` fires on sustained waiting.
+
 **Profiling (pprof):** workers and sweepers serve Go's profiler next to `/metrics` on their internal port; compose publishes them on localhost only (worker `:8090`, sweeper `:8091`). The API serves it only on `IDEM_DEBUG_ADDR`, never on its public port.
 
 ```bash

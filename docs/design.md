@@ -538,6 +538,7 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 - **Deferred to where they belong:**
   - *Sweeper snapshot cost* (whole-table counts every tick): measure with `cmd/loadgen` in M3, then index, sample or slow the interval with real numbers.
   - *`/metrics` authentication:* the endpoints reveal volumes, never IDs or secrets. Restrict them in M4 with a NetworkPolicy, or a separate internal-only port for the API.
+- **Database pool:** each process exports pgx's pool statistics (`idem_db_pool_*`: connections in use, idle, maximum; acquisitions that waited and the total wait), so "is the pool a bottleneck?" is a graph, not a guess. Alert `IdemDBPoolSaturated`.
 - **Profiling:** Go's `pprof` on the internal metrics port of workers and sweepers, and on the API's optional `IDEM_DEBUG_ADDR` (never on its public port).
 - **Tracing → Milestone 3, alongside the load generator (D20).** Traces answer "where did the time go" for one payment, and only show bottlenecks under load. idem hands work off **through database rows**, not calls: the API commits a workflow that a worker claims later, and a webhook lands in the inbox that another worker applies later. So the W3C trace context (`traceparent`) is **stored in the rows that carry work**: `workflows`, `steps`, `webhook_inbox`, and the outbox. Whichever process continues the work starts a span linked to it, so one trace shows API → queue wait → claim → provider call → commit, and webhook → inbox wait → apply. Metrics carry exemplars linking latency buckets to traces.
 
