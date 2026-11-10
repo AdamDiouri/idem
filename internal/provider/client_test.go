@@ -228,6 +228,8 @@ func TestClassString(t *testing.T) {
 	require.Equal(t, "success", provider.Success.String())
 	require.Equal(t, "permanent", provider.Permanent.String())
 	require.Equal(t, "ambiguous", provider.Ambiguous.String())
+	require.Equal(t, "accepted", provider.Accepted.String())
+	require.Equal(t, "pending", provider.Pending.String())
 }
 
 func payoutReq(merchant string) provider.PayoutRequest {
@@ -244,9 +246,10 @@ func TestCreatePayout_SuccessAndInvalidAccount(t *testing.T) {
 	c := provider.NewClient(url, time.Second)
 
 	ok := c.CreatePayout(ctx, "po-key-1", payoutReq("mer_1"))
-	require.Equal(t, provider.Success, ok.Class, "err: %v", ok.Err)
+	require.Equal(t, provider.Accepted, ok.Class, "err: %v", ok.Err)
+	require.Equal(t, http.StatusAccepted, ok.HTTPStatus)
 	require.True(t, strings.HasPrefix(ok.ProviderRef, "po_"))
-	require.Equal(t, "payout", p.Effects()[0].Type)
+	require.Equal(t, "payout", p.Effects()[0].Type) // settles at once (PayoutSettle 0)
 
 	bad := c.CreatePayout(ctx, "po-key-2", payoutReq("mer_invalid_1"))
 	require.Equal(t, provider.Permanent, bad.Class)
@@ -308,4 +311,90 @@ func TestLookup_InFlightIsAmbiguous(t *testing.T) {
 	out, found := provider.NewClient(srv.URL, time.Second).LookupCharge(context.Background(), "k", chargeReq("cus_1"))
 	require.False(t, found)
 	require.Equal(t, provider.Ambiguous, out.Class)
+}
+
+func stub(t *testing.T, status int, body string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// M2 (design §4.2): 202 pending with a payout ID means the provider accepted
+// the payout; the result comes later.
+func TestCreatePayout_AcceptedIsAccepted(t *testing.T) {
+	url := stub(t, http.StatusAccepted, `{"id":"po_1","status":"pending","amount_cents":9825,"currency":"EUR"}`)
+	out := provider.NewClient(url, time.Second).CreatePayout(context.Background(), "k", payoutReq("mer_1"))
+	require.Equal(t, provider.Accepted, out.Class, "err: %v", out.Err)
+	require.Equal(t, "po_1", out.ProviderRef)
+	require.NoError(t, out.Err)
+}
+
+func TestCreatePayout_AcceptedWithoutIDIsAmbiguous(t *testing.T) {
+	for name, body := range map[string]string{
+		"no id":           `{"status":"pending","amount_cents":9825,"currency":"EUR"}`,
+		"amount mismatch": `{"id":"po_1","status":"pending","amount_cents":1,"currency":"EUR"}`,
+		"unparseable":     `nope`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := provider.NewClient(stub(t, http.StatusAccepted, body), time.Second).CreatePayout(context.Background(), "k", payoutReq("mer_1"))
+			require.Equal(t, provider.Ambiguous, out.Class)
+		})
+	}
+}
+
+func TestGetPayout_Classifies(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   provider.Class
+		errHas string
+	}{
+		{"paid", 200, `{"id":"po_1","status":"paid","amount_cents":9825,"currency":"EUR"}`, provider.Success, ""},
+		{"failed", 200, `{"id":"po_1","status":"failed","failure_code":"account_closed","amount_cents":9825,"currency":"EUR"}`, provider.Permanent, "account_closed"},
+		{"pending", 200, `{"id":"po_1","status":"pending","amount_cents":9825,"currency":"EUR"}`, provider.Pending, ""},
+		{"unknown payout", 404, `{"error":{"code":"not_found"}}`, provider.Ambiguous, ""},
+		{"amount mismatch", 200, `{"id":"po_1","status":"paid","amount_cents":1,"currency":"EUR"}`, provider.Ambiguous, "amount"},
+		{"unparseable", 200, `nope`, provider.Ambiguous, ""},
+		{"server error", 500, `{}`, provider.Ambiguous, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := provider.NewClient(stub(t, tc.status, tc.body), time.Second).GetPayout(context.Background(), "po_1", payoutReq("mer_1"))
+			require.Equal(t, tc.want, out.Class, "err: %v", out.Err)
+			if tc.want == provider.Success {
+				require.Equal(t, "po_1", out.ProviderRef)
+			}
+			if tc.errHas != "" {
+				require.ErrorContains(t, out.Err, tc.errHas)
+			}
+		})
+	}
+}
+
+func TestGetPayout_AgainstFakeProvider(t *testing.T) {
+	ctx := context.Background()
+	_, url := fake(t)
+	c := provider.NewClient(url, time.Second)
+	accepted := c.CreatePayout(ctx, "po-key-1", payoutReq("mer_1"))
+	require.Equal(t, provider.Accepted, accepted.Class)
+	out := c.GetPayout(ctx, accepted.ProviderRef, payoutReq("mer_1"))
+	require.Equal(t, provider.Success, out.Class, "err: %v", out.Err)
+	require.Equal(t, accepted.ProviderRef, out.ProviderRef)
+}
+
+func TestLookupPayout_PendingIsAccepted(t *testing.T) {
+	ctx := context.Background()
+	p := fakeprovider.New(fakeprovider.Options{Hang: 5 * time.Second, PayoutSettle: time.Hour})
+	srv := httptest.NewServer(p.Handler())
+	t.Cleanup(srv.Close)
+	c := provider.NewClient(srv.URL, time.Second)
+	accepted := c.CreatePayout(ctx, "po-key-1", payoutReq("mer_1"))
+	out, found := c.LookupPayout(ctx, "po-key-1", payoutReq("mer_1"))
+	require.True(t, found)
+	require.Equal(t, provider.Accepted, out.Class, "err: %v", out.Err)
+	require.Equal(t, accepted.ProviderRef, out.ProviderRef)
 }
