@@ -3,9 +3,11 @@
 An effectively-once payments workflow engine: **charge → ledger → payout**, designed failure-first.
 Work may be attempted more than once; its effects happen at most once.
 
-See [`docs/design.md`](docs/design.md) for the design, guarantees, fault model and failure-mode table.
+See [`docs/design.md`](docs/design.md) for the design, guarantees, fault model and failure-mode table. Also:
+- [decision records](docs/adr/README.md): why each design choice was made, and what was rejected;
+- [journal](docs/journal/README.md): one write-up per delivery slice, covering what shipped and what broke along the way.
 
-**Status:** Milestone 1 complete. The full saga (charge, payout, or refund on a definite payout failure) runs with leases, fencing, retries, dead letters and invariant checks. A chaos harness proves it under crashes and faults, and operators get audited admin actions, Prometheus metrics, alerts and a runbook. Milestone 2 in progress ([design](docs/superpowers/specs/2026-11-10-milestone-2-design.md)): asynchronous payouts with polling (2.1) and signed provider webhooks (2.2) are done.
+**Status:** Milestone 1 complete. The full saga (charge, payout, or refund on a definite payout failure) runs with leases, fencing, retries, dead letters and invariant checks. A chaos harness proves it under crashes and faults, and operators get audited admin actions, Prometheus metrics, alerts and a runbook. Milestone 2 is in progress ([design](docs/superpowers/specs/2026-11-10-milestone-2-design.md)). Done so far: asynchronous payouts with polling (2.1), signed provider webhooks (2.2), chaos for the async path (2.3), and hardening after an external review (2.3b).
 
 ## Prerequisites
 
