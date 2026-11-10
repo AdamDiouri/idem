@@ -340,7 +340,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	if err != nil {
 		return rep, err
 	}
-	webhookViolations, err := invariants.CheckWebhooks(ctx, pool, deliveries)
+	webhookViolations, err := invariants.CheckWebhooks(ctx, pool, deliveries, time.Time{}) // nothing is pruned during a run
 	if err != nil {
 		return rep, err
 	}

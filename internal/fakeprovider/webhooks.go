@@ -41,6 +41,7 @@ type WebhookDelivery struct {
 	GaveUp    bool     `json:"gave_up"` // finished without a 2xx (or a drop fault: never sent)
 	Stale     bool     `json:"stale"`
 	Fault     string   `json:"fault,omitempty"`
+	Created   int64    `json:"created"` // the event's created time (Unix seconds)
 	Targets   []string `json:"targets"` // the URL of each attempt, in order
 }
 
@@ -217,6 +218,7 @@ func (p *Provider) Webhooks() []WebhookDelivery {
 		out = append(out, WebhookDelivery{
 			EventID: d.event.ID, Type: d.event.Type, PayoutID: d.event.Data.PayoutID,
 			Attempts: d.attempts, Delivered: d.delivered, GaveUp: d.gaveUp, Stale: d.stale, Fault: d.fault,
+			Created: d.event.Created,
 			Targets: append([]string(nil), d.targets...),
 		})
 	}

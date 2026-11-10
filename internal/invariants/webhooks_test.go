@@ -3,6 +3,7 @@ package invariants_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -30,7 +31,7 @@ func (e env) webhookAttempt(t *testing.T, step uuid.UUID) {
 
 func (e env) checkWebhooks(t *testing.T, ds []fakeprovider.WebhookDelivery) []invariants.Violation {
 	t.Helper()
-	v, err := invariants.CheckWebhooks(context.Background(), e.pool, ds)
+	v, err := invariants.CheckWebhooks(context.Background(), e.pool, ds, time.Time{})
 	require.NoError(t, err)
 	return v
 }
@@ -140,4 +141,32 @@ func TestCheckWebhooks(t *testing.T) {
 			require.Contains(t, v[0].Detail, c.detail)
 		})
 	}
+}
+
+// Final review, minor 6: `idem check` runs after normal operations too.
+// Evidence about a workflow an operator then resolved, and events old enough
+// to have been pruned by inbox retention, are not violations.
+func TestCheckWebhooks_AfterNormalOperations(t *testing.T) {
+	ctx := context.Background()
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	e.setStatus(t, wf, "SUCCEEDED") // an operator confirmed the parked payout
+	_, err := e.pool.Exec(ctx, `INSERT INTO admin_actions (id, actor, action, workflow_id, step_id, reason, details)
+		VALUES (gen_random_uuid(), 'ops', 'confirm_step', $1, $2, 'provider shows it paid', '{}')`, wf, step)
+	require.NoError(t, err)
+	e.inboxRow(t, "evt_evidence", "EVIDENCE", "provider says paid", &step)
+
+	old := time.Now().Add(-48 * time.Hour)
+	pruned := fakeprovider.WebhookDelivery{EventID: "evt_pruned", Delivered: true, Attempts: 1, Created: old.Unix()}
+	ds := []fakeprovider.WebhookDelivery{{EventID: "evt_evidence", Delivered: true, Attempts: 1, Created: time.Now().Unix()}, pruned}
+
+	v, err := invariants.CheckWebhooks(ctx, e.pool, ds, time.Now().Add(-24*time.Hour))
+	require.NoError(t, err)
+	require.Empty(t, v)
+
+	// Without a retention cutoff (chaos), a missing event is still a violation.
+	v, err = invariants.CheckWebhooks(ctx, e.pool, ds, time.Time{})
+	require.NoError(t, err)
+	require.Len(t, v, 1)
+	require.Contains(t, v[0].Detail, "evt_pruned")
 }

@@ -46,7 +46,9 @@ func (q *Queries) ConflictEvents(ctx context.Context) ([]ConflictEventsRow, erro
 
 const inboxRowsForCheck = `-- name: InboxRowsForCheck :many
 SELECT i.provider_event_id, i.status, COALESCE(i.note, '')::text AS note, w.status AS workflow_status,
-       EXISTS (SELECT 1 FROM step_attempts a WHERE a.step_id = i.step_id AND a.kind = 'webhook')::bool AS step_applied
+       EXISTS (SELECT 1 FROM step_attempts a WHERE a.step_id = i.step_id AND a.kind = 'webhook')::bool AS step_applied,
+       -- an operator acted on the workflow (its evidence outlives the parking)
+       EXISTS (SELECT 1 FROM admin_actions x WHERE x.workflow_id = s.workflow_id)::bool AS operator_acted
 FROM webhook_inbox i
 LEFT JOIN steps s ON s.id = i.step_id
 LEFT JOIN workflows w ON w.id = s.workflow_id
@@ -59,6 +61,7 @@ type InboxRowsForCheckRow struct {
 	Note            string
 	WorkflowStatus  *string
 	StepApplied     bool
+	OperatorActed   bool
 }
 
 // Every inbox row with the status of the workflow it was tied to (if any),
@@ -80,6 +83,7 @@ func (q *Queries) InboxRowsForCheck(ctx context.Context) ([]InboxRowsForCheckRow
 			&i.Note,
 			&i.WorkflowStatus,
 			&i.StepApplied,
+			&i.OperatorActed,
 		); err != nil {
 			return nil, err
 		}

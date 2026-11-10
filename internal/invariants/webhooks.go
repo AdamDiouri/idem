@@ -3,6 +3,7 @@ package invariants
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -27,15 +28,21 @@ import (
 //     attention. Anything else (orphan,
 //     malformed, unsupported, mismatch, a true event dismissed as stale) means
 //     idem misread its news.
-func CheckWebhooks(ctx context.Context, pool *pgxpool.Pool, deliveries []fakeprovider.WebhookDelivery) ([]Violation, error) {
+//
+// prunedBefore is the inbox retention cutoff: an acknowledged event created
+// before it may have been pruned, so its absence is not a violation. Chaos
+// passes the zero time (nothing is pruned during a run); `idem check` passes
+// now − IDEM_INBOX_RETENTION. EVIDENCE rows also stay after an operator
+// resolves the parked workflow, so an operator's action allows them.
+func CheckWebhooks(ctx context.Context, pool *pgxpool.Pool, deliveries []fakeprovider.WebhookDelivery, prunedBefore time.Time) ([]Violation, error) {
 	rows, err := db.New(pool).InboxRowsForCheck(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("query inbox: %w", err)
 	}
-	return checkWebhookRows(rows, deliveries), nil
+	return checkWebhookRows(rows, deliveries, prunedBefore), nil
 }
 
-func checkWebhookRows(rows []db.InboxRowsForCheckRow, deliveries []fakeprovider.WebhookDelivery) []Violation {
+func checkWebhookRows(rows []db.InboxRowsForCheckRow, deliveries []fakeprovider.WebhookDelivery, prunedBefore time.Time) []Violation {
 	var violations []Violation
 	add := func(invariant, format string, args ...any) {
 		violations = append(violations, Violation{Invariant: invariant, Detail: fmt.Sprintf(format, args...)})
@@ -54,7 +61,8 @@ func checkWebhookRows(rows []db.InboxRowsForCheckRow, deliveries []fakeprovider.
 		if !d.Delivered {
 			continue
 		}
-		if !stored[d.EventID] {
+		mayBePruned := !prunedBefore.IsZero() && d.Created < prunedBefore.Unix()
+		if !stored[d.EventID] && !mayBePruned {
 			add("I11", "provider event %s was acknowledged but is not in the inbox", d.EventID)
 		}
 		if d.Fault == fakeprovider.ModeBadSignature && d.Attempts == 1 {
@@ -71,11 +79,11 @@ func checkWebhookRows(rows []db.InboxRowsForCheckRow, deliveries []fakeprovider.
 		if r.Status == "PROCESSED" && r.Note == "applied" && !r.StepApplied {
 			add("I11", "event %s was marked applied, but its step records no webhook attempt", r.ProviderEventID)
 		}
-		parked := r.WorkflowStatus != nil && *r.WorkflowStatus == "NEEDS_ATTENTION"
+		parked := (r.WorkflowStatus != nil && *r.WorkflowStatus == "NEEDS_ATTENTION") || r.OperatorActed
 		switch {
 		case r.Status == "EVIDENCE" && parked:
 		case r.Status == "EVIDENCE":
-			add("I10", "event %s is EVIDENCE on a workflow that does not need attention", r.ProviderEventID)
+			add("I10", "event %s is EVIDENCE on a workflow that never needed attention", r.ProviderEventID)
 		case r.Status == "CONFLICT":
 			// Reported by Check (I10), with its workflow.
 		case d.Stale && r.Status == "IGNORED" && r.Note == "stale":

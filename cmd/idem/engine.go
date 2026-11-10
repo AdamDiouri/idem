@@ -180,7 +180,7 @@ func checkCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			webhookViolations, err := invariants.CheckWebhooks(e.ctx, e.pool, deliveries)
+			webhookViolations, err := invariants.CheckWebhooks(e.ctx, e.pool, deliveries, time.Now().Add(-e.cfg.InboxRetention))
 			if err != nil {
 				return err
 			}

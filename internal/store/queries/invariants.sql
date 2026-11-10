@@ -54,7 +54,9 @@ SELECT provider_event_id, received_at FROM webhook_inbox WHERE status = 'PENDING
 -- step_applied: the event's step records an attempt of kind webhook, the
 -- trace the apply path leaves (so "applied" cannot be a label alone).
 SELECT i.provider_event_id, i.status, COALESCE(i.note, '')::text AS note, w.status AS workflow_status,
-       EXISTS (SELECT 1 FROM step_attempts a WHERE a.step_id = i.step_id AND a.kind = 'webhook')::bool AS step_applied
+       EXISTS (SELECT 1 FROM step_attempts a WHERE a.step_id = i.step_id AND a.kind = 'webhook')::bool AS step_applied,
+       -- an operator acted on the workflow (its evidence outlives the parking)
+       EXISTS (SELECT 1 FROM admin_actions x WHERE x.workflow_id = s.workflow_id)::bool AS operator_acted
 FROM webhook_inbox i
 LEFT JOIN steps s ON s.id = i.step_id
 LEFT JOIN workflows w ON w.id = s.workflow_id
