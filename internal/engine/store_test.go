@@ -664,6 +664,16 @@ func TestClaim_AwaitingCallbackOnlyAfterDeadline(t *testing.T) {
 	require.False(t, s.SendDoubt)
 }
 
+// The time budget runs from the acceptance: the latest send attempt's end.
+func TestClaim_WaitedForSinceAcceptance(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	step := awaitingStep(t, pool, "-1 second", "AWAITING_CALLBACK")
+	_, err := pool.Exec(context.Background(), `UPDATE step_attempts SET finished_at = now() - interval '2 hours' WHERE step_id = $1`, step)
+	require.NoError(t, err)
+	s := mustClaim(t, pool, "w1", time.Minute)
+	require.InDelta(t, (2 * time.Hour).Seconds(), s.WaitedFor.Seconds(), 60)
+}
+
 func TestClaim_PollAttemptRecordedAsPoll(t *testing.T) {
 	pool := testutil.NewPool(t, dsn)
 	step := awaitingStep(t, pool, "-1 second", "AWAITING_CALLBACK")

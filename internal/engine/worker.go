@@ -34,9 +34,12 @@ type WorkerOptions struct {
 	// CallbackDeadline is how long an accepted async request (a payout) waits
 	// for its result before workers poll it (design §4.5).
 	CallbackDeadline time.Duration
-	// MaxPolls bounds how often a waiting step is polled before it is DEAD
-	// with callback_unresolved (design §4.5).
-	MaxPolls int32
+	// PollBackoff spaces polls of a waiting step (Base, growing to Cap);
+	// MaxWait and MaxPolls bound them before the step is DEAD with
+	// callback_unresolved (design §4.5). Zero limits mean none.
+	PollBackoff Backoff
+	MaxWait     time.Duration
+	MaxPolls    int32
 	// KeyRetention is how long the provider remembers idempotency keys;
 	// KeyRetentionMargin is the safety margin before it. Zero disables lookups.
 	KeyRetention       time.Duration
@@ -197,7 +200,7 @@ func (w *Worker) poll(ctx context.Context, step Step, s ClaimedStep, log *slog.L
 	}
 	out = w.callPoll(ctx, poller, s)
 	w.opts.Metrics.ObservePoll(s.Name, pollResult(out.Class))
-	return out, decidePoll(s, out, w.opts.Backoff, w.opts.MaxPolls, step.Pivot())
+	return out, decidePoll(s, out, w.opts.PollBackoff, PollLimits{MaxPolls: w.opts.MaxPolls, MaxWait: w.opts.MaxWait}, step.Pivot())
 }
 
 // callPoll is execute's counterpart for Poller.Poll.

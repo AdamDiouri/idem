@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
@@ -149,6 +150,40 @@ func TestSweeper_CrashLoopIsNotProgress(t *testing.T) {
 		require.EqualValues(t, 1, h.reclaim(t))
 	}
 	require.Greater(t, testutil.ToFloat64(sweepOnce(t, h).UnsettledIdle), 3500.0)
+}
+
+// Fix before merge: a payout waiting for a poll that is not due yet is healthy,
+// however long the wait (bank payouts take hours). Overdue waits count as idle.
+func TestSweeper_ScheduledCallbackWaitIsNotIdle(t *testing.T) {
+	for name, tc := range map[string]struct {
+		deadline string
+		idle     bool
+	}{
+		"poll due in 30m": {"30 minutes", false},
+		"poll overdue 1h": {"-1 hour", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			h := newHarness(t)
+			wf := submitTo(t, h, "cus_1", "mer_1")
+			step := scalar[uuid.UUID](t, h.pool, `SELECT id FROM steps WHERE workflow_id = $1`, wf)
+			_, err := h.pool.Exec(ctx, `UPDATE workflows SET status = 'RUNNING', updated_at = now() - interval '2 hours' WHERE id = $1`, wf)
+			require.NoError(t, err)
+			_, err = h.pool.Exec(ctx, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_x', attempt_count = 1,
+				callback_deadline = now() + $2::interval, run_after = now() + $2::interval WHERE id = $1`, step, tc.deadline)
+			require.NoError(t, err)
+			_, err = h.pool.Exec(ctx, `INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id, outcome, started_at, finished_at)
+				VALUES ($1, 1, 1, 'w0', 'AWAITING_CALLBACK', now() - interval '2 hours', now() - interval '2 hours')`, step)
+			require.NoError(t, err)
+
+			idle := testutil.ToFloat64(sweepOnce(t, h).UnsettledIdle)
+			if tc.idle {
+				require.Greater(t, idle, 3500.0)
+			} else {
+				require.Less(t, idle, 60.0)
+			}
+		})
+	}
 }
 
 // Review focus: labels must stay bounded — no IDs, keys or error text.

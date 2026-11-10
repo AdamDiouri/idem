@@ -46,6 +46,7 @@ func Claim(ctx context.Context, pool *pgxpool.Pool, workerID string, names []str
 		AttemptNo:      row.AttemptCount + row.PollCount,
 		PollCount:      row.PollCount,
 		PollsSinceSend: row.PollsSinceSend,
+		WaitedFor:      time.Duration(row.WaitedMs) * time.Millisecond,
 		MaxAttempts:    row.MaxAttempts,
 		SendDoubt:      row.SendDoubt,
 		KeyAge:         time.Duration(row.KeyAgeMs) * time.Millisecond,

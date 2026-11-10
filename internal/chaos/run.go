@@ -73,6 +73,8 @@ func workerEnv(dsn, providerURL string) []string {
 		// run never parks a payout as callback_unresolved.
 		"IDEM_CALLBACK_DEADLINE=500ms",
 		"IDEM_CALLBACK_MAX_POLLS=30",
+		"IDEM_CALLBACK_MAX_WAIT=30s",
+		"IDEM_CALLBACK_POLL_CAP=1s",
 	}
 }
 

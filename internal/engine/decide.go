@@ -69,13 +69,26 @@ func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay, callb
 //
 //   - paid → SUCCEEDED; failed → FAILED_PERMANENT, or DEAD under the pivot
 //     rule when an earlier send was ambiguous.
-//   - pending → wait again, backing off; a failed poll → wait b.Base.
-//   - either, once maxPolls polls since the latest send are used → DEAD
+//   - pending → wait again, backing off up to pb.Cap (real payouts settle in
+//     hours or days); a failed poll → wait pb.Base.
+//   - either, once the step has waited lim.MaxWait since acceptance (or used
+//     lim.MaxPolls polls since the latest send, when set) → DEAD
 //     callback_unresolved (money may have moved; a human checks with the
 //     provider). An operator's retry re-sends, which starts a fresh budget.
 //   - The pivot rule applies to a failed payout after an ambiguous send, or
 //     when the poll resolves a step that was itself IN_DOUBT.
-func decidePoll(s ClaimedStep, out provider.Outcome, b Backoff, maxPolls int32, pivot bool) Result {
+//
+// PollLimits bound how long an accepted request is polled. Zero means no limit.
+type PollLimits struct {
+	MaxPolls int32         // polls since the latest send (optional)
+	MaxWait  time.Duration // since the provider accepted the request
+}
+
+func (l PollLimits) exhausted(s ClaimedStep) bool {
+	return (l.MaxPolls > 0 && s.PollsSinceSend >= l.MaxPolls) || (l.MaxWait > 0 && s.WaitedFor >= l.MaxWait)
+}
+
+func decidePoll(s ClaimedStep, out provider.Outcome, pb Backoff, lim PollLimits, pivot bool) Result {
 	r := Result{ProviderRef: s.ProviderRef, HTTPStatus: out.HTTPStatus}
 	if out.Err != nil {
 		r.Error = out.Err.Error()
@@ -91,15 +104,15 @@ func decidePoll(s ClaimedStep, out provider.Outcome, b Backoff, maxPolls int32, 
 		}
 		return r
 	}
-	if s.PollsSinceSend >= maxPolls {
+	if lim.exhausted(s) {
 		r.Kind, r.DeadReason = ResultDead, DeadCallbackUnresolved
 		return r
 	}
 	r.Kind = ResultAwaitingCallback
 	if out.Class == provider.Pending {
-		r.RetryDelay = min(b.Cap, b.Base+b.Delay(s.PollsSinceSend))
+		r.RetryDelay = min(pb.Cap, pb.Base+pb.Delay(s.PollsSinceSend))
 	} else {
-		r.RetryDelay = b.Base
+		r.RetryDelay = pb.Base
 	}
 	return r
 }

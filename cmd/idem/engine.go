@@ -113,6 +113,8 @@ func workerCmd() *cobra.Command {
 				KeyRetention:       e.cfg.ProviderKeyRetention,
 				KeyRetentionMargin: e.cfg.KeyRetentionMargin,
 				CallbackDeadline:   e.cfg.CallbackDeadline,
+				PollBackoff:        engine.Backoff{Base: e.cfg.RetryBase, Cap: e.cfg.CallbackPollCap},
+				MaxWait:            e.cfg.CallbackMaxWait,
 				MaxPolls:           e.cfg.CallbackMaxPolls,
 				ShutdownGrace:      e.cfg.ShutdownGrace,
 				Logger:             e.logger,

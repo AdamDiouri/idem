@@ -42,10 +42,13 @@ type ClaimedStep struct {
 	Attempt        int32  // send attempts so far, this one included (the retry budget)
 	AttemptNo      int32  // this attempt's number in step_attempts: sends + polls
 	PollCount      int32  // polls so far, this one included
-	PollsSinceSend int32  // polls since the latest send, this one included: the poll budget
-	PriorStatus    string // PENDING, IN_DOUBT, or AWAITING_CALLBACK for a poll
-	MaxAttempts    int32
-	ProviderRef    string // set once the provider accepted or performed the request
+	PollsSinceSend int32  // polls since the latest send, this one included
+	// WaitedFor is how long since the provider accepted the request (the latest
+	// send ended): the main poll budget (PollLimits.MaxWait).
+	WaitedFor   time.Duration
+	PriorStatus string // PENDING, IN_DOUBT, or AWAITING_CALLBACK for a poll
+	MaxAttempts int32
+	ProviderRef string // set once the provider accepted or performed the request
 	// SendDoubt: an earlier SEND attempt may have moved money (ambiguous,
 	// abandoned or exhausted). The pivot rule reads it; polls never set it.
 	SendDoubt       bool

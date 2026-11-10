@@ -93,4 +93,6 @@ func TestWorkerEnv_SetsCallbackTimings(t *testing.T) {
 	env := workerEnv("postgres://x", "http://p")
 	require.Contains(t, env, "IDEM_CALLBACK_DEADLINE=500ms")
 	require.Contains(t, env, "IDEM_CALLBACK_MAX_POLLS=30")
+	require.Contains(t, env, "IDEM_CALLBACK_MAX_WAIT=30s")
+	require.Contains(t, env, "IDEM_CALLBACK_POLL_CAP=1s")
 }

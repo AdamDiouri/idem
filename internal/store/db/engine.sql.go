@@ -70,7 +70,11 @@ RETURNING s.id, s.workflow_id, s.name, s.idempotency_key, s.lease_epoch, s.attem
             WHERE a.step_id = s.id AND a.kind = 'poll'
               AND a.attempt_no > COALESCE((SELECT max(b.attempt_no) FROM step_attempts b
                                            WHERE b.step_id = s.id AND b.kind = 'send'), 0))
-           + CASE WHEN s.prior_status = 'AWAITING_CALLBACK' THEN 1 ELSE 0 END)::int AS polls_since_send
+           + CASE WHEN s.prior_status = 'AWAITING_CALLBACK' THEN 1 ELSE 0 END)::int AS polls_since_send,
+          -- How long since the provider accepted the request (the latest send
+          -- attempt ended): the poll budget is mainly a total wait.
+          COALESCE((EXTRACT(EPOCH FROM (now() - (SELECT max(a.finished_at) FROM step_attempts a
+                                                  WHERE a.step_id = s.id AND a.kind = 'send'))) * 1000)::bigint, 0)::bigint AS waited_ms
 `
 
 type ClaimStepParams struct {
@@ -95,6 +99,7 @@ type ClaimStepRow struct {
 	Input           []byte
 	SendDoubt       bool
 	PollsSinceSend  int32
+	WaitedMs        int64
 }
 
 // Claims the next runnable step (design section 9.1). SKIP LOCKED lets many workers
@@ -125,6 +130,7 @@ func (q *Queries) ClaimStep(ctx context.Context, arg ClaimStepParams) (ClaimStep
 		&i.Input,
 		&i.SendDoubt,
 		&i.PollsSinceSend,
+		&i.WaitedMs,
 	)
 	return i, err
 }
@@ -177,13 +183,18 @@ func (q *Queries) CompleteStep(ctx context.Context, arg CompleteStepParams) (int
 const findStuckWorkflows = `-- name: FindStuckWorkflows :many
 SELECT id, status, idle_ms FROM (
   SELECT w.id, w.status,
-         (EXTRACT(EPOCH FROM (now() - GREATEST(w.updated_at, a.last_attempt))) * 1000)::bigint AS idle_ms
+         (EXTRACT(EPOCH FROM (now() - GREATEST(w.updated_at, a.last_attempt, c.waiting_until))) * 1000)::bigint AS idle_ms
   FROM workflows w
   LEFT JOIN LATERAL (
     SELECT max(sa.finished_at) AS last_attempt
     FROM steps s JOIN step_attempts sa ON sa.step_id = s.id
     WHERE s.workflow_id = w.id AND sa.outcome IS DISTINCT FROM 'ABANDONED'
   ) a ON true
+  LEFT JOIN LATERAL (
+    -- A step waiting for its callback is healthy until its poll is due.
+    SELECT max(LEAST(ws.callback_deadline, now())) AS waiting_until
+    FROM steps ws WHERE ws.workflow_id = w.id AND ws.status = 'AWAITING_CALLBACK'
+  ) c ON true
   WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
 ) idle
 WHERE idle_ms > $1::bigint
@@ -197,7 +208,8 @@ type FindStuckWorkflowsRow struct {
 }
 
 // Unsettled workflows without progress (a status change or a FINISHED step
-// attempt: a claim alone, or an attempt abandoned by a crash, is not) for
+// attempt: a claim alone, or an attempt abandoned by a crash, is not; a step
+// waiting for a callback counts as progress until its poll is due) for
 // older_than_ms, longest idle first. Same definition as UnsettledIdleMs.
 func (q *Queries) FindStuckWorkflows(ctx context.Context, olderThanMs int64) ([]FindStuckWorkflowsRow, error) {
 	rows, err := q.db.Query(ctx, findStuckWorkflows, olderThanMs)
@@ -382,18 +394,24 @@ func (q *Queries) TransitionWorkflow(ctx context.Context, arg TransitionWorkflow
 }
 
 const unsettledIdleMs = `-- name: UnsettledIdleMs :one
-SELECT COALESCE(max(EXTRACT(EPOCH FROM (now() - GREATEST(w.updated_at, a.last_attempt))) * 1000), 0)::bigint AS idle_ms
+SELECT COALESCE(max(EXTRACT(EPOCH FROM (now() - GREATEST(w.updated_at, a.last_attempt, c.waiting_until))) * 1000), 0)::bigint AS idle_ms
 FROM workflows w
 LEFT JOIN LATERAL (
   SELECT max(sa.finished_at) AS last_attempt
   FROM steps s JOIN step_attempts sa ON sa.step_id = s.id
   WHERE s.workflow_id = w.id AND sa.outcome IS DISTINCT FROM 'ABANDONED'
 ) a ON true
+LEFT JOIN LATERAL (
+  -- A step waiting for its callback is healthy until its poll is due.
+  SELECT max(LEAST(ws.callback_deadline, now())) AS waiting_until
+  FROM steps ws WHERE ws.workflow_id = w.id AND ws.status = 'AWAITING_CALLBACK'
+) c ON true
 WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
 `
 
 // The longest any unsettled workflow has gone without progress: a status
-// change or a finished step attempt (0 if none). Claims alone and attempts
+// change or a finished step attempt (0 if none); a step waiting for its
+// callback is healthy until its poll is due, however long that is. Claims alone and attempts
 // abandoned by a crash don't count, or a crash loop would look busy forever. Age since creation would page as soon
 // as an operator retried an old parked workflow.
 func (q *Queries) UnsettledIdleMs(ctx context.Context) (int64, error) {

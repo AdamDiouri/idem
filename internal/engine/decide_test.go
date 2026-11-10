@@ -130,7 +130,31 @@ func TestDecidePoll(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			require.Equal(t, c.want, decidePoll(c.s, c.out, b, maxPolls, true))
+			require.Equal(t, c.want, decidePoll(c.s, c.out, b, PollLimits{MaxPolls: maxPolls}, true))
 		})
 	}
+}
+
+// Fix before merge: real payouts settle in hours or days. The budget is a total
+// wait (MaxWait), polls back off up to the poll cap, and a poll count limit is
+// optional (0 = none).
+func TestDecidePoll_TimeBudgetAndPollCap(t *testing.T) {
+	pb := Backoff{Base: 2 * time.Second, Cap: time.Hour, Rand: func() float64 { return 1 }}
+	pending := provider.Outcome{Class: provider.Pending, HTTPStatus: 200}
+	waiting := func(polls int32, waited time.Duration) ClaimedStep {
+		return ClaimedStep{Attempt: 1, MaxAttempts: 8, PollCount: polls, PollsSinceSend: polls,
+			PriorStatus: "AWAITING_CALLBACK", ProviderRef: "po_1", WaitedFor: waited}
+	}
+	lim := PollLimits{MaxWait: 72 * time.Hour}
+
+	r := decidePoll(waiting(500, 10*time.Hour), pending, pb, lim, true)
+	require.Equal(t, ResultAwaitingCallback, r.Kind, "no poll count limit by default")
+	require.Equal(t, time.Hour, r.RetryDelay, "polls back off up to the poll cap")
+
+	r = decidePoll(waiting(3, 73*time.Hour), pending, pb, lim, true)
+	require.Equal(t, ResultDead, r.Kind, "waited longer than MaxWait")
+	require.Equal(t, DeadCallbackUnresolved, r.DeadReason)
+
+	r = decidePoll(waiting(3, time.Minute), provider.Outcome{Class: provider.Ambiguous}, pb, PollLimits{MaxPolls: 3, MaxWait: 72 * time.Hour}, true)
+	require.Equal(t, ResultDead, r.Kind, "an optional poll count limit still applies")
 }

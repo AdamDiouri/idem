@@ -33,10 +33,14 @@ type WorkerConfig struct {
 	KeyRetentionMargin   time.Duration `env:"IDEM_KEY_RETENTION_MARGIN" envDefault:"1h"`
 	ShutdownGrace        time.Duration `env:"IDEM_SHUTDOWN_GRACE" envDefault:"15s"`
 	StuckAfter           time.Duration `env:"IDEM_STUCK_AFTER" envDefault:"15m"`
-	// CallbackDeadline: how long an accepted payout waits before workers poll
-	// it; CallbackMaxPolls: how many polls before it is callback_unresolved.
+	// An accepted payout waits CallbackDeadline before its first poll; polls
+	// then back off (RetryBase doubling, up to CallbackPollCap). After
+	// CallbackMaxWait since acceptance (or CallbackMaxPolls polls, if set) it
+	// is callback_unresolved. Real bank payouts take hours or days.
 	CallbackDeadline time.Duration `env:"IDEM_CALLBACK_DEADLINE" envDefault:"10m"`
-	CallbackMaxPolls int32         `env:"IDEM_CALLBACK_MAX_POLLS" envDefault:"8"`
+	CallbackPollCap  time.Duration `env:"IDEM_CALLBACK_POLL_CAP" envDefault:"1h"`
+	CallbackMaxWait  time.Duration `env:"IDEM_CALLBACK_MAX_WAIT" envDefault:"72h"`
+	CallbackMaxPolls int32         `env:"IDEM_CALLBACK_MAX_POLLS" envDefault:"0"`
 	SweepInterval    time.Duration `env:"IDEM_SWEEP_INTERVAL" envDefault:"5s"`
 	WorkerID         string        `env:"IDEM_WORKER_ID"`  // empty → hostname-pid
 	Failpoints       string        `env:"IDEM_FAILPOINTS"` // see failpoint.EnableFromEnv
@@ -100,8 +104,15 @@ func (c WorkerConfig) validate() error {
 	if c.CallbackDeadline <= 0 {
 		return fmt.Errorf("IDEM_CALLBACK_DEADLINE must be positive")
 	}
-	if c.CallbackMaxPolls < 1 {
-		return fmt.Errorf("IDEM_CALLBACK_MAX_POLLS must be at least 1")
+	if c.CallbackMaxPolls < 0 {
+		return fmt.Errorf("IDEM_CALLBACK_MAX_POLLS must not be negative (0 = no limit)")
+	}
+	if c.CallbackMaxWait <= c.CallbackDeadline {
+		return fmt.Errorf("IDEM_CALLBACK_MAX_WAIT (%s) must be longer than IDEM_CALLBACK_DEADLINE (%s)",
+			c.CallbackMaxWait, c.CallbackDeadline)
+	}
+	if c.CallbackPollCap < c.RetryBase {
+		return fmt.Errorf("IDEM_CALLBACK_POLL_CAP (%s) must be at least IDEM_RETRY_BASE (%s)", c.CallbackPollCap, c.RetryBase)
 	}
 	if err := failpoint.ValidateSpec(c.Failpoints, engine.FailpointNames...); err != nil {
 		return fmt.Errorf("IDEM_FAILPOINTS: %w", err)
