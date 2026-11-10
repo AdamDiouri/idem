@@ -80,3 +80,15 @@ UPDATE webhook_inbox
 SET next_attempt_at = now() + (sqlc.arg(delay_ms)::bigint * interval '1 millisecond'),
     last_error = sqlc.narg(last_error)::text, lease_owner = NULL, lease_expires_at = NULL
 WHERE provider_event_id = sqlc.arg(provider_event_id) AND lease_epoch = sqlc.arg(lease_epoch);
+
+-- name: PruneInbox :execrows
+-- Retention: forget settled news. Evidence and conflicts (open or resolved)
+-- stay for operators and audits; pending events are never pruned. Bounded
+-- per call so a large backlog is pruned over several sweeps.
+DELETE FROM webhook_inbox
+WHERE provider_event_id IN (
+  SELECT provider_event_id FROM webhook_inbox
+  WHERE status IN ('PROCESSED', 'IGNORED')
+    AND processed_at < now() - (sqlc.arg(retention_ms)::bigint * interval '1 millisecond')
+  LIMIT 1000
+);

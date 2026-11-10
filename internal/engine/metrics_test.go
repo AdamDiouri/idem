@@ -266,3 +266,35 @@ func TestSweeper_OverLimitIgnoresFinishedSteps(t *testing.T) {
 	require.Eventually(t, func() bool { return testutil.ToFloat64(m.LastSnapshot) > 0 }, 2*time.Second, 10*time.Millisecond)
 	require.Equal(t, 1.0, testutil.ToFloat64(m.StepsOverLimit), "only the unfinished step counts")
 }
+
+// Minor fix: the inbox does not grow forever. Old PROCESSED and IGNORED
+// events are pruned; evidence, conflicts (open or resolved) and pending
+// events are kept whatever their age.
+func TestSweeper_PrunesOldInboxEvents(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	for id, row := range map[string]string{
+		"evt_old_processed": "PROCESSED", "evt_old_ignored": "IGNORED", "evt_old_evidence": "EVIDENCE",
+		"evt_old_resolved": "CONFLICT_RESOLVED", "evt_old_conflict": "CONFLICT",
+	} {
+		_, err := h.pool.Exec(ctx, `INSERT INTO webhook_inbox (provider_event_id, type, payload, status, processed_at)
+			VALUES ($1, 'payout.paid', '{}', $2, now() - interval '40 days')`, id, row)
+		require.NoError(t, err)
+	}
+	_, err := h.pool.Exec(ctx, `INSERT INTO webhook_inbox (provider_event_id, type, payload, status, processed_at)
+		VALUES ('evt_recent', 'payout.paid', '{}', 'PROCESSED', now() - interval '1 day')`)
+	require.NoError(t, err)
+
+	cancel, done := runInBackground(t, func(ctx context.Context) error {
+		return engine.RunSweeper(ctx, h.pool, engine.SweeperOptions{
+			Interval: 10 * time.Millisecond, StuckAfter: time.Hour, Logger: slog.New(slog.DiscardHandler),
+			InboxRetention: 30 * 24 * time.Hour,
+		})
+	})
+	require.Eventually(t, func() bool {
+		return h.count(t, `SELECT count(*) FROM webhook_inbox WHERE provider_event_id IN ('evt_old_processed', 'evt_old_ignored')`) == 0
+	}, 2*time.Second, 10*time.Millisecond)
+	cancel()
+	<-done
+	require.Equal(t, 4, h.count(t, `SELECT count(*) FROM webhook_inbox`), "evidence, conflicts and recent events stay")
+}

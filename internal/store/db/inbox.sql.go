@@ -257,6 +257,27 @@ func (q *Queries) LockStepForEvent(ctx context.Context, id uuid.UUID) (LockStepF
 	return i, err
 }
 
+const pruneInbox = `-- name: PruneInbox :execrows
+DELETE FROM webhook_inbox
+WHERE provider_event_id IN (
+  SELECT provider_event_id FROM webhook_inbox
+  WHERE status IN ('PROCESSED', 'IGNORED')
+    AND processed_at < now() - ($1::bigint * interval '1 millisecond')
+  LIMIT 1000
+)
+`
+
+// Retention: forget settled news. Evidence and conflicts (open or resolved)
+// stay for operators and audits; pending events are never pruned. Bounded
+// per call so a large backlog is pruned over several sweeps.
+func (q *Queries) PruneInbox(ctx context.Context, retentionMs int64) (int64, error) {
+	result, err := q.db.Exec(ctx, pruneInbox, retentionMs)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const stepForEvent = `-- name: StepForEvent :one
 SELECT s.id, s.workflow_id, s.name, s.status, s.dead_reason, s.idempotency_key, s.provider_ref,
        s.refund_charge_ref, s.lease_epoch, s.attempt_count, s.poll_count, s.max_attempts,

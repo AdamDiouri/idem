@@ -148,6 +148,7 @@ func sweeperCmd() *cobra.Command {
 			e.logger.Info("sweeper started", "interval", e.cfg.SweepInterval.String())
 			return engine.RunSweeper(e.ctx, e.pool, engine.SweeperOptions{
 				Interval: e.cfg.SweepInterval, StuckAfter: e.cfg.StuckAfter, Logger: e.logger, Metrics: e.serveMetrics(),
+				InboxRetention: e.cfg.InboxRetention,
 			})
 		},
 	}

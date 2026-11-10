@@ -26,6 +26,9 @@ CREATE TABLE webhook_inbox (
   last_error        text
 );
 CREATE INDEX webhook_inbox_due ON webhook_inbox (next_attempt_at) WHERE status = 'PENDING';
+-- idem admin list looks up a parked step's evidence; retention prunes by age.
+CREATE INDEX webhook_inbox_step ON webhook_inbox (step_id) WHERE step_id IS NOT NULL;
+CREATE INDEX webhook_inbox_settled ON webhook_inbox (processed_at) WHERE status IN ('PROCESSED', 'IGNORED');
 
 -- A webhook applied to a step is recorded as one of its attempts.
 ALTER TABLE step_attempts DROP CONSTRAINT step_attempts_kind_check;
