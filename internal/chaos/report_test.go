@@ -185,26 +185,75 @@ func TestReport_ReplicaWithoutTrafficIsVacuous(t *testing.T) {
 	r := healthy()
 	r.Config.APIs = 2
 	r.Clients.PerReplica = map[string]int{"api-0": 5}
-	r.WebhooksStored = map[string]int{"api-0": 3}
+	r.WebhooksAccepted = map[string]int{"api-0": 3}
+	r.WebhooksDuplicate = map[string]int{"api-0": 1}
 	r.Evaluate()
-	require.Contains(t, strings.Join(r.Reasons, "\n"), "API replica api-1 answered no client request")
-	require.Contains(t, strings.Join(r.Reasons, "\n"), "API replica api-1 stored no webhook")
+	reasons := strings.Join(r.Reasons, "\n")
+	require.Contains(t, reasons, "API replica api-1 answered no client request")
+	require.Contains(t, reasons, "API replica api-1 accepted no new webhook")
+	require.Contains(t, reasons, "API replica api-1 deduplicated no webhook")
 
-	r.Clients.PerReplica["api-1"], r.WebhooksStored["api-1"] = 4, 2
+	// Final review I3: duplicates alone are not stored webhooks.
+	r.Clients.PerReplica["api-1"], r.WebhooksDuplicate["api-1"] = 4, 7
+	r.Reasons = nil
+	r.Evaluate()
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "API replica api-1 accepted no new webhook")
+
+	r.WebhooksAccepted["api-1"] = 2
 	r.Reasons = nil
 	r.Evaluate()
 	require.NotContains(t, strings.Join(r.Reasons, "\n"), "replica")
-	require.Contains(t, r.Text(), "api replicas: 2 (requests api-0=5 api-1=4; webhooks stored api-0=3 api-1=2)")
+	require.Contains(t, r.Text(), "api replicas: 2 (requests api-0=5 api-1=4; webhooks accepted api-0=3 api-1=2, duplicates api-0=1 api-1=7)")
 }
 
 // Slice 2.3 (found by campaigns): a webhook fault in force for under the
 // minimum window had no real chance to fire, so its silence is not vacuity.
 func TestReport_ShortWebhookWindowIsNotVacuous(t *testing.T) {
+	t0 := time.Now()
 	r := healthy()
 	r.Events = append(r.Events,
-		ExecutedEvent{InFlight: 4, Event: Event{At: 5800 * time.Millisecond, Kind: SetProviderFaults,
+		ExecutedEvent{InFlight: 4, WallTime: t0.Add(5800 * time.Millisecond), Event: Event{At: 5800 * time.Millisecond, Kind: SetProviderFaults,
 			Faults: fakeprovider.Faults{Rules: []fakeprovider.Rule{{Endpoint: "webhooks", Mode: fakeprovider.ModeReorder, Probability: 0.3}}}}},
-		ExecutedEvent{InFlight: 4, Event: Event{At: 6700 * time.Millisecond, Kind: ClearProviderFaults}})
+		ExecutedEvent{InFlight: 4, WallTime: t0.Add(6700 * time.Millisecond), Event: Event{At: 6700 * time.Millisecond, Kind: ClearProviderFaults}})
 	r.Evaluate()
 	require.NotContains(t, strings.Join(r.Reasons, "\n"), "webhook fault reorder")
+}
+
+// Final review C1: in a run of a minute or more, every webhook fault must have
+// had a real window (effective, in force >= minFaultWindow on the executed
+// timeline) and fired; a fault that never had one is not silently skipped.
+func TestReport_EveryWebhookModeNeedsARealWindow(t *testing.T) {
+	t0 := time.Now()
+	r := healthy()
+	r.Config.Duration = 90 * time.Second
+	at := 20 * time.Second
+	for _, m := range wantWebhookModes {
+		if m == fakeprovider.ModeDupWebhook {
+			continue // never armed
+		}
+		r.Events = append(r.Events, ExecutedEvent{InFlight: 5, WallTime: t0.Add(at), Event: Event{At: at, Kind: SetProviderFaults,
+			Faults: fakeprovider.Faults{Rules: []fakeprovider.Rule{{Endpoint: "webhooks", Mode: m, Probability: 0.3}}}}})
+		r.FaultHits["webhooks/"+m] = 3
+		at += 6 * time.Second
+	}
+	r.Evaluate()
+	reasons := strings.Join(r.Reasons, "\n")
+	require.Contains(t, reasons, "webhook fault dup_webhook never had a real window")
+	require.NotContains(t, reasons, "webhook fault reorder")
+
+	// A window that is planned long but executed short (a slow event in
+	// between) does not count (final review I1).
+	r = healthy()
+	r.Config.Duration = 90 * time.Second
+	r.Events = append(r.Events,
+		ExecutedEvent{InFlight: 5, WallTime: t0.Add(20 * time.Second), Event: Event{At: 20 * time.Second, Kind: SetProviderFaults,
+			Faults: fakeprovider.Faults{Rules: []fakeprovider.Rule{{Endpoint: "webhooks", Mode: fakeprovider.ModeReorder, Probability: 0.3}}}}},
+		ExecutedEvent{InFlight: 5, WallTime: t0.Add(30*time.Second + 500*time.Millisecond), Event: Event{At: 26 * time.Second, Kind: RestartPostgres}},
+		ExecutedEvent{InFlight: 5, WallTime: t0.Add(31 * time.Second), Event: Event{At: 26 * time.Second, Kind: ClearProviderFaults}})
+	r.Evaluate()
+	require.NotContains(t, strings.Join(r.Reasons, "\n"), "webhook fault reorder never had a real window", "11s executed window counts")
+	r.Events[len(r.Events)-1].WallTime = t0.Add(22 * time.Second) // executed: only 2s in force
+	r.Reasons = nil
+	r.Evaluate()
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "webhook fault reorder never had a real window")
 }

@@ -96,8 +96,7 @@ func NewPlan(cfg PlanConfig) []Event {
 				events = append(events, newEvent(rng, cfg, at, k))
 			}
 		}
-		sort.SliceStable(events, func(i, j int) bool { return events[i].At < events[j].At })
-		events = armEveryWebhookFault(rng, events, cfg.Duration)
+		events = webhookFaultBlock(rng, events, cfg.Duration)
 	}
 
 	sort.SliceStable(events, func(i, j int) bool { return events[i].At < events[j].At })
@@ -179,66 +178,41 @@ func faultWindow(events []Event, i int, end time.Duration) time.Duration {
 	return end - events[i].At
 }
 
-// armEveryWebhookFault makes sure each webhook fault is in force for at least
-// minFaultWindow at some point: a missing mode joins the longest-lasting fault
-// set that lacks a webhook rule (else the longest one), or, if none lasts long
-// enough, a new fault set at the start of the longest quiet stretch. events
-// must be sorted; the result is.
-func armEveryWebhookFault(rng *rand.Rand, events []Event, end time.Duration) []Event {
-	for _, mode := range webhookModes {
-		best, bestWindow, covered := -1, time.Duration(0), false
-		for i, e := range events {
-			if e.Kind != SetProviderFaults {
-				continue
-			}
-			w := faultWindow(events, i, end)
-			hasWebhook := false
-			for _, r := range e.Faults.Rules {
-				if r.Endpoint == webhooksEndpoint {
-					hasWebhook = true
-					covered = covered || (r.Mode == mode && w >= minFaultWindow)
-				}
-			}
-			// Prefer a long set with no webhook rule yet, so modes don't
-			// crowd one set (the first matching rule wins each draw).
-			score := w
-			if hasWebhook {
-				score /= 2
-			}
-			if score > bestWindow {
-				best, bestWindow = i, score
-			}
-		}
-		if covered {
+// webhookFaultBlock reserves, in runs of a minute or more, one window of
+// minFaultWindow per webhook fault, back to back: each holds that fault alone
+// (so no other rule wins its draws), starts once traffic flows (at least 10%
+// into the run) and ends inside the campaign window. Any other fault change
+// that would fall inside the block is dropped, so no window is cut short.
+// Because the block itself sets provider faults, every disruption kind still
+// occurs; a ClearProviderFaults is re-added after the block if the plan lost
+// its only one.
+func webhookFaultBlock(rng *rand.Rand, events []Event, duration time.Duration) []Event {
+	block := time.Duration(len(webhookModes)) * minFaultWindow
+	earliest, latest := duration/10, duration*9/10-block
+	latest = max(latest, earliest)
+	start := earliest + time.Duration(rng.Int64N(int64(latest-earliest)+1))
+	end := start + block
+
+	kept := events[:0:0]
+	clears := 0
+	for _, e := range events {
+		faultChange := e.Kind == SetProviderFaults || e.Kind == ClearProviderFaults
+		if faultChange && e.At >= start && e.At < end {
 			continue
 		}
-		if best >= 0 && faultWindow(events, best, end) >= minFaultWindow {
-			events[best].Faults.Rules = append(events[best].Faults.Rules, webhookRule(rng, mode))
-			continue
+		if e.Kind == ClearProviderFaults {
+			clears++
 		}
-		at := longestQuietStart(events, end)
-		events = append(events, Event{At: at, Kind: SetProviderFaults, Faults: fakeprovider.Faults{
+		kept = append(kept, e)
+	}
+	for i, mode := range webhookModes {
+		kept = append(kept, Event{At: start + time.Duration(i)*minFaultWindow, Kind: SetProviderFaults, Faults: fakeprovider.Faults{
 			Seed: rng.Int64N(math.MaxInt32) + 1, Rules: []fakeprovider.Rule{webhookRule(rng, mode)},
 		}})
-		sort.SliceStable(events, func(i, j int) bool { return events[i].At < events[j].At })
 	}
-	return events
-}
-
-// longestQuietStart returns the start of the longest stretch with no fault change.
-func longestQuietStart(events []Event, end time.Duration) time.Duration {
-	prev, bestStart, bestLen := time.Millisecond, time.Millisecond, time.Duration(0)
-	for _, e := range events {
-		if e.Kind != SetProviderFaults && e.Kind != ClearProviderFaults {
-			continue
-		}
-		if e.At-prev > bestLen {
-			bestStart, bestLen = prev, e.At-prev
-		}
-		prev = e.At + time.Millisecond
+	if clears == 0 {
+		kept = append(kept, Event{At: end, Kind: ClearProviderFaults})
 	}
-	if end-prev > bestLen {
-		bestStart = prev
-	}
-	return bestStart
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].At < kept[j].At })
+	return kept
 }

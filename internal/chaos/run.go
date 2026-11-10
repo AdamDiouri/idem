@@ -357,10 +357,12 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		return rep, err
 	}
 	rep.FencedCommits = countLogLines(cfg.RunDir, "worker-", "lease lost before completion")
-	rep.WebhooksStored = map[string]int{}
+	rep.WebhooksAccepted, rep.WebhooksDuplicate = map[string]int{}, map[string]int{}
 	for i := range apiURLs {
 		name := fmt.Sprintf("api-%d", i)
-		rep.WebhooksStored[name] = countLogLines(cfg.RunDir, name, "provider webhook stored") // api-<i>.log
+		file := filepath.Join(cfg.RunDir, name+".log") // exactly this replica's log
+		rep.WebhooksAccepted[name] = countMatchingLines(file, `"msg":"provider webhook stored"`, `"result":"accepted"`)
+		rep.WebhooksDuplicate[name] = countMatchingLines(file, `"msg":"provider webhook stored"`, `"result":"duplicate"`)
 	}
 	rep.FailpointFires = map[string]int{}
 	for _, name := range armedFailpoints(cfg.Failpoints + "," + cfg.APIFailpoints) {
@@ -528,4 +530,26 @@ func waitHTTP(ctx context.Context, url string) error {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// countMatchingLines counts the lines of file that contain every needle.
+func countMatchingLines(file string, needles ...string) int {
+	data, err := os.ReadFile(file) //nolint:gosec // harness-owned log file
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for line := range strings.SplitSeq(string(data), "\n") {
+		all := true
+		for _, needle := range needles {
+			if !strings.Contains(line, needle) {
+				all = false
+				break
+			}
+		}
+		if all {
+			n++
+		}
+	}
+	return n
 }

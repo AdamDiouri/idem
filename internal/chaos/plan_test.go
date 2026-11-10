@@ -208,3 +208,34 @@ func TestPlan_EveryWebhookFaultHasALongWindow(t *testing.T) {
 		}
 	}
 }
+
+// Final review C1/C2: runs of a minute or more reserve a webhook-fault block:
+// one set per webhook fault, that fault alone, each in force for at least
+// minFaultWindow, starting once traffic flows (>= 10% of the run), with no
+// other fault change inside it.
+func TestPlan_WebhookFaultBlock(t *testing.T) {
+	for _, d := range []time.Duration{60 * time.Second, 90 * time.Second, 120 * time.Second, 300 * time.Second} {
+		for seed := int64(1); seed <= 2000; seed++ {
+			events := NewPlan(PlanConfig{Seed: seed, Duration: d, Workers: 4, APIs: 2, LeaseTTL: 4 * time.Second})
+			found := map[string]bool{}
+			for i, e := range events {
+				if e.Kind != SetProviderFaults || len(e.Faults.Rules) != 1 || e.Faults.Rules[0].Endpoint != "webhooks" {
+					continue
+				}
+				if faultWindow(events, i, d) < minFaultWindow || e.At < d/10 || e.At+minFaultWindow > d*9/10+minFaultWindow {
+					continue
+				}
+				found[e.Faults.Rules[0].Mode] = true
+			}
+			for _, m := range wantWebhookModes {
+				require.True(t, found[m], "%s seed %d: no dedicated %s window", d, seed, m)
+			}
+			kinds := map[EventKind]bool{}
+			for _, e := range events {
+				kinds[e.Kind] = true
+				require.Less(t, e.At, d, "%s seed %d: event past the run", d, seed)
+			}
+			require.Len(t, kinds, len(AllKinds), "%s seed %d: every disruption kind still occurs", d, seed)
+		}
+	}
+}
