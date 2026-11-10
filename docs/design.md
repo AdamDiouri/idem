@@ -498,7 +498,8 @@ Initial set: `after_claim`, `before_provider_call`, `after_provider_call`, `befo
    5. Run the invariant checker; write a report (counts per terminal state, fenced commits, `IN_DOUBT` resolutions, violations with workflow IDs).
    - Runs are seeded. Honest caveat: OS scheduling isn't deterministic, so a seed reproduces the *fault plan*, not the exact interleaving. Fully deterministic simulation is a stretch goal.
    - As built (slice 1.5): `make chaos CHAOS_ARGS="--seed N --duration 90s"`.
-     - **Processes:** a throwaway Postgres container, the fake provider, the API, 4 workers and 2 sweepers.
+     - **Processes:** a throwaway Postgres container, the fake provider, **two API replicas** (since M2 slice 2.3; clients and webhooks rotate across them, restarts hit one at a time), 4 workers and 2 sweepers.
+     - **M2 slice 2.3:** campaigns inject the six webhook faults (each guaranteed a ≥5s window) and the `inbox_before_commit` and `webhook_after_insert` failpoints; the verdict requires each to have fired, and both replicas to have served clients and stored webhooks.
      - **Supervision:** a supervisor restarts any process that crashes (modelling Kubernetes); the fake provider is never killed, because it is the oracle.
      - **Child timings:** short (4s lease, 1s provider timeout, 100ms–2s retries), so a short run exercises many recoveries.
      - **Clients misbehave:** polite, impatient, double-click, reformatted-retry and malformed. They must never see two workflows for one key.
