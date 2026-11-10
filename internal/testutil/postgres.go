@@ -109,7 +109,7 @@ func NewPool(t *testing.T, dsn string) *pgxpool.Pool {
 
 	owner := NewOwnerPool(t, dsn)
 	// TRUNCATE bypasses the ledger's append-only row triggers; accounts are seed data.
-	if _, err := owner.Exec(ctx, `TRUNCATE admin_actions, ledger_entries, ledger_transactions, step_attempts,
+	if _, err := owner.Exec(ctx, `TRUNCATE outbox, admin_actions, ledger_entries, ledger_transactions, step_attempts,
 		api_idempotency_keys, steps, workflows CASCADE`); err != nil {
 		t.Fatalf("truncate tables: %v", err)
 	}
