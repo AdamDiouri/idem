@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -142,4 +143,65 @@ func TestRefusedSendHookFails_NeverBecomesDoubt(t *testing.T) {
 	require.Equal(t, "PENDING", h.chargeStatus(t, wf))
 	require.Equal(t, "failed_permanent", h.runOnce(t, w).Outcome)
 	require.Equal(t, 3, step.failureCalls)
+}
+
+// Final review, minor 2: a step parked hook_failed keeps what the provider
+// said, so the operator can confirm it without digging through logs.
+func TestSendHookFailsAtMax_KeepsProviderAnswer(t *testing.T) {
+	h := newHarness(t)
+	wf := submit(t, h.pool, "cus_1")
+	step := &stubStep{successErr: errHookBug, successErrFor: 1 << 30}
+	w := h.workerWith("w1", func(o *engine.WorkerOptions) { o.HookMaxFailures = 1 }, step)
+
+	_, err := w.RunOnce(context.Background())
+	require.ErrorIs(t, err, errHookBug)
+	status, reason, _ := h.hookFailures(t, wf)
+	require.Equal(t, "DEAD", status)
+	require.Equal(t, engine.DeadHookFailed, reason)
+	require.Equal(t, "ch_stub", scalar[string](t, h.pool, `SELECT provider_ref FROM steps WHERE workflow_id = $1 AND name = 'charge'`, wf))
+	require.Equal(t, int32(201), scalar[int32](t, h.pool, `SELECT a.http_status FROM step_attempts a JOIN steps s ON s.id = a.step_id
+		WHERE s.workflow_id = $1 AND s.name = 'charge'`, wf))
+}
+
+// Final review, minor 3: a poll whose hook failed waits on the poll schedule,
+// not the send backoff.
+func TestPollHookFails_RequeuesOnPollSchedule(t *testing.T) {
+	h := newHarness(t)
+	wf := submit(t, h.pool, "cus_1")
+	step := pollingStub{&stubStep{successErr: errHookBug, successErrFor: 1 << 30}}
+	w := h.workerWith("w1", func(o *engine.WorkerOptions) {
+		o.Backoff = engine.Backoff{} // sends: immediate
+		o.PollBackoff = engine.Backoff{Base: time.Hour, Cap: time.Hour, Rand: func() float64 { return 1 }}
+	}, step)
+	require.Equal(t, "awaiting_callback", h.runOnce(t, w).Outcome) // accepted, polled at once
+	_, err := w.RunOnce(context.Background())                      // the poll: paid, hook fails
+	require.ErrorIs(t, err, errHookBug)
+	status, _, _ := h.hookFailures(t, wf)
+	require.Equal(t, "AWAITING_CALLBACK", status)
+	require.True(t, scalar[bool](t, h.pool, `SELECT callback_deadline > now() + interval '30 minutes'
+		FROM steps WHERE workflow_id = $1 AND name = 'charge'`, wf), "next poll on the poll schedule")
+}
+
+// Final review, minor 4: losing the lease between the failed completion and
+// recording the failure is the ordinary fenced case, not an error.
+func TestHookFailureFenced_IsReportedAsFenced(t *testing.T) {
+	h := newHarness(t)
+	wf := submit(t, h.pool, "cus_1")
+	step := &stubStep{successErr: errHookBug, successErrFor: 1}
+	rec := &recordingHandler{}
+	w := h.workerWith("w1", func(o *engine.WorkerOptions) {
+		o.Logger = slog.New(rec)
+		engine.SetBeforeRecordHookFailure(o, func() {
+			_, err := h.pool.Exec(context.Background(), `UPDATE steps SET lease_epoch = lease_epoch + 1
+				WHERE workflow_id = $1 AND name = 'charge'`, wf)
+			require.NoError(t, err)
+		})
+	}, step)
+
+	res, err := w.RunOnce(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "fenced", res.Outcome)
+	require.True(t, rec.find("lease lost before the hook failure was recorded; result discarded", "outcome", "fenced"))
+	_, _, failures := h.hookFailures(t, wf)
+	require.Zero(t, failures)
 }

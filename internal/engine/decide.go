@@ -116,9 +116,16 @@ func decidePoll(s ClaimedStep, out provider.Outcome, pb Backoff, lim PollLimits,
 	}
 	r.Kind = ResultAwaitingCallback
 	if out.Class == provider.Pending {
-		r.RetryDelay = min(pb.Cap, pb.Base+pb.Delay(s.PollsSinceSend))
+		r.RetryDelay = pollDelay(pb, s)
 	} else {
 		r.RetryDelay = pb.Base
 	}
 	return r
+}
+
+// pollDelay is how long a waiting step waits before its next poll: at least
+// the poll backoff's base, growing with the polls since the latest send, never
+// beyond its cap.
+func pollDelay(pb Backoff, s ClaimedStep) time.Duration {
+	return min(pb.Cap, pb.Base+pb.Delay(s.PollsSinceSend))
 }

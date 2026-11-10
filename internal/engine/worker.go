@@ -51,7 +51,9 @@ type WorkerOptions struct {
 	// is DEAD with hook_failed. Zero means DefaultHookMaxFailures.
 	HookMaxFailures int
 	Logger          *slog.Logger
-	Metrics         *metrics.Metrics // nil disables metrics
+
+	beforeRecordHookFailure func()           // test seam: after a hook failed, before it is recorded
+	Metrics                 *metrics.Metrics // nil disables metrics
 }
 
 // RunResult describes one RunOnce call.
@@ -155,8 +157,21 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 		return RunResult{Claimed: true, StepID: s.ID, Outcome: "fenced"}, nil
 	}
 	if err != nil && countableHookError(err) {
+		if w.opts.beforeRecordHookFailure != nil {
+			w.opts.beforeRecordHookFailure()
+		}
+		delay := w.opts.Backoff.Delay(s.Attempt)
+		if s.PriorStatus == string(ResultAwaitingCallback) {
+			delay = pollDelay(w.opts.PollBackoff, s) // a poll waits on the poll schedule
+		}
+		dead, recErr := RecordHookFailure(completeCtx, w.pool, s, r, err, w.opts.HookMaxFailures, delay)
+		switch {
+		case errors.Is(recErr, ErrFenced):
+			w.opts.Metrics.ObserveAttempt(s.Name, "fenced")
+			log.Warn("lease lost before the hook failure was recorded; result discarded", "outcome", "fenced", "hook_error", err.Error())
+			return RunResult{Claimed: true, StepID: s.ID, Outcome: "fenced"}, nil
+		}
 		w.opts.Metrics.ObserveAttempt(s.Name, "error")
-		dead, recErr := RecordHookFailure(completeCtx, w.pool, s, r, err, w.opts.HookMaxFailures, w.opts.Backoff.Delay(s.Attempt))
 		switch {
 		case recErr != nil:
 			log.Error("step hook failed; could not record it, the step will be recovered when its lease expires",

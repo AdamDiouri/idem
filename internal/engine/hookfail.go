@@ -66,8 +66,11 @@ func RecordHookFailure(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, f
 	case refused:
 		r.Kind = ResultRetryNoEffect
 	}
+	// Keep what the provider said: the operator confirms with this reference.
+	r.ProviderRef, r.HTTPStatus = failed.ProviderRef, failed.HTTPStatus
 	if _, err := q.CompleteStep(ctx, db.CompleteStepParams{
-		Status: stepStatus(s, r.Kind), LastError: optional(r.Error), DeadReason: optional(r.DeadReason),
+		ProviderRef: optional(r.ProviderRef),
+		Status:      stepStatus(s, r.Kind), LastError: optional(r.Error), DeadReason: optional(r.DeadReason),
 		RetryMs: r.RetryDelay.Milliseconds(), ID: s.ID, LeaseEpoch: s.LeaseEpoch,
 	}); err != nil {
 		return false, fmt.Errorf("record hook failure: %w", err)
@@ -79,8 +82,14 @@ func RecordHookFailure(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, f
 	if r.AttemptOutcome != "" {
 		outcome = r.AttemptOutcome
 	}
+	var httpStatus *int32
+	if r.HTTPStatus != 0 {
+		v := int32(r.HTTPStatus) //nolint:gosec // HTTP status codes fit in int32
+		httpStatus = &v
+	}
 	if err := q.FinishStepAttempt(ctx, db.FinishStepAttemptParams{
-		Outcome: string(outcome), Error: optional(r.Error), StepID: s.ID, AttemptNo: s.AttemptNo,
+		HttpStatus: httpStatus,
+		Outcome:    string(outcome), Error: optional(r.Error), StepID: s.ID, AttemptNo: s.AttemptNo,
 	}); err != nil {
 		return false, fmt.Errorf("finish attempt: %w", err)
 	}
@@ -88,6 +97,15 @@ func RecordHookFailure(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, f
 		return false, fmt.Errorf("commit hook failure: %w", err)
 	}
 	return r.Kind == ResultDead, nil
+}
+
+// transientSQLStates are errors Postgres raises under contention: retrying is
+// the cure, so they say nothing about the hook itself.
+var transientSQLStates = map[string]bool{
+	"40P01": true, // deadlock_detected
+	"40001": true, // serialization_failure
+	"55P03": true, // lock_not_available
+	"57014": true, // query_canceled (statement or lock timeout)
 }
 
 // countableHookError reports whether err is a hook's own failure (a bug, a
@@ -100,6 +118,10 @@ func countableHookError(err error) bool {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && transientSQLStates[pgErr.Code] {
 		return false
 	}
 	return !pgconn.SafeToRetry(err) && !pgconn.Timeout(err)
