@@ -436,3 +436,27 @@ func TestInbox_ChangeWithoutRecheckSaysSo(t *testing.T) {
 	require.Equal(t, "step changed since it was read",
 		scalar[string](t, h.pool, `SELECT last_error FROM webhook_inbox WHERE provider_event_id = $1`, id))
 }
+
+// Slice 2.3b (review R12, last item): a deferred event has no attempt cap of
+// its own; it is bounded by its step's wait. Once polling gives up (DEAD
+// callback_unresolved), the event resolves (as evidence) instead of being
+// deferred forever.
+func TestInboxDeferral_EndsWhenStepParks(t *testing.T) {
+	h := asyncHarness(t, time.Hour)
+	wf := waitingPayout(t, h) // pending at the provider
+	id := h.storeEvent(t, wf, webhook.EventPayoutPaid, "")
+	require.Equal(t, "deferred", h.inboxOnce(t, h.inboxProcessor()))
+
+	_, err := h.pool.Exec(context.Background(), `UPDATE steps SET run_after = now(), callback_deadline = now()
+		WHERE workflow_id = $1 AND name = 'payout'`, wf) // the next poll is due
+	require.NoError(t, err)
+	h.drain(t, h.workerWith("w1", polling(0, 1), h.allSteps()...)) // and the wait runs out
+	require.Equal(t, engine.DeadCallbackUnresolved,
+		scalar[string](t, h.pool, `SELECT dead_reason FROM steps WHERE workflow_id = $1 AND name = 'payout'`, wf))
+
+	h.fake.SettleNow()
+	h.makeDue(t)
+	require.Equal(t, "evidence", h.inboxOnce(t, h.inboxProcessor()))
+	status, _ := h.inboxRow(t, id)
+	require.Equal(t, "EVIDENCE", status)
+}
