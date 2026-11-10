@@ -167,7 +167,7 @@ The chaos harness runs the real binaries as separate processes and does its best
 - **Infrastructure:** a throwaway Postgres container, the fake provider, **two API replicas** (`--apis`), 4 workers and 2 sweepers.
 - **Traffic:** misbehaving clients (impatient retries, double-clicks, reformatted retries, malformed bodies). Every request goes to the next replica in turn, so one payment's retries usually reach both.
 - **Webhooks:** the provider signs a webhook for every settled payout and rotates deliveries across the replicas, so its retries reach the *other* replica.
-- **Disruptions:** a seeded plan of `kill -9`, `SIGSTOP` beyond the lease, API restarts (one replica at a time), database restarts, provider faults, and the six **webhook faults** (duplicated, sent before the `202`, delayed, a stale contradiction, dropped, badly signed). Every webhook fault is guaranteed a window of at least 5 seconds.
+- **Disruptions:** a seeded plan of `kill -9`, `SIGSTOP` beyond the lease, API restarts (one replica at a time), database restarts, provider faults, and the six **webhook faults** (duplicated, sent before the `202`, delayed, a stale contradiction, dropped, badly signed). In runs of a minute or more, the plan reserves a **webhook-fault block**: six back-to-back 5-second windows, one fault each and nothing else, starting once traffic flows.
 - **Crash failpoints** make processes `exit` mid-step, including `inbox_before_commit` on workers and `webhook_after_insert` on the API. A supervisor restarts them like Kubernetes would.
 
 Afterwards it clears every fault, lets the system settle, and checks every invariant.
@@ -184,7 +184,7 @@ events executed: 33 (failed to apply: 0, skipped: 1); effective = met work in fl
   kill_worker 16 (effective 16)   pause_worker 4 (4)   restart_api 1 (1)
   restart_postgres 5 (5)          set_provider_faults 6 (6)   clear_provider_faults 1 (1)
 provider fault hits: … webhooks/bad_signature:22 webhooks/delay_webhook:17 webhooks/drop_webhook:2 …
-api replicas: 2 (requests api-0=723 api-1=671; webhooks stored api-0=452 api-1=402)
+api replicas: 2 (requests api-0=… api-1=…; webhooks accepted api-0=… api-1=…, duplicates api-0=… api-1=…)
 failpoints fired: after_claim=22 after_provider_call=35 before_commit=40 inbox_before_commit=19 webhook_after_insert=25
 webhooks: … applied, … duplicates, … deferred
 outcomes: COMPENSATED=123 FAILED=44 NEEDS_ATTENTION=7 SUCCEEDED=710
@@ -202,9 +202,9 @@ violations: 0
 - **A pass must be earned, not vacuous:**
   - every kind of disruption must have met work in flight (an *effective* event)
   - provider faults must actually have hit requests
-  - every webhook fault that was in force for at least 5 seconds must actually have fired
+  - every webhook fault that was in force for at least 5 seconds while work was in flight (measured on the executed timeline) must actually have fired; in runs of a minute or more, **every** webhook fault must have had such a window and fired
   - every armed failpoint must actually have fired (failpoints name themselves when they do)
-  - with several API replicas, every replica must have answered clients and stored webhooks
+  - with several API replicas, every replica must have answered clients, accepted new webhooks, and recognised duplicates (evidence of deduplication across replicas)
   - a binary built with `-tags nofailpoint` refuses `IDEM_FAILPOINTS` instead of running silently
 - **Skipped events:** a kill or pause aimed at a worker that was already restarting is *skipped*. That is harmless, and it is neither counted nor treated as a failure.
 - **`NEEDS_ATTENTION`** entries list the step and reason. In a healthy run they are all `payout permanent_after_in_doubt`: payouts refused after an ambiguous attempt, parked for a human by the pivot safety rule instead of being refunded on a guess.
