@@ -176,8 +176,8 @@ func (r *Report) Evaluate() {
 	if r.Webhooks.Applied == 0 {
 		add("vacuous: no webhook completed a payout")
 	}
-	if r.Config.Duration >= time.Minute && r.Webhooks.StaleIgnored == 0 {
-		add("vacuous: no reordered webhook was recognised as stale")
+	if r.Config.Duration >= time.Minute && r.Webhooks.StaleDelivered == 0 {
+		add("vacuous: no reordered webhook was delivered")
 	}
 	if effective[SetProviderFaults] > 0 && hits == 0 {
 		add("vacuous: provider faults were set but never fired")
@@ -286,8 +286,8 @@ func (r *Report) Text() string {
 	}
 	fmt.Fprintf(&b, "fenced commits: %d\nin-doubt resolved: %d\n", r.FencedCommits, r.InDoubtResolved)
 	fmt.Fprintf(&b, "callback polls: %d (payouts that waited: %d)\n", r.CallbackPolls, r.PayoutsWaited)
-	fmt.Fprintf(&b, "webhooks: %d applied, %d duplicates, %d deferred, %d stale ignored, %d in flight at the verdict\n",
-		r.Webhooks.Applied, r.Webhooks.Duplicates, r.Webhooks.Deferred, r.Webhooks.StaleIgnored, r.WebhooksInFlight)
+	fmt.Fprintf(&b, "webhooks: %d applied, %d duplicates, %d deferred, %d stale delivered (%d ignored as stale), %d in flight at the verdict\n",
+		r.Webhooks.Applied, r.Webhooks.Duplicates, r.Webhooks.Deferred, r.Webhooks.StaleDelivered, r.Webhooks.StaleIgnored, r.WebhooksInFlight)
 
 	fmt.Fprintf(&b, "crash restarts:\n")
 	for _, name := range slices.Sorted(maps.Keys(r.Restarts)) {
@@ -347,8 +347,12 @@ type WebhookCounts struct {
 	Applied    int `json:"applied"`
 	Duplicates int `json:"duplicates"`
 	Deferred   int `json:"deferred"`
-	// StaleIgnored counts reordered (stale) events recognised as stale.
-	StaleIgnored int `json:"stale_ignored"`
+	// StaleIgnored counts reordered (stale) events recognised as stale;
+	// StaleDelivered counts every stale event the provider delivered, whatever
+	// its correct outcome (ignored, or applied with the re-checked state on a
+	// payout still waiting): I10 judges each one.
+	StaleIgnored   int `json:"stale_ignored"`
+	StaleDelivered int `json:"stale_delivered"`
 }
 
 // armedFailpoints lists the failpoint names in comma-separated specs

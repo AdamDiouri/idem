@@ -345,6 +345,11 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		return rep, err
 	}
 	rep.Violations = append(rep.Violations, webhookViolations...)
+	for _, d := range deliveries {
+		if d.Stale && d.Delivered {
+			rep.Webhooks.StaleDelivered++
+		}
+	}
 	if rep.NeedsAttention, err = invariants.NeedsAttention(ctx, pool); err != nil {
 		return rep, err
 	}

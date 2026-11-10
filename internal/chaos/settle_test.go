@@ -36,16 +36,23 @@ func TestReport_WebhookPathMustDoWork(t *testing.T) {
 	require.Contains(t, strings.Join(r.Reasons, "\n"), "vacuous: no webhook completed a payout")
 
 	r = healthy()
-	r.Webhooks.Applied = 3
 	r.Evaluate()
-	require.NotContains(t, strings.Join(r.Reasons, "\n"), "no reordered webhook was recognised as stale",
+	require.NotContains(t, strings.Join(r.Reasons, "\n"), "no reordered webhook was delivered",
 		"short runs have no reserved reorder window")
 
 	r = healthy()
 	r.Config.Duration = time.Minute
-	r.Webhooks.Applied = 3
 	r.Evaluate()
-	require.Contains(t, strings.Join(r.Reasons, "\n"), "vacuous: no reordered webhook was recognised as stale")
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "vacuous: no reordered webhook was delivered")
+
+	// Final review, minor 8: a stale event that reached a waiting payout is
+	// applied with the re-checked state, not ignored; it still counts as the
+	// reorder fault doing its work (I10 judges each outcome).
+	r = healthy()
+	r.Config.Duration = time.Minute
+	r.Webhooks.StaleIgnored, r.Webhooks.StaleDelivered = 0, 3
+	r.Evaluate()
+	require.NotContains(t, strings.Join(r.Reasons, "\n"), "reordered")
 }
 
 // Slice 2.3b: chaos runs idem's processes as the restricted application user,
