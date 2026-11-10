@@ -350,3 +350,32 @@ func TestCheckLiveness_ReportsLeftoverSteps(t *testing.T) {
 	require.NoError(t, err)
 	requireViolation(t, v, "I4", wf, "IN_DOUBT")
 }
+
+// Slice 2.2, I10: the fake provider never truly contradicts itself, so any
+// CONFLICT means idem misread it.
+func TestCheck_I10_ConflictIsViolation(t *testing.T) {
+	e := setup(t)
+	wf, step := newWorkflow(t, e.pool)
+	_, err := e.pool.Exec(context.Background(), `INSERT INTO webhook_inbox (provider_event_id, type, payload, status, step_id, note)
+		VALUES ('evt_c', 'payout.paid', '{}', 'CONFLICT', $1, 'provider says paid po_1, idem recorded not paid')`, step)
+	require.NoError(t, err)
+	v := only(e.check(t), "I10")
+	require.Len(t, v, 1)
+	require.Equal(t, wf.String(), v[0].WorkflowID)
+	require.Contains(t, v[0].Detail, "evt_c")
+}
+
+// Slice 2.2, I4 extended: after quiescence no inbox event is still pending.
+func TestCheckLiveness_ReportsPendingInbox(t *testing.T) {
+	ctx := context.Background()
+	e := setup(t)
+	wf, _ := newWorkflow(t, e.pool)
+	e.setStatus(t, wf, "SUCCEEDED")
+	_, err := e.pool.Exec(ctx, `INSERT INTO webhook_inbox (provider_event_id, type, payload) VALUES ('evt_p', 'payout.paid', '{}')`)
+	require.NoError(t, err)
+	v, err := invariants.CheckLiveness(ctx, e.pool)
+	require.NoError(t, err)
+	require.Len(t, v, 1)
+	require.Equal(t, "I4", v[0].Invariant)
+	require.Contains(t, v[0].Detail, "evt_p")
+}

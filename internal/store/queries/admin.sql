@@ -4,7 +4,10 @@
 -- so it identifies what the operator saw.
 SELECT DISTINCT ON (w.id)
   w.id AS workflow_id, w.version, s.id AS step_id, s.name, s.status, s.dead_reason, s.last_error, s.attempt_count, s.poll_count, w.input,
-  (EXTRACT(EPOCH FROM (now() - w.updated_at)) * 1000)::bigint AS parked_ms
+  (EXTRACT(EPOCH FROM (now() - w.updated_at)) * 1000)::bigint AS parked_ms,
+  -- The provider's latest news about this step (D18), if any.
+  COALESCE((SELECT i.note FROM webhook_inbox i WHERE i.step_id = s.id AND i.status = 'EVIDENCE'
+            ORDER BY i.processed_at DESC LIMIT 1), '')::text AS evidence
 FROM workflows w
 JOIN steps s ON s.workflow_id = w.id AND s.status IN ('DEAD', 'FAILED_PERMANENT')
 WHERE w.status = 'NEEDS_ATTENTION'
@@ -71,3 +74,18 @@ SELECT EXISTS (
 SELECT EXISTS (
   SELECT 1 FROM steps WHERE provider_ref = sqlc.arg(provider_ref) AND id <> sqlc.arg(step_id)
 )::bool AS used;
+
+-- name: ListConflicts :many
+-- Provider news that truly contradicts idem (D16): money may have moved both ways.
+SELECT i.provider_event_id, i.type, COALESCE(i.note, '')::text AS note, i.received_at, s.id AS step_id, s.workflow_id
+FROM webhook_inbox i JOIN steps s ON s.id = i.step_id
+WHERE i.status = 'CONFLICT'
+ORDER BY i.received_at;
+
+-- name: ResolveConflict :one
+-- A human resolved a conflict outside idem (e.g. clawed money back).
+UPDATE webhook_inbox i
+SET status = 'CONFLICT_RESOLVED'
+FROM steps s
+WHERE i.provider_event_id = sqlc.arg(provider_event_id) AND i.status = 'CONFLICT' AND s.id = i.step_id
+RETURNING s.workflow_id, s.id AS step_id, COALESCE(i.note, '')::text AS note;

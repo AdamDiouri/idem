@@ -70,6 +70,17 @@ func Check(ctx context.Context, pool *pgxpool.Pool, effects []fakeprovider.Effec
 	}
 	violations = append(violations, checkTerminalStates(effects, terminal)...)
 
+	conflicts, err := q.ConflictEvents(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query conflicts: %w", err)
+	}
+	for _, c := range conflicts {
+		// I10: the fake provider never truly contradicts itself, so a
+		// conflict means idem misread its news.
+		violations = append(violations, Violation{Invariant: "I10", WorkflowID: c.WorkflowID.String(),
+			Detail: fmt.Sprintf("provider event %s: %s", c.ProviderEventID, c.Note)})
+	}
+
 	keyViolations, err := checkKeys(ctx, q)
 	if err != nil {
 		return nil, err

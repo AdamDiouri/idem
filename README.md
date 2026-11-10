@@ -56,7 +56,9 @@ FAILED          refund ──ok──▶ COMPENSATED
 
 Magic test IDs in the fake provider: customers starting with `cus_decline` are declined; merchants starting with `mer_invalid` have an invalid account, so the payout fails and the customer is refunded.
 
-Payouts are **asynchronous**, like real ones. The provider answers `202 pending`, and the payout settles `FAKEPROVIDER_PAYOUT_SETTLE` later (default `2s`). The payout step waits in `AWAITING_CALLBACK`, and workers poll `GET /payouts/{id}` after `IDEM_CALLBACK_DEADLINE`. The `payout_fail` fault makes an accepted payout settle `failed`. `FAKEPROVIDER_HANG` (default `30s`) sets how long timeout faults hang; chaos uses `3s`. Watch a compensation:
+Payouts are **asynchronous**, like real ones. The provider answers `202 pending`, and the payout settles `FAKEPROVIDER_PAYOUT_SETTLE` later (default `2s`). The payout step waits in `AWAITING_CALLBACK`, and workers poll `GET /payouts/{id}` after `IDEM_CALLBACK_DEADLINE`. The `payout_fail` fault makes an accepted payout settle `failed`. With `FAKEPROVIDER_WEBHOOK_URL` and `FAKEPROVIDER_WEBHOOK_SECRET`, the fake provider also announces each settled payout by **signed webhook**; idem's API verifies it (`IDEM_PROVIDER_WEBHOOK_SECRETS`: current secret first, then the previous one while rotating; the endpoint is off without one), stores it in an inbox, and workers apply it. Compose wires this up, so a payout completes about 2 seconds after it is accepted.
+
+**Rotating the webhook secret without losing events:** set `IDEM_PROVIDER_WEBHOOK_SECRETS=<new>,<old>` on the API and restart it (both verify), switch the provider to the new secret, and once no `bad_signature` failures remain, drop the old one. `FAKEPROVIDER_HANG` (default `30s`) sets how long timeout faults hang; chaos uses `3s`. Watch a compensation:
 
 ```bash
 curl -s -X POST localhost:8080/workflows -H 'Authorization: Bearer demo-token-0123456789' \
@@ -95,7 +97,9 @@ docker compose exec postgres psql -U idem -c "select name, status, dead_reason f
 
 A `500` is ambiguous, so the reason says money may have moved. With `rate_limit` it would be `attempts_exhausted_no_effect`. The sweeper also logs `workflow stuck` for workflows that have not progressed for `IDEM_STUCK_AFTER`.
 
-Failpoints crash or pause a worker at a named point (`after_claim`, `before_provider_call`, `after_provider_call`, `before_commit`, `after_commit`), e.g. `IDEM_FAILPOINTS=after_provider_call=exit@0.2` on the worker.
+Failpoints crash or pause a process at a named point, e.g. `IDEM_FAILPOINTS=after_provider_call=exit@0.2` on the worker:
+- **worker:** `after_claim`, `before_provider_call`, `after_provider_call`, `before_commit`, `after_commit`, and `inbox_before_commit` (applying a provider webhook)
+- **api:** `webhook_after_insert` (a webhook stored but not yet acknowledged)
 
 ```bash
 make down
@@ -205,6 +209,8 @@ go test -tags chaos ./internal/chaos/   # 30s chaos campaign as a test (after ma
 | `IDEM_HTTP_WRITE_TIMEOUT` | `15s` | |
 | `IDEM_FEE_RATE_BPS` | `150` | Fee rate in basis points (0 to 10000) |
 | `IDEM_FEE_FIXED_CENTS` | `25` | Fixed fee in cents |
+| `IDEM_PROVIDER_WEBHOOK_SECRETS` | (none: endpoint off) | Secrets that verify `POST /webhooks/provider`: the current one first, then the previous one while rotating; each at least 16 characters, spaces trimmed |
+| `IDEM_FAILPOINTS` | (none) | On the API: `webhook_after_insert=…` (see failpoints above) |
 | `IDEM_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
 Worker, sweeper and `check` (no API tokens needed):
@@ -226,6 +232,8 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_CALLBACK_POLL_CAP` | `1h` | Polls back off from `IDEM_RETRY_BASE` up to this; at least `IDEM_RETRY_BASE` |
 | `IDEM_CALLBACK_MAX_WAIT` | `72h` | Total wait since the provider accepted a payout before it is `callback_unresolved` (bank payouts take hours or days); longer than the deadline |
 | `IDEM_CALLBACK_MAX_POLLS` | `0` | Optional limit on polls per acceptance; `0` means none |
+| `IDEM_INBOX_ORPHAN_AFTER` | `1h` | A provider webhook that matches no payout this long is ignored as an orphan |
+| `IDEM_INBOX_RETENTION` | `720h` | The sweeper deletes processed and ignored provider events older than this; evidence and conflicts are kept |
 | `IDEM_WORKER_ID` | `hostname-pid` | |
 | `IDEM_METRICS_ADDR` | `:8090` | Where worker/sweeper serve `/metrics`; `off` disables |
 | `IDEM_FAILPOINTS` | (none) | `name=exit\|panic\|sleep:<d>[@probability],...` |

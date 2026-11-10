@@ -69,6 +69,7 @@ func TestAdminCLI_ListTable(t *testing.T) {
 	require.Contains(t, out, "REASON")
 	require.Contains(t, out, "VERSION")
 	require.Contains(t, out, "POLLS")
+	require.Contains(t, out, "PROVIDER SAYS")
 	require.Contains(t, out, wf.String())
 	require.Contains(t, out, "attempts_exhausted_no_effect")
 }
@@ -155,4 +156,23 @@ func TestAdminCLI_StaleVersionIsRefused(t *testing.T) {
 	require.Equal(t, 1, code, out)
 	require.Contains(t, out, "stale")
 	require.Contains(t, out, "admin list")
+}
+
+// Slice 2.2: real conflicts are listed and resolved from the CLI.
+func TestAdminCLI_ConflictListAndResolve(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	_, step := parkedCharge(t, pool)
+	_, err := pool.Exec(context.Background(), `INSERT INTO webhook_inbox (provider_event_id, type, payload, status, step_id, note)
+		VALUES ('evt_cli', 'payout.paid', '{}', 'CONFLICT', $1, 'provider says paid po_1, idem recorded not paid')`, step)
+	require.NoError(t, err)
+
+	code, out := admin(t, "conflict", "list")
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "evt_cli")
+	code, out = admin(t, "conflict", "resolve", "evt_cli", "--reason", "clawed back")
+	require.Equal(t, 0, code, out)
+	code, out = admin(t, "conflict", "resolve", "evt_cli", "--reason", "again")
+	require.Equal(t, 1, code, out)
+	code, _ = admin(t, "conflict", "resolve", "evt_cli")
+	require.Equal(t, 2, code, "missing --reason")
 }

@@ -23,6 +23,7 @@ idem admin list --json                   # with amounts, customer and merchant
 | `REASON` | the `dead_reason`; for a refused refund, `refused`. The sections below are named after these reasons |
 | `ATTEMPTS` | how many times it was sent |
 | `POLLS` | how many times idem asked the provider about an accepted payout |
+| `PROVIDER SAYS` | the provider's latest news about this step, received by webhook and re-checked with the provider (e.g. `provider says paid po_…`). **Use it**: it is usually the answer you would otherwise look up |
 | `LAST ERROR` | the last error the worker saw |
 
 Useful context for any workflow:
@@ -117,6 +118,12 @@ The provider **accepted** the payout (`202`, a `po_…` reference), but it was s
 3. **Failed:** run `idem admin compensate <workflow> --expect-version <V> --confirm-no-effect --reason …`. The workflow ends `COMPENSATED`.
 4. **Still pending** (the provider is slow): run `idem admin retry-step <step> --expect-version <V> --reason …`. The same key is re-sent, the provider replays the same payout, and polling resumes. Never use `new-generation` while the old payout can still settle: that could pay twice.
 
+### Provider news about a parked workflow (`PROVIDER SAYS`)
+
+When a webhook arrives for a parked step, idem re-checks it with the provider and shows it in the `PROVIDER SAYS` column. It never resolves the workflow by itself (money decisions made under doubt end with a human).
+- `provider says paid po_…` → `confirm-step <step> --provider-ref po_… --expect-version <V> --reason …`.
+- `provider says failed: …` → for a payout, `compensate <workflow> --expect-version <V> --confirm-no-effect --reason …`.
+
 ### refused (refund `FAILED_PERMANENT`)
 
 The customer was charged and the provider **refused** the refund (e.g. `422 invalid_refund`): wrong charge reference, amount above what is left, or the charge already refunded elsewhere.
@@ -170,6 +177,45 @@ A sweeper is up, but has not refreshed its state gauges for 2 minutes. Its snaps
 ### IdemProviderSlow
 
 The provider's p99 latency is above 2s. Expect more timeouts, and so more in-doubt steps. Check the provider's status; consider lowering concurrency or raising `IDEM_PROVIDER_TIMEOUT` (it must stay below the lease TTL minus 2s).
+
+### IdemWebhookConflict
+
+**Page.** The provider's current state contradicts what idem recorded, for example "paid" for a payout idem recorded as failed, or after an operator compensated. **Money may have moved both ways** (the merchant paid *and* the customer refunded). idem never flips a decided result and never stops a refund half way, so the fix happens outside idem.
+1. `idem admin conflict list` shows the event, the workflow and what each side says.
+2. Confirm at the provider (the payout's `po_…` and its history), and recover the money (e.g. claw back from the merchant, or re-charge with the customer's consent).
+3. `idem admin conflict resolve <event-id> --reason "what was done"` records it (audited) and clears the alert.
+
+### IdemInboxBacklog
+
+Provider webhooks are stored but not being applied (oldest pending > 10 minutes). Usually the workers are down or failing; check worker logs for `inbox event` errors. Payouts are not stuck meanwhile: polling still settles them, just more slowly. An event that never matches a payout is ignored as an orphan after `IDEM_INBOX_ORPHAN_AFTER` (see `IdemWebhookOrphans`). Processed and ignored events are deleted after `IDEM_INBOX_RETENTION` (default 30 days); evidence and conflicts are kept.
+
+### IdemWebhookOrphans
+
+Provider webhooks arrived for payouts idem has no record of, and stayed unmatched for `IDEM_INBOX_ORPHAN_AFTER` (default 1h). They are ignored (`webhook_inbox` status `IGNORED`, note `orphan`) and never applied. Possible causes:
+- a provider bug, or events meant for another environment sharing the endpoint (check the signing secret)
+- a payout created outside idem
+- rarely, a payout idem sent but never recorded; reconciliation (slice 2.6) will report it as `missing_in_ledger`
+
+Find them with `SELECT provider_event_id, received_at, payload FROM webhook_inbox WHERE note = 'orphan' ORDER BY received_at DESC`.
+
+**Other events idem ignores, without alerting** (also counted in `idem_webhooks_applied_total{outcome}`):
+- `stale`: a late or reordered event that the provider's current state contradicts; idem was right
+- `unsupported event type …`: an event type idem does not act on
+- `mismatch`: an event whose amount or currency differs from the payout it names; logged as a warning, never applied
+- `malformed`: an event that is not a valid payout event
+
+### IdemCallbacksOverdue
+
+Waiting payouts are more than 5 minutes past their next poll: the workers are not keeping up, or are down. Webhooks may still settle them; if not, the stuck alert follows.
+
+### IdemWebhookSignatureFailures
+
+Provider webhooks keep failing verification (`bad_signature` or `stale`). Likely causes: the provider's secret changed and idem's did not, a server clock far off (5-minute tolerance), or someone forging requests. Nothing that fails verification is stored or acted on.
+
+**Rotating the webhook secret without losing events:**
+1. Set `IDEM_PROVIDER_WEBHOOK_SECRETS=<new>,<old>` on the API and restart it: both verify.
+2. Switch the provider to the new secret.
+3. When the failures stay at zero, set `IDEM_PROVIDER_WEBHOOK_SECRETS=<new>`.
 
 ## 5. Worked example (compose)
 

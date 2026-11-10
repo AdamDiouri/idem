@@ -186,6 +186,32 @@ func TestSweeper_ScheduledCallbackWaitIsNotIdle(t *testing.T) {
 	}
 }
 
+// Slice 2.2: the sweeper exports the inbox backlog, open conflicts and
+// overdue callbacks.
+func TestSweeper_ExportsInboxAndCallbackGauges(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	step := scalar[uuid.UUID](t, h.pool, `SELECT id FROM steps WHERE workflow_id = $1`, wf)
+	_, err := h.pool.Exec(ctx, `UPDATE workflows SET status = 'RUNNING' WHERE id = $1`, wf)
+	require.NoError(t, err)
+	_, err = h.pool.Exec(ctx, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_x',
+		callback_deadline = now() - interval '10 minutes', run_after = now() + interval '1 hour' WHERE id = $1`, step)
+	require.NoError(t, err)
+	_, err = h.pool.Exec(ctx, `INSERT INTO webhook_inbox (provider_event_id, type, payload, received_at) VALUES
+		('evt_pending', 'payout.paid', '{}', now() - interval '1 hour')`)
+	require.NoError(t, err)
+	_, err = h.pool.Exec(ctx, `INSERT INTO webhook_inbox (provider_event_id, type, payload, status, step_id) VALUES
+		('evt_conflict', 'payout.paid', '{}', 'CONFLICT', $1)`, step)
+	require.NoError(t, err)
+
+	m := sweepOnce(t, h)
+	require.Equal(t, 1.0, testutil.ToFloat64(m.InboxPending))
+	require.GreaterOrEqual(t, testutil.ToFloat64(m.InboxOldestPending), 3500.0)
+	require.Equal(t, 1.0, testutil.ToFloat64(m.ConflictsOpen))
+	require.Equal(t, 1.0, testutil.ToFloat64(m.CallbacksOverdue))
+}
+
 // Review focus: labels must stay bounded — no IDs, keys or error text.
 func TestMetrics_NoUnboundedLabels(t *testing.T) {
 	h := newHarness(t)
@@ -239,4 +265,36 @@ func TestSweeper_OverLimitIgnoresFinishedSteps(t *testing.T) {
 	})
 	require.Eventually(t, func() bool { return testutil.ToFloat64(m.LastSnapshot) > 0 }, 2*time.Second, 10*time.Millisecond)
 	require.Equal(t, 1.0, testutil.ToFloat64(m.StepsOverLimit), "only the unfinished step counts")
+}
+
+// Minor fix: the inbox does not grow forever. Old PROCESSED and IGNORED
+// events are pruned; evidence, conflicts (open or resolved) and pending
+// events are kept whatever their age.
+func TestSweeper_PrunesOldInboxEvents(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	for id, row := range map[string]string{
+		"evt_old_processed": "PROCESSED", "evt_old_ignored": "IGNORED", "evt_old_evidence": "EVIDENCE",
+		"evt_old_resolved": "CONFLICT_RESOLVED", "evt_old_conflict": "CONFLICT",
+	} {
+		_, err := h.pool.Exec(ctx, `INSERT INTO webhook_inbox (provider_event_id, type, payload, status, processed_at)
+			VALUES ($1, 'payout.paid', '{}', $2, now() - interval '40 days')`, id, row)
+		require.NoError(t, err)
+	}
+	_, err := h.pool.Exec(ctx, `INSERT INTO webhook_inbox (provider_event_id, type, payload, status, processed_at)
+		VALUES ('evt_recent', 'payout.paid', '{}', 'PROCESSED', now() - interval '1 day')`)
+	require.NoError(t, err)
+
+	cancel, done := runInBackground(t, func(ctx context.Context) error {
+		return engine.RunSweeper(ctx, h.pool, engine.SweeperOptions{
+			Interval: 10 * time.Millisecond, StuckAfter: time.Hour, Logger: slog.New(slog.DiscardHandler),
+			InboxRetention: 30 * 24 * time.Hour,
+		})
+	})
+	require.Eventually(t, func() bool {
+		return h.count(t, `SELECT count(*) FROM webhook_inbox WHERE provider_event_id IN ('evt_old_processed', 'evt_old_ignored')`) == 0
+	}, 2*time.Second, 10*time.Millisecond)
+	cancel()
+	<-done
+	require.Equal(t, 4, h.count(t, `SELECT count(*) FROM webhook_inbox`), "evidence, conflicts and recent events stay")
 }

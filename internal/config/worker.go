@@ -41,10 +41,16 @@ type WorkerConfig struct {
 	CallbackPollCap  time.Duration `env:"IDEM_CALLBACK_POLL_CAP" envDefault:"1h"`
 	CallbackMaxWait  time.Duration `env:"IDEM_CALLBACK_MAX_WAIT" envDefault:"72h"`
 	CallbackMaxPolls int32         `env:"IDEM_CALLBACK_MAX_POLLS" envDefault:"0"`
-	SweepInterval    time.Duration `env:"IDEM_SWEEP_INTERVAL" envDefault:"5s"`
-	WorkerID         string        `env:"IDEM_WORKER_ID"`  // empty → hostname-pid
-	Failpoints       string        `env:"IDEM_FAILPOINTS"` // see failpoint.EnableFromEnv
-	LogLevel         string        `env:"IDEM_LOG_LEVEL" envDefault:"info"`
+	// InboxOrphanAfter: a provider webhook that still matches no step this
+	// long after it arrived is ignored as an orphan (and counted).
+	InboxOrphanAfter time.Duration `env:"IDEM_INBOX_ORPHAN_AFTER" envDefault:"1h"`
+	// InboxRetention: processed and ignored provider events older than this
+	// are pruned by the sweeper; evidence and conflicts are kept.
+	InboxRetention time.Duration `env:"IDEM_INBOX_RETENTION" envDefault:"720h"`
+	SweepInterval  time.Duration `env:"IDEM_SWEEP_INTERVAL" envDefault:"5s"`
+	WorkerID       string        `env:"IDEM_WORKER_ID"`  // empty → hostname-pid
+	Failpoints     string        `env:"IDEM_FAILPOINTS"` // see failpoint.EnableFromEnv
+	LogLevel       string        `env:"IDEM_LOG_LEVEL" envDefault:"info"`
 	// MetricsAddr is where worker and sweeper serve /metrics ("off" disables). The
 	// default stays outside 9100-9999, which Prometheus allocates to exporters
 	// (node_exporter is 9100 and runs on most monitored hosts).
@@ -110,6 +116,12 @@ func (c WorkerConfig) validate() error {
 	if c.CallbackMaxWait <= c.CallbackDeadline {
 		return fmt.Errorf("IDEM_CALLBACK_MAX_WAIT (%s) must be longer than IDEM_CALLBACK_DEADLINE (%s)",
 			c.CallbackMaxWait, c.CallbackDeadline)
+	}
+	if c.InboxOrphanAfter <= 0 {
+		return fmt.Errorf("IDEM_INBOX_ORPHAN_AFTER must be positive")
+	}
+	if c.InboxRetention <= 0 {
+		return fmt.Errorf("IDEM_INBOX_RETENTION must be positive")
 	}
 	if c.CallbackPollCap < c.RetryBase {
 		return fmt.Errorf("IDEM_CALLBACK_POLL_CAP (%s) must be at least IDEM_RETRY_BASE (%s)", c.CallbackPollCap, c.RetryBase)

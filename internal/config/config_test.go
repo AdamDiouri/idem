@@ -23,6 +23,7 @@ func setRequired(t *testing.T) {
 	for _, k := range []string{
 		"IDEM_HTTP_ADDR", "IDEM_IDEMPOTENCY_LOCK_TIMEOUT", "IDEM_REQUEST_TIMEOUT", "IDEM_HTTP_WRITE_TIMEOUT",
 		"IDEM_FEE_RATE_BPS", "IDEM_FEE_FIXED_CENTS", "IDEM_LOG_LEVEL",
+		"IDEM_PROVIDER_WEBHOOK_SECRETS", "IDEM_FAILPOINTS",
 	} {
 		t.Setenv(k, "")
 	}
@@ -80,4 +81,37 @@ func TestLoad_Invalid(t *testing.T) {
 			require.Contains(t, err.Error(), c.wantVar)
 		})
 	}
+}
+
+// Slice 2.2: webhook secrets (current first, then previous) and API failpoints.
+func TestLoad_WebhookSecretsAndFailpoints(t *testing.T) {
+	setRequired(t)
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	require.Empty(t, cfg.ProviderWebhookSecrets, "off unless configured")
+
+	t.Setenv("IDEM_PROVIDER_WEBHOOK_SECRETS", "whsec_new_0123456789,whsec_old_0123456789")
+	cfg, err = config.Load()
+	require.NoError(t, err)
+	require.Equal(t, []string{"whsec_new_0123456789", "whsec_old_0123456789"}, cfg.ProviderWebhookSecrets)
+
+	t.Setenv("IDEM_FAILPOINTS", "webhook_after_insert=exit")
+	_, err = config.Load()
+	require.NoError(t, err)
+	t.Setenv("IDEM_FAILPOINTS", "nope=exit")
+	_, err = config.Load()
+	require.ErrorContains(t, err, "IDEM_FAILPOINTS")
+}
+
+// Minor fix: secrets are trimmed, and an empty entry is refused, so
+// "a, b" does not silently keep a secret that can never match.
+func TestLoad_WebhookSecretsTrimmed(t *testing.T) {
+	setRequired(t)
+	t.Setenv("IDEM_PROVIDER_WEBHOOK_SECRETS", " whsec_new_0123456789 , whsec_old_0123456789")
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	require.Equal(t, []string{"whsec_new_0123456789", "whsec_old_0123456789"}, cfg.ProviderWebhookSecrets)
+	t.Setenv("IDEM_PROVIDER_WEBHOOK_SECRETS", "whsec_new_0123456789,,")
+	_, err = config.Load()
+	require.ErrorContains(t, err, "IDEM_PROVIDER_WEBHOOK_SECRETS")
 }

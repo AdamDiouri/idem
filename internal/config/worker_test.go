@@ -17,7 +17,7 @@ func setWorkerRequired(t *testing.T) {
 		"IDEM_API_TOKENS", "IDEM_PROVIDER_TIMEOUT", "IDEM_LEASE_TTL", "IDEM_POLL_INTERVAL",
 		"IDEM_RETRY_BASE", "IDEM_RETRY_CAP", "IDEM_PROVIDER_KEY_RETENTION", "IDEM_KEY_RETENTION_MARGIN",
 		"IDEM_SHUTDOWN_GRACE", "IDEM_STUCK_AFTER", "IDEM_METRICS_ADDR", "IDEM_CALLBACK_DEADLINE", "IDEM_CALLBACK_MAX_POLLS",
-		"IDEM_CALLBACK_MAX_WAIT", "IDEM_CALLBACK_POLL_CAP",
+		"IDEM_CALLBACK_MAX_WAIT", "IDEM_CALLBACK_POLL_CAP", "IDEM_INBOX_ORPHAN_AFTER", "IDEM_INBOX_RETENTION",
 		"IDEM_SWEEP_INTERVAL", "IDEM_WORKER_ID", "IDEM_FAILPOINTS", "IDEM_LOG_LEVEL",
 	} {
 		t.Setenv(k, "")
@@ -46,6 +46,8 @@ func TestLoadWorker_Defaults(t *testing.T) {
 	require.Equal(t, int32(0), cfg.CallbackMaxPolls, "no poll count limit by default")
 	require.Equal(t, 72*time.Hour, cfg.CallbackMaxWait)
 	require.Equal(t, time.Hour, cfg.CallbackPollCap)
+	require.Equal(t, time.Hour, cfg.InboxOrphanAfter)
+	require.Equal(t, 30*24*time.Hour, cfg.InboxRetention)
 	require.Equal(t, ":8090", cfg.MetricsAddr, "outside 9100-9999, the exporter range (node_exporter is 9100)")
 }
 
@@ -84,6 +86,8 @@ func TestLoadWorker_Invalid(t *testing.T) {
 		{"zero callback max wait", "IDEM_CALLBACK_MAX_WAIT", "0s", "IDEM_CALLBACK_MAX_WAIT"},
 		{"max wait not above deadline", "IDEM_CALLBACK_MAX_WAIT", "10m", "IDEM_CALLBACK_MAX_WAIT"},
 		{"poll cap below retry base", "IDEM_CALLBACK_POLL_CAP", "1s", "IDEM_CALLBACK_POLL_CAP"},
+		{"zero orphan threshold", "IDEM_INBOX_ORPHAN_AFTER", "0s", "IDEM_INBOX_ORPHAN_AFTER"},
+		{"zero inbox retention", "IDEM_INBOX_RETENTION", "0s", "IDEM_INBOX_RETENTION"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

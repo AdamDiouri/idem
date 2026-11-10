@@ -259,6 +259,35 @@ func (q *Queries) FinishStepAttempt(ctx context.Context, arg FinishStepAttemptPa
 	return err
 }
 
+const inboxStats = `-- name: InboxStats :one
+SELECT
+  (SELECT count(*) FROM webhook_inbox WHERE status = 'PENDING')::int AS pending,
+  COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(received_at))) * 1000 FROM webhook_inbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms,
+  (SELECT count(*) FROM webhook_inbox WHERE status = 'CONFLICT')::int AS conflicts_open,
+  (SELECT count(*) FROM steps WHERE status = 'AWAITING_CALLBACK' AND callback_deadline < now() - interval '5 minutes')::int AS callbacks_overdue
+`
+
+type InboxStatsRow struct {
+	Pending          int32
+	OldestPendingMs  int64
+	ConflictsOpen    int32
+	CallbacksOverdue int32
+}
+
+// For the sweeper's gauges: the inbox backlog, open conflicts, and waiting
+// steps whose poll is more than 5 minutes overdue (polls are not keeping up).
+func (q *Queries) InboxStats(ctx context.Context) (InboxStatsRow, error) {
+	row := q.db.QueryRow(ctx, inboxStats)
+	var i InboxStatsRow
+	err := row.Scan(
+		&i.Pending,
+		&i.OldestPendingMs,
+		&i.ConflictsOpen,
+		&i.CallbacksOverdue,
+	)
+	return i, err
+}
+
 const insertStepAttempt = `-- name: InsertStepAttempt :exec
 INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id, kind)
 VALUES ($1, $2, $3, $4, $5)

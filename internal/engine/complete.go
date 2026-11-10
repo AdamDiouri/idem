@@ -38,24 +38,8 @@ func Complete(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, r Result, 
 		return ErrFenced
 	}
 
-	switch r.Kind {
-	case ResultSucceeded:
-		if err := runHook(func() error { return step.OnSuccess(ctx, q, s, r.ProviderRef) }); err != nil {
-			return fmt.Errorf("%s on success: %w", s.Name, err)
-		}
-	case ResultFailedPermanent:
-		if err := runHook(func() error { return step.OnPermanentFailure(ctx, q, s) }); err != nil {
-			return fmt.Errorf("%s on permanent failure: %w", s.Name, err)
-		}
-	case ResultInDoubt, ResultRetryNoEffect, ResultAwaitingCallback:
-		// No hook: nothing is known to have happened (or not yet), so nothing
-		// else may change.
-	case ResultDead:
-		if err := transitionWorkflow(ctx, q, s.WorkflowID, []string{wfRunning, wfCompensating}, wfNeedsAttention); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unknown result kind %q", r.Kind)
+	if err := applyResult(ctx, q, s, r, step); err != nil {
+		return err
 	}
 
 	var httpStatus *int32
@@ -118,4 +102,31 @@ func optional(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// applyResult runs what follows a step's compare-and-swap, inside the same
+// transaction: the step's success or failure hook (ledger posting, saga move)
+// or the workflow's parking. Worker completions and provider webhooks (the
+// inbox) share it, so both paths move money and the saga identically.
+func applyResult(ctx context.Context, q *db.Queries, s ClaimedStep, r Result, step Step) error {
+	switch r.Kind {
+	case ResultSucceeded:
+		if err := runHook(func() error { return step.OnSuccess(ctx, q, s, r.ProviderRef) }); err != nil {
+			return fmt.Errorf("%s on success: %w", s.Name, err)
+		}
+	case ResultFailedPermanent:
+		if err := runHook(func() error { return step.OnPermanentFailure(ctx, q, s) }); err != nil {
+			return fmt.Errorf("%s on permanent failure: %w", s.Name, err)
+		}
+	case ResultInDoubt, ResultRetryNoEffect, ResultAwaitingCallback:
+		// No hook: nothing is known to have happened (or not yet), so nothing
+		// else may change.
+	case ResultDead:
+		if err := transitionWorkflow(ctx, q, s.WorkflowID, []string{wfRunning, wfCompensating}, wfNeedsAttention); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unknown result kind %q", r.Kind)
+	}
+	return nil
 }

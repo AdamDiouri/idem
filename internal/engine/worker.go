@@ -294,6 +294,9 @@ type SweeperOptions struct {
 	StuckAfter time.Duration // workflows unchanged this long are reported as stuck
 	Logger     *slog.Logger
 	Metrics    *metrics.Metrics // nil disables the state gauges
+	// InboxRetention: PROCESSED and IGNORED provider events older than this
+	// are deleted (0 keeps everything). Evidence and conflicts are kept.
+	InboxRetention time.Duration
 }
 
 // RunSweeper reclaims expired leases every interval until ctx is cancelled,
@@ -314,6 +317,16 @@ func RunSweeper(ctx context.Context, pool *pgxpool.Pool, opts SweeperOptions) er
 		case n > 0:
 			opts.Metrics.AddReclaimed(n)
 			logger.Warn("reclaimed expired leases; steps are now IN_DOUBT", "count", n)
+		}
+
+		if opts.InboxRetention > 0 {
+			pruned, err := db.New(pool).PruneInbox(ctx, opts.InboxRetention.Milliseconds())
+			switch {
+			case err != nil && ctx.Err() == nil:
+				logger.Error("prune inbox", "error", err)
+			case pruned > 0:
+				logger.Info("pruned old provider events", "count", pruned)
+			}
 		}
 
 		stuck, err := FindStuckWorkflows(ctx, pool, opts.StuckAfter)
@@ -376,6 +389,12 @@ func snapshot(ctx context.Context, pool *pgxpool.Pool) (metrics.Snapshot, error)
 	if err != nil {
 		return s, err
 	}
+	inbox, err := q.InboxStats(ctx)
+	if err != nil {
+		return s, err
+	}
+	s.InboxPending, s.ConflictsOpen, s.CallbacksOverdue = int(inbox.Pending), int(inbox.ConflictsOpen), int(inbox.CallbacksOverdue)
+	s.InboxOldestPending = time.Duration(inbox.OldestPendingMs) * time.Millisecond
 	for _, p := range parked {
 		reason := "refused"
 		if p.DeadReason != nil {

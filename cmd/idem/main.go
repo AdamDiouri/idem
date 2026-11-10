@@ -17,8 +17,10 @@ import (
 
 	"github.com/AdamDiouri/idem/internal/api"
 	"github.com/AdamDiouri/idem/internal/config"
+	"github.com/AdamDiouri/idem/internal/failpoint"
 	"github.com/AdamDiouri/idem/internal/metrics"
 	"github.com/AdamDiouri/idem/internal/store"
+	"github.com/AdamDiouri/idem/internal/webhook"
 	"github.com/AdamDiouri/idem/internal/workflow"
 )
 
@@ -103,6 +105,17 @@ func apiCmd() *cobra.Command {
 			}
 			defer pool.Close()
 
+			if cfg.Failpoints != "" {
+				if err := failpoint.EnableFromEnv(cfg.Failpoints); err != nil {
+					return err
+				}
+				logger.Warn("failpoints enabled", "spec", cfg.Failpoints)
+			}
+			var secrets [][]byte
+			for _, s := range cfg.ProviderWebhookSecrets {
+				secrets = append(secrets, []byte(s))
+			}
+
 			fees := workflow.FeeConfig{RateBps: cfg.FeeRateBps, FixedCents: cfg.FeeFixedCents}
 			m := metrics.New() // served on the API's own address at /metrics
 			handler := api.NewServer(api.Options{
@@ -110,6 +123,8 @@ func apiCmd() *cobra.Command {
 				Tokens:         cfg.TokenToClient(),
 				Logger:         logger,
 				RequestTimeout: cfg.RequestTimeout,
+				WebhookSecrets: secrets, // POST /webhooks/provider is off without one
+				Inbox:          webhook.NewInbox(pool),
 			}, workflow.NewSubmitter(pool, cfg.IdempotencyLockTimeout, fees), pool)
 
 			srv := &http.Server{

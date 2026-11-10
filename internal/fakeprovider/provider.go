@@ -48,6 +48,16 @@ type Options struct {
 	// settles (paid, or failed under the payout_fail fault). 0 settles it at
 	// the first read after acceptance.
 	PayoutSettle time.Duration
+
+	// WebhookURL, when set, receives a signed webhook (WebhookSecret) for
+	// every settled payout, retried from WebhookRetryBase (default 1s,
+	// doubling) up to WebhookMaxAttempts (default 8). Delivery needs Run.
+	WebhookURL         string
+	WebhookSecret      []byte
+	WebhookRetryBase   time.Duration
+	WebhookMaxAttempts int
+	// Tick is how often Run settles payouts and delivers webhooks (default 50ms).
+	Tick time.Duration
 }
 
 // Effect is one real movement of money performed by the provider.
@@ -145,13 +155,15 @@ type keyState struct {
 
 // payout is an accepted payout and its settlement.
 type payout struct {
-	id          string
-	key         string
-	req         request
-	status      string // pending | paid | failed
-	failureCode string
-	settleAt    time.Time
-	fail        bool // settles failed (payout_fail fault)
+	id           string
+	key          string
+	req          request
+	status       string // pending | paid | failed
+	failureCode  string
+	settleAt     time.Time
+	fail         bool   // settles failed (payout_fail fault)
+	webhookFault string // drawn once, at acceptance
+	fastHold     bool   // fast_webhook: only its own POST may settle and send it
 }
 
 // failureAccountClosed is the failure_code of a payout the bank rejected.
@@ -164,6 +176,7 @@ type Provider struct {
 	mu       sync.Mutex
 	keys     map[string]*keyState // "<resource>:<key>"
 	payouts  map[string]*payout   // by payout ID
+	webhooks []*delivery          // queue and log of webhook deliveries
 	effects  []Effect
 	calls    map[string]int
 	hits     map[string]int // "<endpoint>/<mode>" → faults fired
@@ -176,6 +189,15 @@ type Provider struct {
 func New(opts Options) *Provider {
 	if opts.Hang <= 0 {
 		opts.Hang = defaultHang
+	}
+	if opts.WebhookRetryBase <= 0 {
+		opts.WebhookRetryBase = time.Second
+	}
+	if opts.WebhookMaxAttempts <= 0 {
+		opts.WebhookMaxAttempts = 8
+	}
+	if opts.Tick <= 0 {
+		opts.Tick = 50 * time.Millisecond
 	}
 	p := &Provider{opts: opts}
 	p.Reset()
@@ -190,6 +212,7 @@ func (p *Provider) Handler() http.Handler {
 		mux.HandleFunc("GET /"+res.name, p.lookup(res))
 	}
 	mux.HandleFunc("GET /payouts/{id}", p.getPayout)
+	mux.HandleFunc("GET /_webhooks", p.getWebhooks)
 	mux.HandleFunc("PUT /_faults", p.putFaults)
 	mux.HandleFunc("GET /_effects", p.getEffects)
 	mux.HandleFunc("GET /_fault_hits", p.getFaultHits)
@@ -254,6 +277,7 @@ func (p *Provider) Reset() {
 	defer p.mu.Unlock()
 	p.keys = map[string]*keyState{}
 	p.payouts = map[string]*payout{}
+	p.webhooks = nil
 	p.effects = nil
 	p.calls = map[string]int{}
 	p.hits = map[string]int{}
@@ -320,6 +344,9 @@ func (p *Provider) create(res resource) http.HandlerFunc {
 		default:
 			status, b = p.perform(res, slot, key, req, false)
 		}
+		if res.async {
+			p.deliverFast(r.Context(), slot) // fast_webhook: before the 202 is written
+		}
 		writeRaw(w, status, b)
 	}
 }
@@ -337,6 +364,14 @@ func (p *Provider) perform(res resource, slot, key string, req request, fail boo
 	id := res.idPrefix + uuid.Must(uuid.NewV7()).String()
 	if res.async {
 		po := &payout{id: id, key: key, req: req, status: "pending", settleAt: time.Now().Add(p.opts.PayoutSettle), fail: fail}
+		if p.opts.WebhookURL != "" {
+			po.webhookFault = p.pickFault(webhooksEndpoint)
+			if po.webhookFault == ModeFastWebhook {
+				// Settles, and its webhook is sent, by this request before the
+				// 202; Run must not take it first.
+				po.settleAt, po.fastHold = time.Now(), true
+			}
+		}
 		p.payouts[id] = po
 		b := mustJSON(payoutJSON(po))
 		p.store(slot, http.StatusAccepted, b)
@@ -492,7 +527,7 @@ func (p *Provider) getPayout(w http.ResponseWriter, r *http.Request) {
 func (p *Provider) settleDueLocked(now time.Time) {
 	var due []*payout
 	for _, po := range p.payouts {
-		if po.status == "pending" && !now.Before(po.settleAt) {
+		if po.status == "pending" && !po.fastHold && !now.Before(po.settleAt) {
 			due = append(due, po)
 		}
 	}
@@ -506,13 +541,14 @@ func (p *Provider) settleDueLocked(now time.Time) {
 	for _, po := range due {
 		if po.fail {
 			po.status, po.failureCode = "failed", failureAccountClosed
-			continue
+		} else {
+			po.status = "paid"
+			p.effects = append(p.effects, Effect{
+				ID: po.id, Type: "payout", WorkflowID: po.req.WorkflowID, IdempotencyKey: po.key,
+				AmountCents: po.req.AmountCents, At: po.settleAt.UTC(),
+			})
 		}
-		po.status = "paid"
-		p.effects = append(p.effects, Effect{
-			ID: po.id, Type: "payout", WorkflowID: po.req.WorkflowID, IdempotencyKey: po.key,
-			AmountCents: po.req.AmountCents, At: po.settleAt.UTC(),
-		})
+		p.enqueueWebhookLocked(po, now)
 	}
 }
 
