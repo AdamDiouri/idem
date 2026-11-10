@@ -53,7 +53,8 @@ func CheckLiveness(ctx context.Context, pool *pgxpool.Pool) ([]Violation, error)
 }
 
 // checkKeys evaluates I6: every inbound idempotency key resolved to exactly
-// one workflow with a stored response, and every workflow came from a key.
+// one workflow with a stored response, and every workflow came from exactly
+// one key.
 func checkKeys(ctx context.Context, q *db.Queries) ([]Violation, error) {
 	orphans, err := q.KeysWithoutWorkflow(ctx)
 	if err != nil {
@@ -73,6 +74,15 @@ func checkKeys(ctx context.Context, q *db.Queries) ([]Violation, error) {
 	}
 	for _, id := range keyless {
 		violations = append(violations, Violation{Invariant: "I6", WorkflowID: id.String(), Detail: "workflow has no idempotency key"})
+	}
+
+	shared, err := q.WorkflowsWithManyKeys(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query workflows with many keys: %w", err)
+	}
+	for _, w := range shared {
+		violations = append(violations, Violation{Invariant: "I6", WorkflowID: w.WorkflowID.String(),
+			Detail: fmt.Sprintf("workflow has %d idempotency keys", w.Keys)})
 	}
 	return violations, nil
 }

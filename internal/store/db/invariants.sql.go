@@ -342,6 +342,36 @@ func (q *Queries) UnsettledSteps(ctx context.Context) ([]UnsettledStepsRow, erro
 	return items, nil
 }
 
+const workflowsWithManyKeys = `-- name: WorkflowsWithManyKeys :many
+SELECT workflow_id, count(*)::int AS keys FROM api_idempotency_keys
+WHERE workflow_id IS NOT NULL GROUP BY workflow_id HAVING count(*) > 1
+`
+
+type WorkflowsWithManyKeysRow struct {
+	WorkflowID *uuid.UUID
+	Keys       int32
+}
+
+func (q *Queries) WorkflowsWithManyKeys(ctx context.Context) ([]WorkflowsWithManyKeysRow, error) {
+	rows, err := q.db.Query(ctx, workflowsWithManyKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WorkflowsWithManyKeysRow
+	for rows.Next() {
+		var i WorkflowsWithManyKeysRow
+		if err := rows.Scan(&i.WorkflowID, &i.Keys); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const workflowsWithoutKey = `-- name: WorkflowsWithoutKey :many
 SELECT w.id FROM workflows w
 WHERE NOT EXISTS (SELECT 1 FROM api_idempotency_keys k WHERE k.workflow_id = w.id)

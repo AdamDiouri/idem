@@ -56,3 +56,7 @@ FROM webhook_inbox i
 LEFT JOIN steps s ON s.id = i.step_id
 LEFT JOIN workflows w ON w.id = s.workflow_id
 ORDER BY i.received_at;
+
+-- name: WorkflowsWithManyKeys :many
+SELECT workflow_id, count(*)::int AS keys FROM api_idempotency_keys
+WHERE workflow_id IS NOT NULL GROUP BY workflow_id HAVING count(*) > 1;

@@ -379,3 +379,22 @@ func TestCheckLiveness_ReportsPendingInbox(t *testing.T) {
 	require.Equal(t, "I4", v[0].Invariant)
 	require.Contains(t, v[0].Detail, "evt_p")
 }
+
+// Slice 2.3b: I6 in the other direction. The constraint stops this today; the
+// check is the guard if the constraint is ever dropped.
+func TestCheck_I6_TwoKeysOneWorkflow(t *testing.T) {
+	ctx := context.Background()
+	e := setup(t)
+	wf, _ := newWorkflow(t, e.pool)
+	_, err := e.pool.Exec(ctx, `ALTER TABLE api_idempotency_keys DROP CONSTRAINT IF EXISTS api_idempotency_keys_workflow_unique`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = e.pool.Exec(ctx, `DELETE FROM api_idempotency_keys WHERE key = 'second-key'`)
+		_, err := e.pool.Exec(ctx, `ALTER TABLE api_idempotency_keys ADD CONSTRAINT api_idempotency_keys_workflow_unique UNIQUE (workflow_id)`)
+		require.NoError(t, err)
+	})
+	_, err = e.pool.Exec(ctx, `INSERT INTO api_idempotency_keys (client_id, key, request_fingerprint, workflow_id, response_body)
+		VALUES ('c', 'second-key', 'f', $1, '{}')`, wf)
+	require.NoError(t, err)
+	requireViolation(t, e.check(t), "I6", wf, "2 idempotency keys")
+}
