@@ -333,6 +333,15 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	if rep.Violations, err = invariants.Check(ctx, pool, effects); err != nil {
 		return rep, err
 	}
+	deliveries, err := fakeprovider.FetchWebhooks(ctx, providerURL)
+	if err != nil {
+		return rep, err
+	}
+	webhookViolations, err := invariants.CheckWebhooks(ctx, pool, deliveries)
+	if err != nil {
+		return rep, err
+	}
+	rep.Violations = append(rep.Violations, webhookViolations...)
 	if rep.NeedsAttention, err = invariants.NeedsAttention(ctx, pool); err != nil {
 		return rep, err
 	}
@@ -361,8 +370,10 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE status = 'PROCESSED' AND note = 'applied'),
 		       count(*) FILTER (WHERE status = 'PROCESSED' AND note = 'duplicate'),
-		       count(*) FILTER (WHERE attempts > 1)
-		FROM webhook_inbox`).Scan(&rep.Webhooks.Applied, &rep.Webhooks.Duplicates, &rep.Webhooks.Deferred); err != nil {
+		       count(*) FILTER (WHERE attempts > 1),
+		       count(*) FILTER (WHERE status = 'IGNORED' AND note = 'stale')
+		FROM webhook_inbox`).Scan(&rep.Webhooks.Applied, &rep.Webhooks.Duplicates, &rep.Webhooks.Deferred,
+		&rep.Webhooks.StaleIgnored); err != nil {
 		return rep, err
 	}
 	rep.FencedCommits = countLogLines(cfg.RunDir, "worker-", "lease lost before completion")

@@ -466,6 +466,7 @@ The heart of the design. Every row should eventually map to at least one automat
 | **I5** | No payout exists for a workflow without a successful charge. | Oracle |
 | **I6** | Every inbound idempotency key maps to exactly one workflow. | DB |
 | **I7** | `SUCCEEDED` ⇒ charge+payout effects at provider; `COMPENSATED` ⇒ charge+refund, no payout; `FAILED` ⇒ no effects. | DB × oracle |
+| **I8–I11** | Milestone 2: outbox, shop view, webhook inbox, webhook acknowledgement. See the [M2 design](superpowers/specs/2026-11-10-milestone-2-design.md) §9. | DB × oracles |
 
 `NEEDS_ATTENTION` workflows are allowed by I4 but listed in the report — a run that produces many of them is a design smell even if no invariant breaks.
 

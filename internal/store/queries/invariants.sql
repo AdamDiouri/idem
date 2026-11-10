@@ -47,3 +47,12 @@ WHERE i.status = 'CONFLICT' ORDER BY i.received_at;
 
 -- name: PendingInboxEvents :many
 SELECT provider_event_id, received_at FROM webhook_inbox WHERE status = 'PENDING' ORDER BY received_at;
+
+-- name: InboxRowsForCheck :many
+-- Every inbox row with the status of the workflow it was tied to (if any),
+-- for checking against the provider's delivery log (I10, I11).
+SELECT i.provider_event_id, i.status, COALESCE(i.note, '')::text AS note, w.status AS workflow_status
+FROM webhook_inbox i
+LEFT JOIN steps s ON s.id = i.step_id
+LEFT JOIN workflows w ON w.id = s.workflow_id
+ORDER BY i.received_at;

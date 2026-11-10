@@ -44,6 +44,48 @@ func (q *Queries) ConflictEvents(ctx context.Context) ([]ConflictEventsRow, erro
 	return items, nil
 }
 
+const inboxRowsForCheck = `-- name: InboxRowsForCheck :many
+SELECT i.provider_event_id, i.status, COALESCE(i.note, '')::text AS note, w.status AS workflow_status
+FROM webhook_inbox i
+LEFT JOIN steps s ON s.id = i.step_id
+LEFT JOIN workflows w ON w.id = s.workflow_id
+ORDER BY i.received_at
+`
+
+type InboxRowsForCheckRow struct {
+	ProviderEventID string
+	Status          string
+	Note            string
+	WorkflowStatus  *string
+}
+
+// Every inbox row with the status of the workflow it was tied to (if any),
+// for checking against the provider's delivery log (I10, I11).
+func (q *Queries) InboxRowsForCheck(ctx context.Context) ([]InboxRowsForCheckRow, error) {
+	rows, err := q.db.Query(ctx, inboxRowsForCheck)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InboxRowsForCheckRow
+	for rows.Next() {
+		var i InboxRowsForCheckRow
+		if err := rows.Scan(
+			&i.ProviderEventID,
+			&i.Status,
+			&i.Note,
+			&i.WorkflowStatus,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const keysWithoutWorkflow = `-- name: KeysWithoutWorkflow :many
 SELECT client_id, key FROM api_idempotency_keys
 WHERE workflow_id IS NULL OR response_body IS NULL

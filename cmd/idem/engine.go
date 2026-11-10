@@ -175,6 +175,15 @@ func checkCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			deliveries, err := fakeprovider.FetchWebhooks(e.ctx, e.cfg.ProviderURL)
+			if err != nil {
+				return err
+			}
+			webhookViolations, err := invariants.CheckWebhooks(e.ctx, e.pool, deliveries)
+			if err != nil {
+				return err
+			}
+			violations = append(violations, webhookViolations...)
 
 			attention, err := invariants.NeedsAttention(e.ctx, e.pool)
 			if err != nil {
