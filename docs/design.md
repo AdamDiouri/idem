@@ -366,7 +366,8 @@ Retry policy: exponential backoff with **full jitter** — `delay = rand(0, min(
 
 - **Double-entry, append-only.** Amounts are signed `bigint` in minor units (cents): debits positive, credits negative. Every ledger transaction must sum to zero.
 - Enforced by a `DEFERRABLE INITIALLY DEFERRED` constraint trigger that checks the sum at `COMMIT`.
-- **Immutability:** the application's DB role has no `UPDATE`/`DELETE` on ledger tables. Corrections are new reversing transactions.
+- **Immutability, by privilege (built in slice 2.3b):** migrations run as the table owner; the API, workers and sweepers log in as a member of the `idem_app` role, which may `SELECT` and `INSERT` on the ledger tables but has no `UPDATE`, `DELETE` or `TRUNCATE` (migration 00013; `idem migrate` creates the login from `IDEM_APP_DB_USER`/`IDEM_APP_DB_PASSWORD`). Row triggers also refuse `UPDATE`/`DELETE`, as a second layer that even the owner meets. Corrections are new reversing transactions.
+- **No empty transactions:** a second deferred constraint trigger rejects a ledger transaction with no entries at `COMMIT` (it would otherwise pass the balance check and record nothing).
 - **Exactly-once posting:** `UNIQUE (step_id, kind)` on `ledger_transactions` — a second attempt to post for the same step fails loudly instead of double-counting.
 - Balances are computed with `SUM()` in M1 (no cached balance columns to drift).
 - **Currency:** EUR only in M1. Every entry still carries a `currency` column (constrained to `'EUR'`) so multi-currency later is a constraint change, not a schema rewrite.

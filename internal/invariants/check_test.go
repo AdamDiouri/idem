@@ -118,8 +118,9 @@ func TestCheck_I2_Unbalanced(t *testing.T) {
 	e := setup(t)
 	wf, step := newWorkflow(t, e.pool)
 
-	// Bypass the balance trigger to plant corruption the checker must find.
-	tx, err := e.pool.Begin(ctx)
+	// Bypass the balance trigger to plant corruption the checker must find
+	// (as the owner: the application role may not).
+	tx, err := testutil.NewOwnerPool(t, dsn).Begin(ctx)
 	require.NoError(t, err)
 	defer tx.Rollback(ctx)
 	_, err = tx.Exec(ctx, `SET LOCAL session_replication_role = replica`)
@@ -386,11 +387,12 @@ func TestCheck_I6_TwoKeysOneWorkflow(t *testing.T) {
 	ctx := context.Background()
 	e := setup(t)
 	wf, _ := newWorkflow(t, e.pool)
-	_, err := e.pool.Exec(ctx, `ALTER TABLE api_idempotency_keys DROP CONSTRAINT IF EXISTS api_idempotency_keys_workflow_unique`)
+	owner := testutil.NewOwnerPool(t, dsn) // schema changes need the owner
+	_, err := owner.Exec(ctx, `ALTER TABLE api_idempotency_keys DROP CONSTRAINT IF EXISTS api_idempotency_keys_workflow_unique`)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = e.pool.Exec(ctx, `DELETE FROM api_idempotency_keys WHERE key = 'second-key'`)
-		_, err := e.pool.Exec(ctx, `ALTER TABLE api_idempotency_keys ADD CONSTRAINT api_idempotency_keys_workflow_unique UNIQUE (workflow_id)`)
+		_, _ = owner.Exec(ctx, `DELETE FROM api_idempotency_keys WHERE key = 'second-key'`)
+		_, err := owner.Exec(ctx, `ALTER TABLE api_idempotency_keys ADD CONSTRAINT api_idempotency_keys_workflow_unique UNIQUE (workflow_id)`)
 		require.NoError(t, err)
 	})
 	_, err = e.pool.Exec(ctx, `INSERT INTO api_idempotency_keys (client_id, key, request_fingerprint, workflow_id, response_body)

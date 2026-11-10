@@ -40,7 +40,8 @@ func pgCode(t *testing.T, err error) string {
 
 func TestMigrate_UpDownUp(t *testing.T) {
 	ctx := context.Background()
-	pool := testutil.NewPool(t, dsn)
+	testutil.NewPool(t, dsn)              // empty tables
+	pool := testutil.NewOwnerPool(t, dsn) // migrations need the owner
 
 	require.NoError(t, store.MigrateDown(ctx, pool))
 	require.False(t, tableExists(t, pool, "workflows"))
@@ -110,7 +111,8 @@ func TestIsLockTimeout(t *testing.T) {
 // conservative pre-00008 meaning), not a failed migration.
 func TestMigrate_DownFrom00008WithAsyncRows(t *testing.T) {
 	ctx := context.Background()
-	pool := testutil.NewPool(t, dsn)
+	testutil.NewPool(t, dsn)              // empty tables
+	pool := testutil.NewOwnerPool(t, dsn) // migrations need the owner
 	_, err := pool.Exec(ctx, `
 		INSERT INTO workflows (id, client_id, type, status, input) VALUES
 		  ('01936f3e-8c2a-7b1e-9f00-0000000000a1', 'c', 'payment_payout', 'RUNNING', '{}'),
@@ -161,7 +163,8 @@ func TestIdempotencyKeys_OneKeyPerWorkflow(t *testing.T) {
 // migration fails loudly; it never drops a row.
 func TestMigrate_OneKeyPerWorkflowRefusesExistingDuplicates(t *testing.T) {
 	ctx := context.Background()
-	pool := testutil.NewPool(t, dsn)
+	testutil.NewPool(t, dsn)              // empty tables
+	pool := testutil.NewOwnerPool(t, dsn) // migrations need the owner
 	require.NoError(t, store.MigrateDownTo(ctx, pool, 9))
 	t.Cleanup(func() {
 		_, _ = pool.Exec(ctx, `DELETE FROM api_idempotency_keys`)

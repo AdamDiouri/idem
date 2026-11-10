@@ -4,6 +4,7 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"testing"
 
@@ -57,22 +58,64 @@ func RunWithPostgres(m *testing.M, dsn *string) int {
 	return m.Run()
 }
 
-// NewPool opens a pool against dsn, empties every application table and closes
-// the pool when the test ends. Tests using it must not run in parallel.
+// AppUser and AppPassword are the restricted login (a member of idem_app,
+// migration 00013) that NewPool connects as, so every integration test runs
+// with the application's privileges: a missing grant fails a test, not
+// production.
+const (
+	AppUser     = "idem_app_user"
+	AppPassword = "idem_app_pw"
+)
+
+// NewOwnerPool opens a pool as the owner in dsn (the migrations role): for
+// tests that change the schema or manage roles. It does not empty tables.
+func NewOwnerPool(t *testing.T, dsn string) *pgxpool.Pool {
+	t.Helper()
+	pool, err := store.Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("open owner pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// AppDSN rewrites an owner dsn to log in as the restricted AppUser.
+func AppDSN(dsn string) (string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+	u.User = url.UserPassword(AppUser, AppPassword)
+	return u.String(), nil
+}
+
+// NewPool empties every application table (as the owner: TRUNCATE is never
+// granted to the application) and returns a pool connected as AppUser, closed
+// when the test ends. Tests using it must not run in parallel.
 func NewPool(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
 
-	pool, err := store.Open(ctx, dsn)
-	if err != nil {
-		t.Fatalf("open pool: %v", err)
+	owner := NewOwnerPool(t, dsn)
+	// The membership is re-granted each time: a test that migrates down and
+	// up again (00013's Down revokes idem_app's grants) must not break the next.
+	if err := store.EnsureAppUser(ctx, owner, AppUser, AppPassword); err != nil {
+		t.Fatalf("ensure app user: %v", err)
 	}
-	t.Cleanup(pool.Close)
-
 	// TRUNCATE bypasses the ledger's append-only row triggers; accounts are seed data.
-	if _, err := pool.Exec(ctx, `TRUNCATE admin_actions, ledger_entries, ledger_transactions, step_attempts,
+	if _, err := owner.Exec(ctx, `TRUNCATE admin_actions, ledger_entries, ledger_transactions, step_attempts,
 		api_idempotency_keys, steps, workflows CASCADE`); err != nil {
 		t.Fatalf("truncate tables: %v", err)
 	}
+
+	appDSN, err := AppDSN(dsn)
+	if err != nil {
+		t.Fatalf("app dsn: %v", err)
+	}
+	pool, err := store.Open(ctx, appDSN)
+	if err != nil {
+		t.Fatalf("open app pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
 	return pool
 }

@@ -72,9 +72,9 @@ type Report struct {
 	SettleTime      time.Duration          `json:"settle_time"`
 	// WebhooksInFlight counts provider webhooks neither delivered nor given
 	// up when the settle phase ended: the inbox was judged incomplete.
-	WebhooksInFlight int `json:"webhooks_in_flight"`
-	Passed          bool                   `json:"passed"`
-	Reasons         []string               `json:"reasons"`
+	WebhooksInFlight int      `json:"webhooks_in_flight"`
+	Passed           bool     `json:"passed"`
+	Reasons          []string `json:"reasons"`
 }
 
 // Evaluate sets Passed and Reasons. A run passes only if every check holds AND

@@ -58,9 +58,9 @@ func TestCheckWebhooks(t *testing.T) {
 		detail    string
 	}{
 		{
-			name: "acknowledged event missing from the inbox",
-			rows: func(env, uuid.UUID) {},
-			ds:   []fakeprovider.WebhookDelivery{delivered("evt_lost")},
+			name:      "acknowledged event missing from the inbox",
+			rows:      func(env, uuid.UUID) {},
+			ds:        []fakeprovider.WebhookDelivery{delivered("evt_lost")},
 			invariant: "I11", detail: "evt_lost was acknowledged but is not in the inbox",
 		},
 		{
@@ -89,9 +89,9 @@ func TestCheckWebhooks(t *testing.T) {
 			invariant: "I10", detail: "evt_t",
 		},
 		{
-			name: "a stale event applied",
-			rows: func(e env, step uuid.UUID) { e.inboxRow(t, "evt_s", "PROCESSED", "applied", &step) },
-			ds: []fakeprovider.WebhookDelivery{{EventID: "evt_s", Delivered: true, Attempts: 1, Stale: true}},
+			name:      "a stale event applied",
+			rows:      func(e env, step uuid.UUID) { e.inboxRow(t, "evt_s", "PROCESSED", "applied", &step) },
+			ds:        []fakeprovider.WebhookDelivery{{EventID: "evt_s", Delivered: true, Attempts: 1, Stale: true}},
 			invariant: "I10", detail: "evt_s",
 		},
 		{

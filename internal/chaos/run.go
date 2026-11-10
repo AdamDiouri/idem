@@ -145,7 +145,8 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	}()
 
 	migrate := exec.CommandContext(ctx, idem, "migrate") //nolint:gosec // harness-controlled binary
-	migrate.Env = append(os.Environ(), "IDEM_DATABASE_URL="+pg.DSN())
+	migrate.Env = append(os.Environ(), "IDEM_DATABASE_URL="+pg.DSN(),
+		"IDEM_APP_DB_USER="+appDBUser, "IDEM_APP_DB_PASSWORD="+appDBPassword)
 	if out, err := migrate.CombinedOutput(); err != nil {
 		return rep, fmt.Errorf("migrate: %w: %s", err, out)
 	}
@@ -189,7 +190,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	for i := range apis {
 		name := fmt.Sprintf("api-%d", i)
 		if apis[i], err = sup.Start(ProcSpec{Name: name, Path: idem, Args: []string{"api"}, LogPath: logPath(name),
-			Env: apiEnv(pg.DSN(), apiPorts[i], cfg.APIFailpoints)}); err != nil {
+			Env: apiEnv(pg.AppDSN(), apiPorts[i], cfg.APIFailpoints)}); err != nil {
 			return rep, err
 		}
 		if err := waitHTTP(ctx, apiURLs[i]+"/readyz"); err != nil {
@@ -197,7 +198,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		}
 	}
 
-	env := workerEnv(pg.DSN(), providerURL)
+	env := workerEnv(pg.AppDSN(), providerURL)
 	workers := make([]*Proc, cfg.Workers)
 	for i := range workers {
 		if workers[i], err = sup.Start(ProcSpec{Name: fmt.Sprintf("worker-%d", i), Path: idem, Args: []string{"worker"},
@@ -285,7 +286,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		rep.FailpointExits += a.FailpointExits()
 		name := fmt.Sprintf("api-%d", i)
 		if _, err := sup.Start(ProcSpec{Name: name + "-settle", Path: idem, Args: []string{"api"}, LogPath: logPath(name),
-			Env: apiEnv(pg.DSN(), apiPorts[i], "")}); err != nil {
+			Env: apiEnv(pg.AppDSN(), apiPorts[i], "")}); err != nil {
 			return rep, err
 		}
 		if err := waitHTTP(ctx, apiURLs[i]+"/readyz"); err != nil {

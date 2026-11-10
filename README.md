@@ -122,7 +122,7 @@ make down
 When idem cannot finish a workflow without guessing about money, it parks it in `NEEDS_ATTENTION` and alerts. The [runbook](docs/runbooks/needs-attention.md) explains every parking reason and which command resolves it.
 
 ```bash
-export IDEM_DATABASE_URL="postgres://idem:${POSTGRES_PASSWORD}@localhost:5432/idem?sslmode=disable"   # after loading .env
+export IDEM_DATABASE_URL="postgres://idem_app_user:${IDEM_APP_DB_PASSWORD}@localhost:5432/idem?sslmode=disable"   # after loading .env
 idem admin list                       # what is parked, why, and its VERSION
 # every action below also takes --expect-version <VERSION from list>
 idem admin retry-step <step-id> --reason "provider recovered"  # same key: always safe
@@ -227,7 +227,8 @@ go test -tags chaos ./internal/chaos/   # 30s chaos campaign as a test (after ma
 
 | Variable | Default | Notes |
 |---|---|---|
-| `IDEM_DATABASE_URL` | (required) | Postgres connection URL |
+| `IDEM_DATABASE_URL` | (required) | Postgres connection URL. For `migrate`: the table owner. For everything else: the application user (below), which cannot rewrite the ledger |
+| `IDEM_APP_DB_USER`, `IDEM_APP_DB_PASSWORD` | (none) | `migrate` only, set together: create (or update the password of) this login as a member of the restricted `idem_app` role. The owner must be allowed to create roles |
 | `IDEM_API_TOKENS` | (required for `api`) | `client=token,...`; tokens at least 16 characters, unique |
 | `IDEM_HTTP_ADDR` | `:8080` | |
 | `IDEM_IDEMPOTENCY_LOCK_TIMEOUT` | `5s` | Max wait on a concurrent duplicate request before `409`; must be below the request timeout |

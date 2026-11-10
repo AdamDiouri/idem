@@ -465,8 +465,10 @@ func TestWorker_InFlightConflictRetriesSoon(t *testing.T) {
 	}, step)
 
 	require.Equal(t, "in_doubt", h.runOnce(t, w).Outcome)
+	// Equal jitter draws [500ms, 1s] at completion; now() is read a little
+	// later, so allow slack below 500ms. Still far from the 1h backoff.
 	require.True(t, scalar[bool](t, h.pool,
-		`SELECT run_after BETWEEN now() + interval '500 milliseconds' AND now() + interval '2 seconds' FROM steps WHERE workflow_id = $1`, wf))
+		`SELECT run_after BETWEEN now() + interval '400 milliseconds' AND now() + interval '2 seconds' FROM steps WHERE workflow_id = $1`, wf))
 }
 
 func TestWorker_ShutdownGraceCancelsStuckStep(t *testing.T) {

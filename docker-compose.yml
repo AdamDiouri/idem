@@ -1,6 +1,10 @@
 # Secrets and local settings come from .env (copy .env.example; `make up` does
 # it for you). Secrets use ${VAR:?…}, so compose refuses to start without them.
-x-database-url: &database-url postgres://idem:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}@postgres:5432/idem?sslmode=disable
+# Migrations run as the owner (idem); everything else logs in as the restricted
+# application user that `idem migrate` creates (role idem_app: it cannot
+# UPDATE, DELETE or TRUNCATE the ledger).
+x-owner-database-url: &owner-database-url postgres://idem:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}@postgres:5432/idem?sslmode=disable
+x-database-url: &database-url postgres://idem_app_user:${IDEM_APP_DB_PASSWORD:?set IDEM_APP_DB_PASSWORD in .env (see .env.example)}@postgres:5432/idem?sslmode=disable
 
 services:
   postgres:
@@ -24,7 +28,9 @@ services:
     build: .
     command: ["migrate"]
     environment:
-      IDEM_DATABASE_URL: *database-url
+      IDEM_DATABASE_URL: *owner-database-url
+      IDEM_APP_DB_USER: idem_app_user
+      IDEM_APP_DB_PASSWORD: ${IDEM_APP_DB_PASSWORD:?set IDEM_APP_DB_PASSWORD in .env (see .env.example)}
     depends_on:
       postgres:
         condition: service_healthy

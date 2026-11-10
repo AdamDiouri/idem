@@ -47,3 +47,11 @@ func TestReport_WebhookPathMustDoWork(t *testing.T) {
 	r.Evaluate()
 	require.Contains(t, strings.Join(r.Reasons, "\n"), "vacuous: no reordered webhook was recognised as stale")
 }
+
+// Slice 2.3b: chaos runs idem's processes as the restricted application user,
+// so a missing grant fails a campaign rather than production.
+func TestPostgres_AppDSN(t *testing.T) {
+	pg := &Postgres{Port: 5555}
+	require.Equal(t, "postgres://"+appDBUser+":"+appDBPassword+"@127.0.0.1:5555/idem?sslmode=disable", pg.AppDSN())
+	require.NotContains(t, pg.AppDSN(), "idem:idem@", "not the owner")
+}

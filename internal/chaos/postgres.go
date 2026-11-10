@@ -66,7 +66,19 @@ func (pg *Postgres) removeEventually() {
 	}
 }
 
-// DSN is the connection string for the container.
+// The restricted login idem's processes use (a member of idem_app, created by
+// `idem migrate`); the harness itself and migrations use the owner (DSN).
+const (
+	appDBUser     = "idem_app_user"
+	appDBPassword = "idem_app_chaos"
+)
+
+// AppDSN is the connection string for the application user.
+func (pg *Postgres) AppDSN() string {
+	return fmt.Sprintf("postgres://%s:%s@127.0.0.1:%d/idem?sslmode=disable", appDBUser, appDBPassword, pg.Port)
+}
+
+// DSN is the owner's connection string for the container.
 func (pg *Postgres) DSN() string {
 	return fmt.Sprintf("postgres://idem:idem@127.0.0.1:%d/idem?sslmode=disable", pg.Port)
 }
