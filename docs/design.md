@@ -242,7 +242,7 @@ PENDING ───────▶ RUNNING ─────────────
 any non-terminal, attempts exhausted ─▶ DEAD   (workflow → NEEDS_ATTENTION)
 ```
 - `PENDING` and `IN_DOUBT` are both claimable. The difference is semantic: `IN_DOUBT` means *"we may already have caused an effect"*, which matters for metrics, alerting, and for what happens when attempts run out (a `DEAD` step that was `IN_DOUBT` may have moved money — the alert says so).
-- `AWAITING_CALLBACK` arrived in **M2 slice 2.1**. An accepted payout waits there until its `callback_deadline`, then becomes claimable for a **poll** (`GET /payouts/{id}`). Polls are attempts of kind `poll`, counted in `poll_count` and not in the send budget. They send nothing, so they never create doubt (D17), and a crashed poll goes back to waiting, not to `IN_DOUBT`. After `IDEM_CALLBACK_MAX_POLLS` polls the step is `DEAD` with `callback_unresolved` (money may have moved).
+- `AWAITING_CALLBACK` arrived in **M2 slice 2.1**. An accepted payout waits there until its `callback_deadline`, then becomes claimable for a **poll** (`GET /payouts/{id}`). Polls are attempts of kind `poll`, counted in `poll_count` and not in the send budget. They send nothing, so they never create doubt (D17), and a crashed poll goes back to waiting, not to `IN_DOUBT`. Polls back off from `IDEM_RETRY_BASE` up to `IDEM_CALLBACK_POLL_CAP` (1h). After `IDEM_CALLBACK_MAX_WAIT` (72h) since acceptance, or an optional `IDEM_CALLBACK_MAX_POLLS` per acceptance, the step is `DEAD` with `callback_unresolved` (money may have moved); an operator's retry re-sends and starts a fresh budget. A waiting step counts as healthy for the stuck alert until its poll is due.
 - `DEAD` is the dead-letter state. There is **no separate DLQ table** in M1; the dead-letter queue is `SELECT … WHERE status = 'DEAD'` (decision D4).
 
 ---
@@ -333,7 +333,7 @@ The central rule: **if the request might have reached the provider, the outcome 
 | `2xx` with final result | `SUCCESS` | `SUCCEEDED` |
 | `202` pending (payouts, **M2**) | `Accepted` | `AWAITING_CALLBACK`, `callback_deadline = now() + IDEM_CALLBACK_DEADLINE` |
 | `400`, `402`, `422` (declined, invalid account, validation) | `PERMANENT` | `FAILED_PERMANENT` |
-| `409` (same key currently being processed at provider) | `RETRYABLE_IN_FLIGHT` | `IN_DOUBT`, short backoff |
+| `409` (same key currently being processed at provider) | `RETRYABLE_IN_FLIGHT` | `IN_DOUBT`; retried soon (from the in-flight delay), backing off with equal jitter so a busy provider can't burn the attempt budget |
 | `429` | `RETRYABLE_NO_EFFECT` | `PENDING`, backoff honouring `Retry-After` |
 | DNS failure / connection refused (nothing sent) | `RETRYABLE_NO_EFFECT` | `PENDING`, backoff |
 | `5xx` | `AMBIGUOUS` | `IN_DOUBT`, backoff |
