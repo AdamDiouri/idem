@@ -167,7 +167,7 @@ The chaos harness runs the real binaries as separate processes and does its best
 - **Infrastructure:** a throwaway Postgres container, the fake provider, **two API replicas** (`--apis`), 4 workers and 2 sweepers.
 - **Traffic:** misbehaving clients (impatient retries, double-clicks, reformatted retries, malformed bodies). Every request goes to the next replica in turn, so one payment's retries usually reach both.
 - **Webhooks:** the provider signs a webhook for every settled payout and rotates deliveries across the replicas, so its retries reach the *other* replica.
-- **Disruptions:** a seeded plan of `kill -9`, `SIGSTOP` beyond the lease, API restarts (one replica at a time), database restarts, provider faults, and the six **webhook faults** (duplicated, sent before the `202`, delayed, a stale contradiction, dropped, badly signed). In runs of a minute or more, the plan reserves a **webhook-fault block**: six back-to-back 5-second windows, one fault each and nothing else, starting once traffic flows.
+- **Disruptions:** a seeded plan of `kill -9`, `SIGSTOP` beyond the lease, API restarts (one replica at a time), database restarts, provider faults, and the six **webhook faults** (duplicated, sent before the `202`, delayed, a stale contradiction, dropped, badly signed). In runs of a minute or more, the plan reserves a **webhook-fault block**: six back-to-back 8-second windows (5 seconds plus slack for timing drift), one fault each and nothing else, starting once traffic flows.
 - **Crash failpoints** make processes `exit` mid-step, including `inbox_before_commit` on workers and `webhook_after_insert` on the API. A supervisor restarts them like Kubernetes would.
 
 Afterwards it clears every fault, lets the system settle, and checks every invariant.

@@ -222,7 +222,9 @@ func TestPlan_WebhookFaultBlock(t *testing.T) {
 				if e.Kind != SetProviderFaults || len(e.Faults.Rules) != 1 || e.Faults.Rules[0].Endpoint != "webhooks" {
 					continue
 				}
-				if faultWindow(events, i, d) < minFaultWindow || e.At < d/10 || e.At+minFaultWindow > d*9/10+minFaultWindow {
+				// Planned with slack: executed times drift (a slow event before a
+				// window's start), and the verdict measures the executed window.
+				if faultWindow(events, i, d) < minFaultWindow+faultWindowSlack || e.At < d/10 || e.At > d*9/10 {
 					continue
 				}
 				found[e.Faults.Rules[0].Mode] = true

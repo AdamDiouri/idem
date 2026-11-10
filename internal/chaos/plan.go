@@ -167,6 +167,12 @@ func webhookRule(rng *rand.Rand, mode string) fakeprovider.Rule {
 // at acceptance, so a sub-second window may meet no payout at all.
 const minFaultWindow = 5 * time.Second
 
+// faultWindowSlack pads each planned webhook-fault window beyond
+// minFaultWindow: events run one after another, so a slow one (a database
+// restart) delays the next window's start, and the verdict measures the
+// executed window. Found by campaigns: windows planned at exactly 5s ran 4.99s.
+const faultWindowSlack = 3 * time.Second
+
 // faultWindow is how long the fault set of events[i] stays in force: until the
 // next fault change, or the end of the campaign. events must be sorted.
 func faultWindow(events []Event, i int, end time.Duration) time.Duration {
@@ -179,7 +185,7 @@ func faultWindow(events []Event, i int, end time.Duration) time.Duration {
 }
 
 // webhookFaultBlock reserves, in runs of a minute or more, one window of
-// minFaultWindow per webhook fault, back to back: each holds that fault alone
+// minFaultWindow + faultWindowSlack per webhook fault, back to back: each holds that fault alone
 // (so no other rule wins its draws), starts once traffic flows (at least 10%
 // into the run) and ends inside the campaign window. Any other fault change
 // that would fall inside the block is dropped, so no window is cut short.
@@ -187,7 +193,8 @@ func faultWindow(events []Event, i int, end time.Duration) time.Duration {
 // occurs; a ClearProviderFaults is re-added after the block if the plan lost
 // its only one.
 func webhookFaultBlock(rng *rand.Rand, events []Event, duration time.Duration) []Event {
-	block := time.Duration(len(webhookModes)) * minFaultWindow
+	slot := minFaultWindow + faultWindowSlack
+	block := time.Duration(len(webhookModes)) * slot
 	earliest, latest := duration/10, duration*9/10-block
 	latest = max(latest, earliest)
 	start := earliest + time.Duration(rng.Int64N(int64(latest-earliest)+1))
@@ -206,7 +213,7 @@ func webhookFaultBlock(rng *rand.Rand, events []Event, duration time.Duration) [
 		kept = append(kept, e)
 	}
 	for i, mode := range webhookModes {
-		kept = append(kept, Event{At: start + time.Duration(i)*minFaultWindow, Kind: SetProviderFaults, Faults: fakeprovider.Faults{
+		kept = append(kept, Event{At: start + time.Duration(i)*slot, Kind: SetProviderFaults, Faults: fakeprovider.Faults{
 			Seed: rng.Int64N(math.MaxInt32) + 1, Rules: []fakeprovider.Rule{webhookRule(rng, mode)},
 		}})
 	}
