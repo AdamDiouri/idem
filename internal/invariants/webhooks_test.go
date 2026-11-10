@@ -19,6 +19,15 @@ func (e env) inboxRow(t *testing.T, id, status, note string, step *uuid.UUID) {
 	require.NoError(t, err)
 }
 
+// webhookAttempt records that the inbox applied an event to step, as the
+// apply path does (an attempt of kind webhook).
+func (e env) webhookAttempt(t *testing.T, step uuid.UUID) {
+	t.Helper()
+	_, err := e.pool.Exec(context.Background(), `INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id, kind, outcome, finished_at)
+		VALUES ($1, 99, 1, 'inbox-1', 'webhook', 'SUCCEEDED', now())`, step)
+	require.NoError(t, err)
+}
+
 func (e env) checkWebhooks(t *testing.T, ds []fakeprovider.WebhookDelivery) []invariants.Violation {
 	t.Helper()
 	v, err := invariants.CheckWebhooks(context.Background(), e.pool, ds)
@@ -38,6 +47,7 @@ func TestCheckWebhooks(t *testing.T) {
 		wf, step := newWorkflow(t, e.pool)
 		e.setStatus(t, wf, "NEEDS_ATTENTION")
 		e.inboxRow(t, "evt_applied", "PROCESSED", "applied", &step)
+		e.webhookAttempt(t, step)
 		e.inboxRow(t, "evt_dup", "PROCESSED", "duplicate", &step)
 		e.inboxRow(t, "evt_stale", "IGNORED", "stale", &step)
 		e.inboxRow(t, "evt_evidence", "EVIDENCE", "provider says paid po_1", &step)
@@ -65,7 +75,7 @@ func TestCheckWebhooks(t *testing.T) {
 		},
 		{
 			name: "wrongly signed first attempt accepted",
-			rows: func(e env, step uuid.UUID) { e.inboxRow(t, "evt_forged", "PROCESSED", "applied", &step) },
+			rows: func(e env, step uuid.UUID) { e.inboxRow(t, "evt_forged", "PROCESSED", "duplicate", &step) },
 			ds: []fakeprovider.WebhookDelivery{{EventID: "evt_forged", Delivered: true, Attempts: 1,
 				Fault: fakeprovider.ModeBadSignature}},
 			invariant: "I11", detail: "wrongly signed",
@@ -75,6 +85,12 @@ func TestCheckWebhooks(t *testing.T) {
 			rows:      func(e env, step uuid.UUID) { e.inboxRow(t, "evt_unknown", "PROCESSED", "applied", &step) },
 			ds:        nil,
 			invariant: "I11", detail: "evt_unknown",
+		},
+		{
+			name:      "marked applied, but the step records no webhook attempt",
+			rows:      func(e env, step uuid.UUID) { e.inboxRow(t, "evt_fake", "PROCESSED", "applied", &step) },
+			ds:        []fakeprovider.WebhookDelivery{delivered("evt_fake")},
+			invariant: "I11", detail: "evt_fake was marked applied",
 		},
 		{
 			name:      "orphan",
@@ -90,7 +106,7 @@ func TestCheckWebhooks(t *testing.T) {
 		},
 		{
 			name:      "a stale event applied",
-			rows:      func(e env, step uuid.UUID) { e.inboxRow(t, "evt_s", "PROCESSED", "applied", &step) },
+			rows:      func(e env, step uuid.UUID) { e.inboxRow(t, "evt_s", "PROCESSED", "duplicate", &step) },
 			ds:        []fakeprovider.WebhookDelivery{{EventID: "evt_s", Delivered: true, Attempts: 1, Stale: true}},
 			invariant: "I10", detail: "evt_s",
 		},

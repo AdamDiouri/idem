@@ -45,7 +45,8 @@ func (q *Queries) ConflictEvents(ctx context.Context) ([]ConflictEventsRow, erro
 }
 
 const inboxRowsForCheck = `-- name: InboxRowsForCheck :many
-SELECT i.provider_event_id, i.status, COALESCE(i.note, '')::text AS note, w.status AS workflow_status
+SELECT i.provider_event_id, i.status, COALESCE(i.note, '')::text AS note, w.status AS workflow_status,
+       EXISTS (SELECT 1 FROM step_attempts a WHERE a.step_id = i.step_id AND a.kind = 'webhook')::bool AS step_applied
 FROM webhook_inbox i
 LEFT JOIN steps s ON s.id = i.step_id
 LEFT JOIN workflows w ON w.id = s.workflow_id
@@ -57,10 +58,13 @@ type InboxRowsForCheckRow struct {
 	Status          string
 	Note            string
 	WorkflowStatus  *string
+	StepApplied     bool
 }
 
 // Every inbox row with the status of the workflow it was tied to (if any),
 // for checking against the provider's delivery log (I10, I11).
+// step_applied: the event's step records an attempt of kind webhook, the
+// trace the apply path leaves (so "applied" cannot be a label alone).
 func (q *Queries) InboxRowsForCheck(ctx context.Context) ([]InboxRowsForCheckRow, error) {
 	rows, err := q.db.Query(ctx, inboxRowsForCheck)
 	if err != nil {
@@ -75,6 +79,7 @@ func (q *Queries) InboxRowsForCheck(ctx context.Context) ([]InboxRowsForCheckRow
 			&i.Status,
 			&i.Note,
 			&i.WorkflowStatus,
+			&i.StepApplied,
 		); err != nil {
 			return nil, err
 		}

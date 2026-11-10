@@ -340,8 +340,9 @@ func (r *Report) Write(dir string) error {
 	return os.WriteFile(filepath.Join(dir, "report.txt"), []byte(r.Text()), 0o644) //nolint:gosec // report file
 }
 
-// WebhookCounts summarise the inbox after a run: events applied to a waiting
-// payout, duplicates absorbed, and events that needed more than one attempt.
+// WebhookCounts summarise the inbox after a run: payouts completed by a
+// webhook (counted from the steps' webhook attempts, not the inbox's own
+// label), duplicates absorbed, and events that needed more than one attempt.
 type WebhookCounts struct {
 	Applied    int `json:"applied"`
 	Duplicates int `json:"duplicates"`

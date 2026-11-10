@@ -371,7 +371,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		return rep, err
 	}
 	if err := pool.QueryRow(ctx, `
-		SELECT count(*) FILTER (WHERE status = 'PROCESSED' AND note = 'applied'),
+		SELECT (SELECT count(*) FROM step_attempts WHERE kind = 'webhook'), -- completed by a webhook, not just labelled
 		       count(*) FILTER (WHERE status = 'PROCESSED' AND note = 'duplicate'),
 		       count(*) FILTER (WHERE attempts > 1),
 		       count(*) FILTER (WHERE status = 'IGNORED' AND note = 'stale')

@@ -18,7 +18,8 @@ import (
 //   - I11: every event the provider saw acknowledged is in the inbox; no event
 //     was accepted on a wrongly signed delivery alone (a bad_signature fault
 //     whose first attempt is the only one); the inbox holds no event the
-//     provider never sent.
+//     provider never sent; an event marked applied left its trace on the step
+//     (an attempt of kind webhook).
 //   - I10 (with the CONFLICT check in Check): a true event ends PROCESSED, a
 //     stale (reordered) one ends IGNORED as stale, and either may be EVIDENCE
 //     only on a workflow that needs attention. Anything else (orphan,
@@ -64,6 +65,9 @@ func checkWebhookRows(rows []db.InboxRowsForCheckRow, deliveries []fakeprovider.
 		if !ok {
 			add("I11", "inbox holds event %s, which the provider never sent", r.ProviderEventID)
 			continue
+		}
+		if r.Status == "PROCESSED" && r.Note == "applied" && !r.StepApplied {
+			add("I11", "event %s was marked applied, but its step records no webhook attempt", r.ProviderEventID)
 		}
 		parked := r.WorkflowStatus != nil && *r.WorkflowStatus == "NEEDS_ATTENTION"
 		switch {
