@@ -10,6 +10,8 @@ import (
 	"github.com/AdamDiouri/idem/internal/provider"
 )
 
+const callbackDeadline = 10 * time.Minute
+
 func TestDecide(t *testing.T) {
 	b := Backoff{Base: time.Second, Cap: 5 * time.Minute, Rand: func() float64 { return 0.5 }}
 	const inFlight = 300 * time.Millisecond
@@ -71,7 +73,64 @@ func TestDecide(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			require.Equal(t, c.want, decide(c.s, c.out, b, inFlight, c.pivot))
+			require.Equal(t, c.want, decide(c.s, c.out, b, inFlight, callbackDeadline, c.pivot))
+		})
+	}
+}
+
+// Slice 2.1: an accepted async request waits for its callback deadline.
+func TestDecide_AcceptedWaitsForCallback(t *testing.T) {
+	b := Backoff{Base: time.Second, Cap: 5 * time.Minute, Rand: func() float64 { return 0.5 }}
+	r := decide(ClaimedStep{Attempt: 1, MaxAttempts: 8, PriorStatus: "PENDING"},
+		provider.Outcome{Class: provider.Accepted, ProviderRef: "po_1", HTTPStatus: 202}, b, time.Second, callbackDeadline, true)
+	require.Equal(t, Result{Kind: ResultAwaitingCallback, ProviderRef: "po_1", HTTPStatus: 202, RetryDelay: callbackDeadline}, r)
+}
+
+// The pivot rule reads the send history, not only the previous status: once a
+// payout has waited in AWAITING_CALLBACK its prior status no longer says
+// whether an earlier send was ambiguous.
+func TestDecide_PivotRuleReadsSendHistory(t *testing.T) {
+	b := Backoff{Base: time.Second, Cap: 5 * time.Minute, Rand: func() float64 { return 0.5 }}
+	refused := provider.Outcome{Class: provider.Permanent, HTTPStatus: 422, Err: errors.New("invalid_account")}
+	doubt := decide(ClaimedStep{Attempt: 2, MaxAttempts: 8, SendDoubt: true}, refused, b, time.Second, callbackDeadline, true)
+	require.Equal(t, ResultDead, doubt.Kind)
+	require.Equal(t, DeadPermanentAfterInDoubt, doubt.DeadReason)
+	clean := decide(ClaimedStep{Attempt: 2, MaxAttempts: 8}, refused, b, time.Second, callbackDeadline, true)
+	require.Equal(t, ResultFailedPermanent, clean.Kind)
+}
+
+func TestDecidePoll(t *testing.T) {
+	b := Backoff{Base: time.Second, Cap: 5 * time.Minute, Rand: func() float64 { return 0.5 }}
+	const maxPolls = 8
+	failed := errors.New("payout failed: account_closed")
+	poll := func(n int32, doubt bool) ClaimedStep {
+		return ClaimedStep{Attempt: 1, MaxAttempts: 8, PollCount: n, PriorStatus: "AWAITING_CALLBACK", ProviderRef: "po_1", SendDoubt: doubt}
+	}
+	cases := []struct {
+		name string
+		s    ClaimedStep
+		out  provider.Outcome
+		want Result
+	}{
+		{"paid", poll(1, false), provider.Outcome{Class: provider.Success, ProviderRef: "po_1", HTTPStatus: 200},
+			Result{Kind: ResultSucceeded, ProviderRef: "po_1", HTTPStatus: 200}},
+		{"failed cleanly", poll(2, false), provider.Outcome{Class: provider.Permanent, HTTPStatus: 200, Err: failed},
+			Result{Kind: ResultFailedPermanent, ProviderRef: "po_1", HTTPStatus: 200, Error: failed.Error()}},
+		{"failed after an ambiguous send", poll(2, true), provider.Outcome{Class: provider.Permanent, HTTPStatus: 200, Err: failed},
+			Result{Kind: ResultDead, ProviderRef: "po_1", HTTPStatus: 200, Error: failed.Error(), DeadReason: DeadPermanentAfterInDoubt}},
+		{"still pending", poll(3, false), provider.Outcome{Class: provider.Pending, HTTPStatus: 200, Err: errors.New("payout still pending")},
+			Result{Kind: ResultAwaitingCallback, ProviderRef: "po_1", HTTPStatus: 200, Error: "payout still pending",
+				RetryDelay: time.Second + 2*time.Second}}, // Base + 0.5 × 4s
+		{"still pending at the poll budget", poll(maxPolls, false), provider.Outcome{Class: provider.Pending, HTTPStatus: 200},
+			Result{Kind: ResultDead, ProviderRef: "po_1", HTTPStatus: 200, DeadReason: DeadCallbackUnresolved}},
+		{"poll failed: never doubt", poll(3, false), provider.Outcome{Class: provider.Ambiguous, HTTPStatus: 500, Err: errors.New("boom")},
+			Result{Kind: ResultAwaitingCallback, ProviderRef: "po_1", HTTPStatus: 500, Error: "boom", RetryDelay: time.Second}},
+		{"poll unreachable at the budget", poll(maxPolls, false), provider.Outcome{Class: provider.NoEffect, Err: errors.New("refused")},
+			Result{Kind: ResultDead, ProviderRef: "po_1", Error: "refused", DeadReason: DeadCallbackUnresolved}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			require.Equal(t, c.want, decidePoll(c.s, c.out, b, maxPolls, true))
 		})
 	}
 }

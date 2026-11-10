@@ -10,13 +10,16 @@ import (
 // state (design §9.3). It is pure so every rule is table-tested.
 //
 //   - Success / Permanent are final, except that a pivot step refused after an
-//     ambiguous attempt is DEAD (parked for a human), never failed.
+//     ambiguous send attempt (the previous status, or the send history) is
+//     DEAD (parked for a human), never failed.
+//   - Accepted (async) waits in AWAITING_CALLBACK until callbackDeadline, when
+//     it is polled (decidePoll).
 //   - Ambiguous retries after backoff (409 in-flight: soon); when attempts are
 //     exhausted the step is DEAD and money may have moved.
 //   - NoEffect retries after max(backoff, Retry-After capped at b.Cap); when
 //     exhausted it is DEAD, and money may have moved only if an earlier
 //     attempt left the step IN_DOUBT (sticky ambiguity).
-func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay time.Duration, pivot bool) Result {
+func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay, callbackDeadline time.Duration, pivot bool) Result {
 	r := Result{ProviderRef: out.ProviderRef, HTTPStatus: out.HTTPStatus}
 	if out.Err != nil {
 		r.Error = out.Err.Error()
@@ -26,9 +29,11 @@ func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay time.D
 	switch out.Class {
 	case provider.Success:
 		r.Kind = ResultSucceeded
+	case provider.Accepted:
+		r.Kind, r.RetryDelay = ResultAwaitingCallback, callbackDeadline
 	case provider.Permanent:
 		r.Kind = ResultFailedPermanent
-		if pivot && s.PriorStatus == string(ResultInDoubt) {
+		if pivot && (s.PriorStatus == string(ResultInDoubt) || s.SendDoubt) {
 			// An earlier attempt may have succeeded even though this one is
 			// refused (a provider that does not replay). Compensating on that
 			// guess could pay the merchant AND refund the customer.
@@ -54,6 +59,44 @@ func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay time.D
 		if out.InFlight {
 			r.RetryDelay = inFlightDelay
 		}
+	}
+	return r
+}
+
+// decidePoll turns the answer to a status poll of an accepted request into the
+// step's next state (design §4.5). A poll sends nothing, so it never creates
+// doubt: a failed poll just waits again.
+//
+//   - paid → SUCCEEDED; failed → FAILED_PERMANENT, or DEAD under the pivot
+//     rule when an earlier send was ambiguous.
+//   - pending → wait again, backing off; a failed poll → wait b.Base.
+//   - either, once maxPolls polls are used → DEAD callback_unresolved (money
+//     may have moved; a human checks with the provider).
+func decidePoll(s ClaimedStep, out provider.Outcome, b Backoff, maxPolls int32, pivot bool) Result {
+	r := Result{ProviderRef: s.ProviderRef, HTTPStatus: out.HTTPStatus}
+	if out.Err != nil {
+		r.Error = out.Err.Error()
+	}
+	switch out.Class {
+	case provider.Success:
+		r.Kind = ResultSucceeded
+		return r
+	case provider.Permanent:
+		r.Kind = ResultFailedPermanent
+		if pivot && s.SendDoubt {
+			r.Kind, r.DeadReason = ResultDead, DeadPermanentAfterInDoubt
+		}
+		return r
+	}
+	if s.PollCount >= maxPolls {
+		r.Kind, r.DeadReason = ResultDead, DeadCallbackUnresolved
+		return r
+	}
+	r.Kind = ResultAwaitingCallback
+	if out.Class == provider.Pending {
+		r.RetryDelay = min(b.Cap, b.Base+b.Delay(s.PollCount))
+	} else {
+		r.RetryDelay = b.Base
 	}
 	return r
 }

@@ -31,6 +31,9 @@ type WorkerOptions struct {
 	// InFlightDelay is the retry delay after a 409 (the provider is still
 	// processing the same key). Zero means Backoff.Base.
 	InFlightDelay time.Duration
+	// CallbackDeadline is how long an accepted async request (a payout) waits
+	// for its result before workers poll it (design §4.5).
+	CallbackDeadline time.Duration
 	// KeyRetention is how long the provider remembers idempotency keys;
 	// KeyRetentionMargin is the safety margin before it. Zero disables lookups.
 	KeyRetention       time.Duration
@@ -117,7 +120,7 @@ func (w *Worker) RunOnce(ctx context.Context) (RunResult, error) {
 	failpoint.Hit(FPAfterProviderCall)
 
 	if r.Kind == "" {
-		r = decide(s, out, w.opts.Backoff, w.opts.InFlightDelay, step.Pivot())
+		r = decide(s, out, w.opts.Backoff, w.opts.InFlightDelay, w.opts.CallbackDeadline, step.Pivot())
 	}
 
 	completeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), completeTimeout)
