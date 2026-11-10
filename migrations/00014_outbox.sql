@@ -20,7 +20,8 @@ CREATE TABLE outbox (
   lease_expires_at timestamptz,
   delivered_at     timestamptz,
   last_error       text,
-  -- One terminal transition, one event: a second is a bug, and fails loudly.
+  -- A second event of the same type is a bug, and fails loudly. (Two of
+  -- different types cannot happen: terminal states have no way out; I8 checks.)
   UNIQUE (workflow_id, type)
 );
 CREATE INDEX outbox_due ON outbox (next_attempt_at) WHERE status = 'PENDING';
@@ -68,13 +69,41 @@ LANGUAGE sql STABLE AS $$
   FROM workflows w WHERE w.id = p_workflow_id
 $$;
 
--- Workflows that finished before the outbox existed get their event now, so
--- every terminal workflow has exactly one (I8). Their IDs are v4.
-INSERT INTO outbox (id, client_id, workflow_id, type, payload)
-SELECT gen_random_uuid(), client_id, id, workflow_event_type(status), convert_to(workflow_view(id), 'UTF8')
-FROM workflows WHERE workflow_event_type(status) IS NOT NULL;
+-- Events are never deleted by the services: an event lost before delivery is
+-- an outcome the shop never learns. (The relay only updates rows.)
+REVOKE DELETE ON outbox FROM idem_app;
+
+-- An outcome commits only with its event (D13, enforced by the database as
+-- well as by transitionWorkflow). This matters most during a rolling upgrade:
+-- a worker still running a binary from before this migration would end
+-- workflows without events; its completion now rolls back, and a current
+-- worker redoes it with the same idempotency key. Checked at COMMIT, after
+-- transitionWorkflow has inserted the event.
+-- +goose StatementBegin
+CREATE FUNCTION workflow_check_has_event() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  current_status text;
+BEGIN
+  SELECT status INTO current_status FROM workflows WHERE id = NEW.id;
+  IF workflow_event_type(current_status) IS NOT NULL AND NOT EXISTS (
+       SELECT 1 FROM outbox WHERE workflow_id = NEW.id AND type = workflow_event_type(current_status)) THEN
+    RAISE EXCEPTION 'workflow % is % but has no % outbox event', NEW.id, current_status, workflow_event_type(current_status)
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+-- +goose StatementEnd
+
+CREATE CONSTRAINT TRIGGER workflows_terminal_has_event
+  AFTER INSERT OR UPDATE OF status ON workflows
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW WHEN (NEW.status IN ('SUCCEEDED', 'FAILED', 'COMPENSATED'))
+  EXECUTE FUNCTION workflow_check_has_event();
 
 -- +goose Down
+DROP TRIGGER workflows_terminal_has_event ON workflows;
+DROP FUNCTION workflow_check_has_event();
 DROP FUNCTION workflow_view(uuid);
 DROP FUNCTION workflow_event_type(text);
 DROP TABLE outbox;

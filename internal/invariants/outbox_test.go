@@ -23,18 +23,20 @@ func i8(vs []invariants.Violation) []invariants.Violation {
 	return out
 }
 
-func setWorkflowStatus(t *testing.T, pool *pgxpool.Pool, wf uuid.UUID, status string) {
+// finished moves wf to status with its event, as a real transition does; the
+// negative tests then break the event as the owner (the database refuses a
+// terminal workflow without one, so the bad state must be planted after).
+func finished(t *testing.T, e env, status string) uuid.UUID {
 	t.Helper()
-	_, err := pool.Exec(context.Background(), `UPDATE workflows SET status = $2 WHERE id = $1`, wf, status)
-	require.NoError(t, err)
+	wf, _ := newWorkflow(t, e.pool)
+	testutil.SetWorkflowStatus(t, e.pool, wf, status)
+	return wf
 }
 
-// writeEvent writes wf's event the way transitionWorkflow does.
-func writeEvent(t *testing.T, pool *pgxpool.Pool, wf uuid.UUID) {
+func ownerExec(t *testing.T, sql string, args ...any) {
 	t.Helper()
-	n, err := db.New(pool).InsertOutboxEvent(context.Background(), db.InsertOutboxEventParams{ID: uuid.Must(uuid.NewV7()), WorkflowID: wf})
+	_, err := testutil.NewOwnerPool(t, dsn).Exec(context.Background(), sql, args...)
 	require.NoError(t, err)
-	require.EqualValues(t, 1, n)
 }
 
 func plantEvent(t *testing.T, pool *pgxpool.Pool, wf uuid.UUID, typ, payload string) {
@@ -48,17 +50,15 @@ func plantEvent(t *testing.T, pool *pgxpool.Pool, wf uuid.UUID, typ, payload str
 // matching type, carrying its view; no other workflow has one.
 func TestI8_CleanTerminalWorkflowHasNone(t *testing.T) {
 	e := setup(t)
-	wf, _ := newWorkflow(t, e.pool)
-	setWorkflowStatus(t, e.pool, wf, "FAILED")
-	writeEvent(t, e.pool, wf)
+	finished(t, e, "FAILED")
 	newWorkflow(t, e.pool) // a PENDING workflow, with no event
 	require.Empty(t, i8(e.check(t)))
 }
 
 func TestI8_TerminalWithoutEvent(t *testing.T) {
 	e := setup(t)
-	wf, _ := newWorkflow(t, e.pool)
-	setWorkflowStatus(t, e.pool, wf, "SUCCEEDED")
+	wf := finished(t, e, "SUCCEEDED")
+	ownerExec(t, `DELETE FROM outbox WHERE workflow_id = $1`, wf) // e.g. lost by hand
 	v := i8(e.check(t))
 	require.Len(t, v, 1)
 	require.Equal(t, wf.String(), v[0].WorkflowID)
@@ -68,6 +68,7 @@ func TestI8_TerminalWithoutEvent(t *testing.T) {
 func TestI8_TwoEventsForOneWorkflow(t *testing.T) {
 	ctx := context.Background()
 	e := setup(t)
+	wf := finished(t, e, "FAILED")
 	owner := testutil.NewOwnerPool(t, dsn)
 	_, err := owner.Exec(ctx, `ALTER TABLE outbox DROP CONSTRAINT outbox_workflow_id_type_key`)
 	require.NoError(t, err)
@@ -76,9 +77,6 @@ func TestI8_TwoEventsForOneWorkflow(t *testing.T) {
 		_, err := owner.Exec(ctx, `ALTER TABLE outbox ADD CONSTRAINT outbox_workflow_id_type_key UNIQUE (workflow_id, type)`)
 		require.NoError(t, err)
 	})
-	wf, _ := newWorkflow(t, e.pool)
-	setWorkflowStatus(t, e.pool, wf, "FAILED")
-	writeEvent(t, e.pool, wf)
 	writeEvent(t, e.pool, wf)
 	v := i8(e.check(t))
 	require.Len(t, v, 1)
@@ -96,11 +94,8 @@ func TestI8_EventOnNonTerminalWorkflow(t *testing.T) {
 
 func TestI8_WrongType(t *testing.T) {
 	e := setup(t)
-	wf, _ := newWorkflow(t, e.pool)
-	setWorkflowStatus(t, e.pool, wf, "FAILED")
-	var view string
-	require.NoError(t, e.pool.QueryRow(context.Background(), `SELECT workflow_view($1)`, wf).Scan(&view))
-	plantEvent(t, e.pool, wf, "workflow.succeeded", view)
+	wf := finished(t, e, "FAILED")
+	ownerExec(t, `UPDATE outbox SET type = 'workflow.succeeded' WHERE workflow_id = $1`, wf)
 	v := i8(e.check(t))
 	require.Len(t, v, 1)
 	require.Contains(t, v[0].Detail, "workflow.succeeded")
@@ -109,10 +104,17 @@ func TestI8_WrongType(t *testing.T) {
 // The frozen payload is what the shop is told: it must be the workflow's view.
 func TestI8_PayloadDiffersFromView(t *testing.T) {
 	e := setup(t)
-	wf, _ := newWorkflow(t, e.pool)
-	setWorkflowStatus(t, e.pool, wf, "FAILED")
-	plantEvent(t, e.pool, wf, "workflow.failed", `{"status":"succeeded"}`)
+	wf := finished(t, e, "FAILED")
+	ownerExec(t, `UPDATE outbox SET payload = convert_to('{"status":"succeeded"}', 'UTF8') WHERE workflow_id = $1`, wf)
 	v := i8(e.check(t))
 	require.Len(t, v, 1)
 	require.Contains(t, v[0].Detail, "payload")
+}
+
+// writeEvent writes wf's event the way transitionWorkflow does.
+func writeEvent(t *testing.T, pool *pgxpool.Pool, wf uuid.UUID) {
+	t.Helper()
+	n, err := db.New(pool).InsertOutboxEvent(context.Background(), db.InsertOutboxEventParams{ID: uuid.Must(uuid.NewV7()), WorkflowID: wf})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, n)
 }

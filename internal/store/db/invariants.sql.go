@@ -229,17 +229,23 @@ func (q *Queries) NonTerminalWorkflows(ctx context.Context) ([]NonTerminalWorkfl
 }
 
 const outboxMismatches = `-- name: OutboxMismatches :many
+WITH w AS (
+  SELECT id, status, workflow_event_type(status) AS event_type,
+         CASE WHEN workflow_event_type(status) IS NOT NULL
+              THEN convert_to(workflow_view(id), 'UTF8') END AS view
+  FROM workflows
+)
 SELECT w.id AS workflow_id, w.status,
        count(o.id)::int AS events,
-       COALESCE(string_agg(DISTINCT o.type, ',') FILTER (WHERE o.type IS DISTINCT FROM workflow_event_type(w.status)), '')::text AS wrong_types,
-       (count(o.id) FILTER (WHERE o.payload IS DISTINCT FROM convert_to(workflow_view(w.id), 'UTF8')))::int AS wrong_payloads
-FROM workflows w
+       COALESCE(string_agg(DISTINCT o.type, ',') FILTER (WHERE o.type IS DISTINCT FROM w.event_type), '')::text AS wrong_types,
+       (count(o.id) FILTER (WHERE o.payload IS DISTINCT FROM w.view))::int AS wrong_payloads
+FROM w
 LEFT JOIN outbox o ON o.workflow_id = w.id
-GROUP BY w.id, w.status
-HAVING (workflow_event_type(w.status) IS NOT NULL AND count(o.id) <> 1)
-    OR (workflow_event_type(w.status) IS NULL AND count(o.id) > 0)
-    OR count(o.id) FILTER (WHERE o.type IS DISTINCT FROM workflow_event_type(w.status)) > 0
-    OR count(o.id) FILTER (WHERE o.payload IS DISTINCT FROM convert_to(workflow_view(w.id), 'UTF8')) > 0
+GROUP BY w.id, w.status, w.event_type, w.view
+HAVING (w.event_type IS NOT NULL AND count(o.id) <> 1)
+    OR (w.event_type IS NULL AND count(o.id) > 0)
+    OR count(o.id) FILTER (WHERE o.type IS DISTINCT FROM w.event_type) > 0
+    OR count(o.id) FILTER (WHERE o.payload IS DISTINCT FROM w.view) > 0
 ORDER BY w.id
 `
 
@@ -255,6 +261,7 @@ type OutboxMismatchesRow struct {
 // exactly one event, of its status's type, whose frozen payload is still its
 // view (nothing changes a workflow after it ends); any other workflow needs
 // none.
+// Each terminal workflow's view is computed once (final review M4).
 func (q *Queries) OutboxMismatches(ctx context.Context) ([]OutboxMismatchesRow, error) {
 	rows, err := q.db.Query(ctx, outboxMismatches)
 	if err != nil {

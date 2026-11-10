@@ -219,10 +219,8 @@ func TestSweeper_ExportsOutboxGauges(t *testing.T) {
 	h := newHarness(t)
 	for range 2 {
 		wf := submitTo(t, h, "cus_1", "mer_1")
-		_, err := h.pool.Exec(ctx, `UPDATE workflows SET status = 'FAILED' WHERE id = $1`, wf)
-		require.NoError(t, err)
-		_, err = h.pool.Exec(ctx, `INSERT INTO outbox (id, client_id, workflow_id, type, payload, created_at)
-			VALUES (gen_random_uuid(), 'c', $1, 'workflow.failed', '\x7b7d', now() - interval '1 hour')`, wf)
+		setWorkflowStatus(t, h.pool, wf, "FAILED")
+		_, err := h.pool.Exec(ctx, `UPDATE outbox SET created_at = now() - interval '1 hour' WHERE workflow_id = $1`, wf)
 		require.NoError(t, err)
 	}
 	m := sweepOnce(t, h)

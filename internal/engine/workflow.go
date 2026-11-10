@@ -35,7 +35,10 @@ func terminal(status string) bool {
 // of `from`. It is the only writer of workflow terminal states, and so the
 // only writer of outbox events (D13): a terminal transition inserts its event
 // in the same transaction, so the event exists if and only if the outcome
-// committed. A second event for the same workflow fails the transaction.
+// committed (the database also refuses a terminal workflow without its event,
+// migration 00014). A second event of the same type for a workflow fails the
+// transaction; a different type cannot happen, because terminal states have no
+// way out, and I8 would report it.
 func transitionWorkflow(ctx context.Context, q *db.Queries, id uuid.UUID, from []string, to string) error {
 	n, err := q.TransitionWorkflow(ctx, db.TransitionWorkflowParams{ToStatus: to, ID: id, FromStatuses: from})
 	if err != nil {

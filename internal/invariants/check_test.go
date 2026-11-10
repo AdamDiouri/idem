@@ -176,10 +176,7 @@ func (e env) postKind(t *testing.T, wf, step uuid.UUID, kind string, entries []l
 // also gets its outbox event (D13), so only the invariant under test fires.
 func (e env) setStatus(t *testing.T, wf uuid.UUID, status string) {
 	t.Helper()
-	setWorkflowStatus(t, e.pool, wf, status)
-	if status == "SUCCEEDED" || status == "FAILED" || status == "COMPENSATED" {
-		writeEvent(t, e.pool, wf)
-	}
+	testutil.SetWorkflowStatus(t, e.pool, wf, status)
 }
 
 func requireViolation(t *testing.T, vs []invariants.Violation, invariant string, wf uuid.UUID, detail string) {

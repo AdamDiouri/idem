@@ -16,13 +16,23 @@ import (
 
 const viewInput = `{"amount_cents":10000,"fee_cents":175,"currency":"EUR","customer_id":"cus_1","merchant_id":"mer_1"}`
 
-// insertWorkflow creates a workflow in status, as the owner (any status is allowed).
-func insertWorkflow(t *testing.T, pool *pgxpool.Pool, client, status string) uuid.UUID {
+// insertWorkflowRaw creates a workflow in status with a plain INSERT (for a
+// schema before the outbox existed).
+func insertWorkflowRaw(t *testing.T, pool *pgxpool.Pool, client, status string) uuid.UUID {
 	t.Helper()
 	id := uuid.Must(uuid.NewV7())
 	_, err := pool.Exec(context.Background(), `INSERT INTO workflows (id, client_id, type, status, input)
 		VALUES ($1, $2, 'payment_payout', $3, $4)`, id, client, status, viewInput)
 	require.NoError(t, err)
+	return id
+}
+
+// insertWorkflow creates a workflow in status, as a real transition would
+// leave it: a terminal one gets its outbox event in the same transaction.
+func insertWorkflow(t *testing.T, pool *pgxpool.Pool, client, status string) uuid.UUID {
+	t.Helper()
+	id := insertWorkflowRaw(t, pool, client, "RUNNING")
+	testutil.SetWorkflowStatus(t, pool, id, status)
 	return id
 }
 
@@ -124,27 +134,33 @@ func TestWorkflowView_UnknownWorkflowIsNull(t *testing.T) {
 func TestOutbox_OneEventPerWorkflowAndType(t *testing.T) {
 	pool := testutil.NewPool(t, dsn)
 	owner := testutil.NewOwnerPool(t, dsn)
-	wf := insertWorkflow(t, owner, "c", "SUCCEEDED")
+	wf := insertWorkflow(t, owner, "c", "SUCCEEDED") // with its event
 	insert := `INSERT INTO outbox (id, client_id, workflow_id, type, payload) VALUES ($1, 'c', $2, 'workflow.succeeded', '\x7b7d')`
 	_, err := pool.Exec(context.Background(), insert, uuid.Must(uuid.NewV7()), wf)
-	require.NoError(t, err)
-	_, err = pool.Exec(context.Background(), insert, uuid.Must(uuid.NewV7()), wf)
 	require.Error(t, err)
 	require.Equal(t, "23505", pgCode(t, err))
 }
 
-// The restricted application role writes and reads the outbox (the relay will
-// update it in 2.5).
-func TestOutbox_AppRoleMayInsertAndRead(t *testing.T) {
+// The restricted application role writes, reads and updates the outbox (the
+// relay will update it in 2.5) but never deletes an event (final review M5):
+// a deleted event is an outcome the shop never learns.
+func TestOutbox_AppRoleMayInsertAndReadButNotDelete(t *testing.T) {
+	ctx := context.Background()
 	pool := testutil.NewPool(t, dsn) // the restricted login
 	owner := testutil.NewOwnerPool(t, dsn)
-	wf := insertWorkflow(t, owner, "c", "FAILED")
-	_, err := pool.Exec(context.Background(), `INSERT INTO outbox (id, client_id, workflow_id, type, payload)
+	wf := insertWorkflow(t, owner, "c", "RUNNING")
+	_, err := pool.Exec(ctx, `INSERT INTO outbox (id, client_id, workflow_id, type, payload)
 		VALUES ($1, 'c', $2, 'workflow.failed', convert_to(workflow_view($2), 'UTF8'))`, uuid.Must(uuid.NewV7()), wf)
 	require.NoError(t, err)
-	var status string
-	require.NoError(t, pool.QueryRow(context.Background(), `SELECT status FROM outbox WHERE workflow_id = $1`, wf).Scan(&status))
-	require.Equal(t, "PENDING", status)
+	var st string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT status FROM outbox WHERE workflow_id = $1`, wf).Scan(&st))
+	require.Equal(t, "PENDING", st)
+	_, err = pool.Exec(ctx, `UPDATE outbox SET attempts = attempts + 1 WHERE workflow_id = $1`, wf)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx, `DELETE FROM outbox WHERE workflow_id = $1`, wf)
+	require.Error(t, err)
+	require.Equal(t, "42501", pgCode(t, err)) // insufficient_privilege
 }
 
 // Review focus 5: a database whose workflows finished before the outbox
@@ -154,11 +170,11 @@ func TestMigrate_00014BackfillsTerminalWorkflows(t *testing.T) {
 	testutil.NewPool(t, dsn)
 	owner := testutil.NewOwnerPool(t, dsn)
 	t.Cleanup(func() { require.NoError(t, store.Migrate(ctx, owner)) })
-	require.NoError(t, store.MigrateDownTo(ctx, owner, 13))
+	require.NoError(t, store.MigrateDownTo(ctx, owner, 13)) // undoes 00015 and 00014
 
-	succeeded := insertWorkflow(t, owner, "c", "SUCCEEDED")
-	failed := insertWorkflow(t, owner, "c", "FAILED")
-	insertWorkflow(t, owner, "c", "RUNNING")
+	succeeded := insertWorkflowRaw(t, owner, "c", "SUCCEEDED")
+	failed := insertWorkflowRaw(t, owner, "c", "FAILED")
+	insertWorkflowRaw(t, owner, "c", "RUNNING")
 	require.NoError(t, store.Migrate(ctx, owner))
 
 	rows, err := owner.Query(ctx, `SELECT o.workflow_id, o.type, convert_from(o.payload, 'UTF8') = workflow_view(o.workflow_id)
@@ -177,4 +193,42 @@ func TestMigrate_00014BackfillsTerminalWorkflows(t *testing.T) {
 	}
 	require.NoError(t, rows.Err())
 	require.Equal(t, []ev{{succeeded, "workflow.succeeded", true}, {failed, "workflow.failed", true}}, got)
+}
+
+// Final review I1: the database refuses a terminal workflow without its event,
+// so a binary that predates the outbox (still draining during a rolling
+// upgrade) cannot end a workflow silently: its completion rolls back and a
+// current worker redoes it, with the same idempotency key.
+func TestOutbox_TerminalWorkflowNeedsItsEvent(t *testing.T) {
+	ctx := context.Background()
+	pool := testutil.NewPool(t, dsn) // the restricted login, as services run
+	owner := testutil.NewOwnerPool(t, dsn)
+	wf := insertWorkflow(t, owner, "c", "RUNNING")
+
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `UPDATE workflows SET status = 'SUCCEEDED' WHERE id = $1`, wf)
+	require.NoError(t, err)
+	err = tx.Commit(ctx)
+	require.Error(t, err, "an outcome without its event must not commit")
+	require.Equal(t, "23514", pgCode(t, err))
+	require.Equal(t, "RUNNING", status(t, owner, wf))
+
+	tx, err = pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `UPDATE workflows SET status = 'SUCCEEDED' WHERE id = $1`, wf)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `INSERT INTO outbox (id, client_id, workflow_id, type, payload)
+		VALUES ($1, 'c', $2, 'workflow.succeeded', convert_to(workflow_view($2), 'UTF8'))`, uuid.Must(uuid.NewV7()), wf)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx), "with its event, the outcome commits")
+}
+
+func status(t *testing.T, pool *pgxpool.Pool, wf uuid.UUID) string {
+	t.Helper()
+	var s string
+	require.NoError(t, pool.QueryRow(context.Background(), `SELECT status FROM workflows WHERE id = $1`, wf).Scan(&s))
+	return s
 }

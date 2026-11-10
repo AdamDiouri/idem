@@ -400,7 +400,7 @@ After a fully successful workflow, `provider_receivable` holds exactly the fee a
 ### 11.3 Outbox
 > **Built in M2 slice 2.4** (the relay that delivers events comes in 2.5); see the [M2 design](superpowers/specs/2026-11-10-milestone-2-design.md) §5.2–5.3 (D13, D14, D19).
 
-A workflow's outcome (`workflow.succeeded`, `workflow.failed`, `workflow.compensated`) is written to `outbox` by `transitionWorkflow`, in the same transaction as the terminal transition, so an event exists if and only if its outcome committed. The payload is the shop's view of the workflow, from the SQL function `workflow_view`, which `GET /workflows/{id}` also returns. `UNIQUE (workflow_id, type)` makes a second event fail the transaction. Invariant I8 checks it after every chaos run and in `idem check`.
+A workflow's outcome (`workflow.succeeded`, `workflow.failed`, `workflow.compensated`) is written to `outbox` by `transitionWorkflow`, in the same transaction as the terminal transition, so an event exists if and only if its outcome committed. The payload is the shop's view of the workflow, from the SQL function `workflow_view`, which `GET /workflows/{id}` also returns. The database enforces the pairing too: a deferred constraint trigger refuses to commit a terminal workflow without its event (so a binary from before the outbox, still draining during a rolling upgrade, cannot end a workflow silently), and `UNIQUE (workflow_id, type)` refuses a second event of the same type. Invariant I8 checks the whole picture (one event, right type, payload equal to the view) after every chaos run and in `idem check`.
 
 ### 11.4 Admin actions (CLI, audited)
 As built in slice 1.6.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -124,4 +125,34 @@ func NewPool(t *testing.T, dsn string) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// SetWorkflowStatus moves a workflow to status as a real transition does: a
+// terminal status gets its outbox event in the same transaction (D13; the
+// database refuses one without the other). set adds SQL assignments to the
+// UPDATE, e.g. "updated_at = now() - interval '2 hours'".
+func SetWorkflowStatus(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, status string, set ...string) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	assignments := "status = $2"
+	for _, s := range set {
+		assignments += ", " + s
+	}
+	if _, err := tx.Exec(ctx, `UPDATE workflows SET `+assignments+` WHERE id = $1`, id, status); err != nil {
+		t.Fatalf("set workflow status: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO outbox (id, client_id, workflow_id, type, payload)
+		SELECT gen_random_uuid(), client_id, id, workflow_event_type(status), convert_to(workflow_view(id), 'UTF8')
+		FROM workflows WHERE id = $1 AND workflow_event_type(status) IS NOT NULL
+		ON CONFLICT (workflow_id, type) DO NOTHING`, id); err != nil {
+		t.Fatalf("write outbox event: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit workflow status: %v", err)
+	}
 }

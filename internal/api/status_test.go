@@ -58,8 +58,7 @@ func created(t *testing.T, h http.Handler, key string) uuid.UUID {
 
 func setStatus(t *testing.T, id uuid.UUID, status string) {
 	t.Helper()
-	_, err := testutil.NewOwnerPool(t, dsn).Exec(context.Background(), `UPDATE workflows SET status = $2 WHERE id = $1`, id, status)
-	require.NoError(t, err)
+	testutil.SetWorkflowStatus(t, testutil.NewOwnerPool(t, dsn), id, status)
 }
 
 // Slice 2.4 (spec §5.1).
@@ -84,9 +83,7 @@ func TestGetWorkflow_TerminalMatchesOutboxPayload(t *testing.T) {
 	ctx := context.Background()
 	h, pool, _ := statusServer(t)
 	id := created(t, h, "k-1")
-	setStatus(t, id, "FAILED")
-	_, err := db.New(pool).InsertOutboxEvent(ctx, db.InsertOutboxEventParams{ID: uuid.Must(uuid.NewV7()), WorkflowID: id})
-	require.NoError(t, err)
+	setStatus(t, id, "FAILED") // writes the event, as InsertOutboxEvent does
 	events, err := db.New(pool).OutboxEventsForWorkflow(ctx, id)
 	require.NoError(t, err)
 	require.Len(t, events, 1)
