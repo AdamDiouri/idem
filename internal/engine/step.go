@@ -91,11 +91,14 @@ const (
 	// step's hook (ledger posting, saga move) kept failing. The provider DID
 	// act; fix the bug, then retry or confirm the step.
 	DeadHookFailed = "hook_failed"
+	// DeadHookFailedNoEffect: the same, but the provider REFUSED the request
+	// and no earlier send was in doubt: nothing moved, nothing is posted.
+	DeadHookFailedNoEffect = "hook_failed_no_effect"
 )
 
 // MoneyMayHaveMoved reports whether a dead reason leaves the external effect unknown.
 func MoneyMayHaveMoved(deadReason string) bool {
-	return deadReason != DeadAttemptsExhaustedNoEffect
+	return deadReason != DeadAttemptsExhaustedNoEffect && deadReason != DeadHookFailedNoEffect
 }
 
 // Result is what a worker learned from executing a step.

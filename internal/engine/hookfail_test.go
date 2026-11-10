@@ -94,3 +94,52 @@ func TestRecordHookFailure_Fenced(t *testing.T) {
 	require.Equal(t, "RUNNING", status)
 	require.Equal(t, 0, failures)
 }
+
+// sendDoubt reports whether the step's send history says money may have moved
+// (the one definition, step_send_doubt).
+func (h harness) sendDoubt(t *testing.T, wf uuid.UUID) bool {
+	t.Helper()
+	return scalar[bool](t, h.pool, `SELECT step_send_doubt(id) FROM steps WHERE workflow_id = $1 AND name = 'charge'`, wf)
+}
+
+// Final review, Important 1: a send the provider refused moved nothing. If its
+// failure hook keeps failing, neither the retries nor the parking may turn
+// that into doubt (which the pivot rule would later act on).
+func TestRefusedSendHookFails_NeverBecomesDoubt(t *testing.T) {
+	h := newHarness(t)
+	wf := submit(t, h.pool, "cus_1")
+	step := &stubStep{
+		failureErr: errHookBug,
+		execute: func(context.Context, engine.ClaimedStep) provider.Outcome {
+			return provider.Outcome{Class: provider.Permanent, HTTPStatus: 422, Err: errors.New("account closed")}
+		},
+	}
+	w := h.workerWith("w1", func(o *engine.WorkerOptions) { o.HookMaxFailures = 2 }, step)
+
+	_, err := w.RunOnce(context.Background())
+	require.ErrorIs(t, err, errHookBug)
+	status, _, failures := h.hookFailures(t, wf)
+	require.Equal(t, "PENDING", status, "below the limit: retried, not in doubt")
+	require.Equal(t, 1, failures)
+	require.False(t, h.sendDoubt(t, wf))
+
+	_, err = w.RunOnce(context.Background())
+	require.ErrorIs(t, err, errHookBug)
+	status, reason, failures := h.hookFailures(t, wf)
+	require.Equal(t, "DEAD", status)
+	require.Equal(t, engine.DeadHookFailedNoEffect, reason)
+	require.Equal(t, 2, failures)
+	require.False(t, h.sendDoubt(t, wf), "at the limit too: the refusal moved nothing")
+	require.False(t, engine.MoneyMayHaveMoved(reason))
+
+	// The operator fixes the bug and retries: the refusal is replayed and the
+	// failure hook now runs (no pivot-rule parking, no confirmation needed).
+	step.mu.Lock()
+	step.failureErr = nil
+	step.mu.Unlock()
+	stepID := scalar[uuid.UUID](t, h.pool, `SELECT id FROM steps WHERE workflow_id = $1 AND name = 'charge'`, wf)
+	require.NoError(t, h.admin().RetryStep(context.Background(), stepID, h.version(t, wf), "hook fixed"))
+	require.Equal(t, "PENDING", h.chargeStatus(t, wf))
+	require.Equal(t, "failed_permanent", h.runOnce(t, w).Outcome)
+	require.Equal(t, 3, step.failureCalls)
+}

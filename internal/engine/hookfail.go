@@ -25,8 +25,9 @@ const DefaultHookMaxFailures = 3
 //     the provider refused moved nothing and goes back to PENDING, so the
 //     failed hook does not turn into doubt. Each retries after delay and
 //     replays the same idempotency key.
-//   - at max: the step is DEAD with hook_failed and its workflow needs
-//     attention (dead is true). Retrying a bug forever helps no one.
+//   - at max: the step is DEAD with hook_failed (or hook_failed_no_effect for
+//     a refusal with no earlier doubt) and its workflow needs attention (dead
+//     is true). Retrying a bug forever helps no one.
 func RecordHookFailure(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, failed Result, hookErr error, maxFailures int, delay time.Duration) (dead bool, err error) {
 	if maxFailures <= 0 {
 		maxFailures = DefaultHookMaxFailures
@@ -46,13 +47,23 @@ func RecordHookFailure(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, f
 		return false, fmt.Errorf("count hook failure: %w", err)
 	}
 
+	// A send the provider refused moved nothing; unless an earlier send was in
+	// doubt, its attempt must not read as doubt either (the pivot rule acts on
+	// that history), below the limit or at it.
+	poll := s.PriorStatus == string(ResultAwaitingCallback)
+	refused := failed.Kind == ResultFailedPermanent && !poll
+	noEffect := refused && !s.SendDoubt && s.PriorStatus != string(ResultInDoubt)
+
 	r := Result{Kind: ResultInDoubt, RetryDelay: delay, Error: hookErr.Error()}
 	switch {
+	case int(failures) >= maxFailures && noEffect:
+		r = Result{Kind: ResultDead, DeadReason: DeadHookFailedNoEffect, Error: hookErr.Error(),
+			AttemptOutcome: ResultRetryNoEffect}
 	case int(failures) >= maxFailures:
 		r = Result{Kind: ResultDead, DeadReason: DeadHookFailed, Error: hookErr.Error()}
-	case s.PriorStatus == string(ResultAwaitingCallback):
+	case poll:
 		r.Kind = ResultAwaitingCallback
-	case failed.Kind == ResultFailedPermanent:
+	case refused:
 		r.Kind = ResultRetryNoEffect
 	}
 	if _, err := q.CompleteStep(ctx, db.CompleteStepParams{
@@ -64,8 +75,12 @@ func RecordHookFailure(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, f
 	if err := applyResult(ctx, q, s, r, nil); err != nil { // DEAD: the workflow needs attention
 		return false, err
 	}
+	outcome := r.Kind
+	if r.AttemptOutcome != "" {
+		outcome = r.AttemptOutcome
+	}
 	if err := q.FinishStepAttempt(ctx, db.FinishStepAttemptParams{
-		Outcome: string(r.Kind), Error: optional(r.Error), StepID: s.ID, AttemptNo: s.AttemptNo,
+		Outcome: string(outcome), Error: optional(r.Error), StepID: s.ID, AttemptNo: s.AttemptNo,
 	}); err != nil {
 		return false, fmt.Errorf("finish attempt: %w", err)
 	}

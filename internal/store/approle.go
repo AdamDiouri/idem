@@ -16,9 +16,25 @@ func EnsureAppUser(ctx context.Context, pool *pgxpool.Pool, user, password strin
 	if user == "" || password == "" {
 		return errors.New("app database user and password must both be set")
 	}
-	var exists bool
-	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, user).Scan(&exists); err != nil {
+	// An existing role must be a plain one: taking over the owner, the current
+	// user or a privileged role would change its password and run the services
+	// with rights the application role exists to deny.
+	var exists, isCurrent, privileged, owns bool
+	if err := pool.QueryRow(ctx, `
+		SELECT r.oid IS NOT NULL,
+		       $1 = current_user,
+		       COALESCE(r.rolsuper OR r.rolcreaterole OR r.rolbypassrls OR r.rolcreatedb OR r.rolreplication, false),
+		       EXISTS (SELECT 1 FROM pg_class c WHERE c.relowner = r.oid)
+		FROM (SELECT 1) one LEFT JOIN pg_roles r ON r.rolname = $1`, user).Scan(&exists, &isCurrent, &privileged, &owns); err != nil {
 		return fmt.Errorf("look up role: %w", err)
+	}
+	switch {
+	case isCurrent:
+		return fmt.Errorf("IDEM_APP_DB_USER %q is the user running the migrations: the application needs its own, restricted login", user)
+	case privileged:
+		return fmt.Errorf("IDEM_APP_DB_USER %q is a privileged role (superuser, CREATEROLE, CREATEDB, BYPASSRLS or REPLICATION): choose a plain login", user)
+	case owns:
+		return fmt.Errorf("IDEM_APP_DB_USER %q owns tables in this database: an owner may rewrite the ledger; choose a plain login", user)
 	}
 	verb := "CREATE"
 	if exists {

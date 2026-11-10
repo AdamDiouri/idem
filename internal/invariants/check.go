@@ -312,6 +312,7 @@ func effectAmounts(effects []fakeprovider.Effect) map[string]map[string]int64 {
 var definitiveReasons = map[string]bool{
 	"permanent_after_in_doubt":     true,
 	"attempts_exhausted_no_effect": true,
+	"hook_failed_no_effect":        true,
 }
 
 // unresolved returns the parked workflows whose outcome is unknown: those

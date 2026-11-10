@@ -77,3 +77,25 @@ func TestEnsureAppUser_Idempotent(t *testing.T) {
 	_, err = pgx.Connect(ctx, asUser(t, "approle_idem_user", "first-password"))
 	require.Error(t, err, "the old password no longer works")
 }
+
+// Final review, Important 2: the application login must be a plain role. Given
+// the owner (or any privileged role) it would take its password over and the
+// services would run with the owner's rights, silently voiding the guarantee.
+func TestEnsureAppUser_RefusesPrivilegedRoles(t *testing.T) {
+	ctx := context.Background()
+	owner := testutil.NewOwnerPool(t, dsn)
+
+	err := store.EnsureAppUser(ctx, owner, "idem", "new-password") // the owner, current_user, a superuser
+	require.ErrorContains(t, err, "IDEM_APP_DB_USER")
+
+	_, err = owner.Exec(ctx, `DROP ROLE IF EXISTS approle_admin; CREATE ROLE approle_admin LOGIN CREATEROLE`)
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = owner.Exec(ctx, `DROP ROLE IF EXISTS approle_admin`) })
+	require.ErrorContains(t, store.EnsureAppUser(ctx, owner, "approle_admin", "pw-pw-pw"), "IDEM_APP_DB_USER")
+
+	_, err = owner.Exec(ctx, `DROP ROLE IF EXISTS approle_owner; CREATE ROLE approle_owner LOGIN;
+		CREATE TABLE approle_owned (id int); ALTER TABLE approle_owned OWNER TO approle_owner`)
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = owner.Exec(ctx, `DROP TABLE IF EXISTS approle_owned; DROP ROLE IF EXISTS approle_owner`) })
+	require.ErrorContains(t, store.EnsureAppUser(ctx, owner, "approle_owner", "pw-pw-pw"), "owns")
+}

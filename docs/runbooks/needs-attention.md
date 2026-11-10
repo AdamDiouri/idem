@@ -128,6 +128,8 @@ The provider **answered**, but the step's own bookkeeping kept failing: the ledg
    - Or, if you have confirmed the outcome with the provider, `idem admin confirm-step <step> --provider-ref <ref> --expect-version <V> --reason …`, which runs the same success hook.
 3. Never use `new-generation`: the provider already acted on this key, so a new key could act twice.
 
+**`hook_failed_no_effect`** is the same failure after the provider **refused** the request (and no earlier attempt was in doubt): nothing moved and nothing is posted, so it does not page `IdemMoneyMayHaveMoved`. Fix the cause, then `retry-step`: the provider replays its refusal and the now-working failure hook runs (for a payout, the customer is refunded).
+
 ### Provider news about a parked workflow (`PROVIDER SAYS`)
 
 When a webhook arrives for a parked step, idem re-checks it with the provider and shows it in the `PROVIDER SAYS` column. It never resolves the workflow by itself (money decisions made under doubt end with a human).
