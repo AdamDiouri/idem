@@ -214,7 +214,7 @@ Ledger postings are **not** separate steps. Each is written inside the success t
 | Step | External call | Async? | On success (same txn) | Compensable? |
 |---|---|---|---|---|
 | `charge` | `POST /charges` | No | Post charge entries; create `payout` step | Yes, via `refund` |
-| `payout` | `POST /payouts` | **No in M1** (synchronous). M2: `202 pending` + webhook | Post payout entries; workflow `SUCCEEDED` | **No — pivot step.** Once paid, money is gone. |
+| `payout` | `POST /payouts` | **Yes (M2, slice 2.1):** `202 pending` → `AWAITING_CALLBACK` → workers poll after the callback deadline (webhooks: slice 2.2) | Post payout entries when **paid**; workflow `SUCCEEDED` | **No — pivot step.** Once paid, money is gone. |
 | `refund` | `POST /refunds` | No | Post reversal entries; workflow `COMPENSATED` | No (must be retried hard) |
 
 ### 8.2 Workflow states
@@ -242,7 +242,7 @@ PENDING ───────▶ RUNNING ─────────────
 any non-terminal, attempts exhausted ─▶ DEAD   (workflow → NEEDS_ATTENTION)
 ```
 - `PENDING` and `IN_DOUBT` are both claimable. The difference is semantic: `IN_DOUBT` means *"we may already have caused an effect"*, which matters for metrics, alerting, and for what happens when attempts run out (a `DEAD` step that was `IN_DOUBT` may have moved money — the alert says so).
-- `AWAITING_CALLBACK` is introduced in **M2** with async payouts; it is shown here so the M1 state machine is designed to accept it.
+- `AWAITING_CALLBACK` arrived in **M2 slice 2.1**. An accepted payout waits there until its `callback_deadline`, then becomes claimable for a **poll** (`GET /payouts/{id}`). Polls are attempts of kind `poll`, counted in `poll_count` and not in the send budget. They send nothing, so they never create doubt (D17), and a crashed poll goes back to waiting, not to `IN_DOUBT`. After `IDEM_CALLBACK_MAX_POLLS` polls the step is `DEAD` with `callback_unresolved` (money may have moved).
 - `DEAD` is the dead-letter state. There is **no separate DLQ table** in M1; the dead-letter queue is `SELECT … WHERE status = 'DEAD'` (decision D4).
 
 ---
@@ -331,7 +331,7 @@ The central rule: **if the request might have reached the provider, the outcome 
 | Observation | Class | Next step state |
 |---|---|---|
 | `2xx` with final result | `SUCCESS` | `SUCCEEDED` |
-| `202` pending (payouts, **M2**) | `ACCEPTED_ASYNC` | `AWAITING_CALLBACK`, `callback_deadline = now() + X` |
+| `202` pending (payouts, **M2**) | `Accepted` | `AWAITING_CALLBACK`, `callback_deadline = now() + IDEM_CALLBACK_DEADLINE` |
 | `400`, `402`, `422` (declined, invalid account, validation) | `PERMANENT` | `FAILED_PERMANENT` |
 | `409` (same key currently being processed at provider) | `RETRYABLE_IN_FLIGHT` | `IN_DOUBT`, short backoff |
 | `429` | `RETRYABLE_NO_EFFECT` | `PENDING`, backoff honouring `Retry-After` |
@@ -351,7 +351,7 @@ Retry policy: exponential backoff with **full jitter** — `delay = rand(0, min(
 
 ### 9.5 Async payouts and webhooks (Milestone 2)
 
-> Deferred to M2. Specified here so M1's schema and state machine leave room for it.
+> **Superseded by [the M2 design](superpowers/specs/2026-11-10-milestone-2-design.md) §4.** Polling shipped in slice 2.1 (done by workers, D12); webhooks arrive in slice 2.2. The original sketch is kept below for history.
 
 - **Receive:** verify signature → `INSERT INTO webhook_inbox … ON CONFLICT (provider_event_id) DO NOTHING` → commit → respond `200`. Respond `200` for duplicates too (the provider should stop retrying). Respond `5xx` if the insert fails so the provider retries.
 - **Process:** a worker loop claims unprocessed inbox rows (`SKIP LOCKED`), matches them to a step by `provider_ref` or idempotency key, and applies the transition in one transaction.
@@ -388,7 +388,7 @@ After a fully successful workflow, `provider_receivable` holds exactly the fee a
 | Condition | Action |
 |---|---|
 | `RUNNING` and `lease_expires_at < now()` | → `IN_DOUBT`, `lease_epoch + 1`, mark the open attempt `ABANDONED`. |
-| `AWAITING_CALLBACK` and `callback_deadline < now()` | Poll provider (§9.5). **M2.** |
+| `AWAITING_CALLBACK` and `callback_deadline < now()` | Nothing: **workers** claim it and poll (D12). A poll whose lease expires goes back to `AWAITING_CALLBACK`, not `IN_DOUBT`. |
 | Non-terminal workflow older than `stuck_threshold` | Raise metric/alert. Don't change state — just make it loud. |
 | Inbox rows unprocessed for > threshold | Raise metric/alert. **M2.** |
 
@@ -541,7 +541,7 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 - OpenTelemetry tracing → Milestone 3.
 
 ### Later milestones (outline only)
-- **M2** — **Async payouts + webhooks first** (inbox, HMAC signatures, `AWAITING_CALLBACK`, deadline polling; F15–F19); then generalise workflow definitions; outbox relay; key retention/expiry; admin tooling polish; settlement reconciliation job.
+- **M2** — **Nobody silently disagrees:** see [the M2 design](superpowers/specs/2026-11-10-milestone-2-design.md). Async payouts and polling (2.1), provider webhooks (2.2, 2.3), status + outbox + relay to shops (2.4, 2.5), reconciliation (2.6). Generic workflow definitions moved to M4.
 - **M3** — Prove it at scale: long chaos campaigns, toxiproxy network faults, load tests, tracing, SLOs + alerts, a published chaos report.
   - **Traffic generator (`cmd/loadgen`)** — simulates 100–500 external clients against the public API only (no database or internal shortcuts while generating load):
     - **Realistic misbehaviour, not just happy paths:** clients that time out and retry with the same key; double submissions; impatient retries with a *new* key (a real client bug the system must survive); declined customers; malformed payloads.
@@ -569,6 +569,8 @@ Each slice ends with passing tests and a short write-up in `docs/journal/`.
 | D9 | Payouts synchronous in M1; async + webhooks first thing in M2 | Reach a complete, chaos-tested flow sooner; M1 schema/state machine already leave room | Async in M1 |
 | D10 | Single currency (EUR) in M1, `currency` column kept | Simplicity now, cheap to extend later | Multi-currency from day one |
 | D11 | Platform fees kept; integer cents, half-to-even rounding, fixed at workflow creation | Realism; fee rounding is a classic source of ledger drift | No fees |
+| D12 | (M2) Workers poll waiting payouts, not the sweeper | Workers already own every provider call, leases and fencing; the sweeper stays database-only | Sweeper polls |
+| D17 | (M2) Polls are attempts of kind `poll` and never create doubt; the pivot rule reads the history of send attempts | A `GET` cannot move money; counting a crashed poll as doubt would park clean failures | Treat every attempt alike |
 
 **Calls made by Claude while drafting (please check):** D2, D4, D7, D8; fee defaults and rounding rule; retry defaults; one hard-coded workflow type; static API token; in-memory fake provider; `generation` mechanism for deliberate new keys.
 

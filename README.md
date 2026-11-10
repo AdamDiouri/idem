@@ -54,7 +54,9 @@ FAILED          refund ──ok──▶ COMPENSATED
            NEEDS_ATTENTION   (also: any step DEAD, e.g. an ambiguous payout — never auto-refunded)
 ```
 
-Magic test IDs in the fake provider: customers starting with `cus_decline` are declined; merchants starting with `mer_invalid` have an invalid account, so the payout fails and the customer is refunded. Watch a compensation:
+Magic test IDs in the fake provider: customers starting with `cus_decline` are declined; merchants starting with `mer_invalid` have an invalid account, so the payout fails and the customer is refunded.
+
+Payouts are **asynchronous**, like real ones. The provider answers `202 pending`, and the payout settles `FAKEPROVIDER_PAYOUT_SETTLE` later (default `2s`). The payout step waits in `AWAITING_CALLBACK`, and workers poll `GET /payouts/{id}` after `IDEM_CALLBACK_DEADLINE`. The `payout_fail` fault makes an accepted payout settle `failed`. Watch a compensation:
 
 ```bash
 curl -s -X POST localhost:8080/workflows -H 'Authorization: Bearer demo-token-0123456789' \
@@ -220,6 +222,8 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_SHUTDOWN_GRACE` | `15s` | How long an in-flight step may finish after SIGTERM; at least provider timeout + 2s |
 | `IDEM_STUCK_AFTER` | `15m` | Sweeper logs non-terminal workflows unchanged for this long |
 | `IDEM_SWEEP_INTERVAL` | `5s` | How often the sweeper reclaims expired leases |
+| `IDEM_CALLBACK_DEADLINE` | `10m` | How long an accepted payout waits for its result before workers poll it |
+| `IDEM_CALLBACK_MAX_POLLS` | `8` | Polls (with backoff) before a still-unsettled payout is `callback_unresolved` |
 | `IDEM_WORKER_ID` | `hostname-pid` | |
 | `IDEM_METRICS_ADDR` | `:8090` | Where worker/sweeper serve `/metrics`; `off` disables |
 | `IDEM_FAILPOINTS` | (none) | `name=exit\|panic\|sleep:<d>[@probability],...` |

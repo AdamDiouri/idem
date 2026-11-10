@@ -58,6 +58,8 @@ type Report struct {
 	// worker had lost its lease, and steps that succeeded after being IN_DOUBT.
 	FencedCommits   int                    `json:"fenced_commits"`
 	InDoubtResolved int                    `json:"in_doubt_resolved"`
+	CallbackPolls   int                    `json:"callback_polls"` // polls of accepted payouts (slice 2.1)
+	PayoutsWaited   int                    `json:"payouts_waited"` // payout steps polled at least once
 	Violations      []invariants.Violation `json:"violations"`
 	Liveness        []invariants.Violation `json:"liveness"`
 	Restarts        map[string]int         `json:"restarts"` // process → crash restarts
@@ -202,6 +204,7 @@ func (r *Report) Text() string {
 	fmt.Fprintf(&b, "provider fault hits: %v\n", r.FaultHits)
 	fmt.Fprintf(&b, "failpoint exits: %d\n", r.FailpointExits)
 	fmt.Fprintf(&b, "fenced commits: %d\nin-doubt resolved: %d\n", r.FencedCommits, r.InDoubtResolved)
+	fmt.Fprintf(&b, "callback polls: %d (payouts that waited: %d)\n", r.CallbackPolls, r.PayoutsWaited)
 
 	fmt.Fprintf(&b, "crash restarts:\n")
 	for _, name := range slices.Sorted(maps.Keys(r.Restarts)) {
