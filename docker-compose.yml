@@ -1,9 +1,13 @@
+# Secrets and local settings come from .env (copy .env.example; `make up` does
+# it for you). Secrets use ${VAR:?…}, so compose refuses to start without them.
+x-database-url: &database-url postgres://idem:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}@postgres:5432/idem?sslmode=disable
+
 services:
   postgres:
     image: postgres:18
     environment:
       POSTGRES_USER: idem
-      POSTGRES_PASSWORD: idem
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}
       POSTGRES_DB: idem
     ports:
       - "5432:5432"
@@ -20,7 +24,7 @@ services:
     build: .
     command: ["migrate"]
     environment:
-      IDEM_DATABASE_URL: postgres://idem:idem@postgres:5432/idem?sslmode=disable
+      IDEM_DATABASE_URL: *database-url
     depends_on:
       postgres:
         condition: service_healthy
@@ -29,9 +33,9 @@ services:
     build: .
     command: ["api"]
     environment:
-      IDEM_DATABASE_URL: postgres://idem:idem@postgres:5432/idem?sslmode=disable
-      IDEM_API_TOKENS: demo=demo-token-0123456789
-      IDEM_PROVIDER_WEBHOOK_SECRETS: whsec_demo_0123456789
+      IDEM_DATABASE_URL: *database-url
+      IDEM_API_TOKENS: demo=${IDEM_DEMO_TOKEN:?set IDEM_DEMO_TOKEN in .env (see .env.example)}
+      IDEM_PROVIDER_WEBHOOK_SECRETS: ${IDEM_WEBHOOK_SECRET:?set IDEM_WEBHOOK_SECRET in .env (see .env.example)}
     ports:
       - "8080:8080"
     depends_on:
@@ -42,10 +46,10 @@ services:
     build: .
     entrypoint: ["/fakeprovider"]
     environment:
-      FAKEPROVIDER_PAYOUT_SETTLE: 2s # accepted payouts settle 2s later
+      FAKEPROVIDER_PAYOUT_SETTLE: ${FAKEPROVIDER_PAYOUT_SETTLE:-2s} # accepted payouts settle 2s later
       # ...and are announced by signed webhook (slice 2.2); polling stays the net
       FAKEPROVIDER_WEBHOOK_URL: http://api:8080/webhooks/provider
-      FAKEPROVIDER_WEBHOOK_SECRET: whsec_demo_0123456789
+      FAKEPROVIDER_WEBHOOK_SECRET: ${IDEM_WEBHOOK_SECRET:?set IDEM_WEBHOOK_SECRET in .env (see .env.example)}
     ports:
       - "9090:9090"
 
@@ -54,9 +58,9 @@ services:
     command: ["worker"]
     stop_grace_period: 20s # > IDEM_SHUTDOWN_GRACE so in-flight steps finish
     environment: &worker-env
-      IDEM_DATABASE_URL: postgres://idem:idem@postgres:5432/idem?sslmode=disable
+      IDEM_DATABASE_URL: *database-url
       IDEM_PROVIDER_URL: http://fakeprovider:9090
-      IDEM_CALLBACK_DEADLINE: 5s # demo: poll a waiting payout after 5s (default 10m)
+      IDEM_CALLBACK_DEADLINE: ${IDEM_CALLBACK_DEADLINE:-5s} # demo: poll a waiting payout after 5s (default 10m)
     depends_on: &worker-deps
       migrate:
         condition: service_completed_successfully

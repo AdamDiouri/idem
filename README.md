@@ -5,7 +5,7 @@ Work may be attempted more than once; its effects happen at most once.
 
 See [`docs/design.md`](docs/design.md) for the design, guarantees, fault model and failure-mode table.
 
-**Status:** Milestone 1 complete. The full saga (charge, payout, or refund on a definite payout failure) runs with leases, fencing, retries, dead letters and invariant checks. A chaos harness proves it under crashes and faults, and operators get audited admin actions, Prometheus metrics, alerts and a runbook. Next: milestone 2 (async payouts with webhooks, generic workflow definitions).
+**Status:** Milestone 1 complete. The full saga (charge, payout, or refund on a definite payout failure) runs with leases, fencing, retries, dead letters and invariant checks. A chaos harness proves it under crashes and faults, and operators get audited admin actions, Prometheus metrics, alerts and a runbook. Milestone 2 in progress ([design](docs/superpowers/specs/2026-11-10-milestone-2-design.md)): asynchronous payouts with polling (2.1) and signed provider webhooks (2.2) are done.
 
 ## Prerequisites
 
@@ -19,6 +19,14 @@ See [`docs/design.md`](docs/design.md) for the design, guarantees, fault model a
 make up   # postgres → migrate → api (:8080), worker, sweeper, fakeprovider (:9090)
 ```
 
+**Local settings and secrets** live in `.env`, which is never committed. The first `make up` creates it from [`.env.example`](.env.example); edit it to change the Postgres password, the demo API token or the webhook secret. Compose refuses to start if a secret is missing. Load it into your shell to use the examples below:
+
+```bash
+set -a; . ./.env; set +a     # exports IDEM_DEMO_TOKEN, POSTGRES_PASSWORD, ...
+```
+
+After changing `POSTGRES_PASSWORD`, run `make reset` (it deletes the local database) before `make up`: Postgres only applies the password when it first creates its volume.
+
 | Service | Command | Role |
 |---|---|---|
 | `api` | `idem api` | Accepts workflows idempotently |
@@ -31,7 +39,7 @@ Submit a workflow:
 
 ```bash
 curl -i -X POST localhost:8080/workflows \
-  -H 'Authorization: Bearer demo-token-0123456789' \
+  -H "Authorization: Bearer $IDEM_DEMO_TOKEN" \
   -H 'Idempotency-Key: order-42' \
   -d '{"amount_cents":10000,"currency":"EUR","customer_id":"cus_1","merchant_id":"mer_1"}'
 ```
@@ -58,10 +66,14 @@ Magic test IDs in the fake provider: customers starting with `cus_decline` are d
 
 Payouts are **asynchronous**, like real ones. The provider answers `202 pending`, and the payout settles `FAKEPROVIDER_PAYOUT_SETTLE` later (default `2s`). The payout step waits in `AWAITING_CALLBACK`, and workers poll `GET /payouts/{id}` after `IDEM_CALLBACK_DEADLINE`. The `payout_fail` fault makes an accepted payout settle `failed`. With `FAKEPROVIDER_WEBHOOK_URL` and `FAKEPROVIDER_WEBHOOK_SECRET`, the fake provider also announces each settled payout by **signed webhook**; idem's API verifies it (`IDEM_PROVIDER_WEBHOOK_SECRETS`: current secret first, then the previous one while rotating; the endpoint is off without one), stores it in an inbox, and workers apply it. Compose wires this up, so a payout completes about 2 seconds after it is accepted.
 
-**Rotating the webhook secret without losing events:** set `IDEM_PROVIDER_WEBHOOK_SECRETS=<new>,<old>` on the API and restart it (both verify), switch the provider to the new secret, and once no `bad_signature` failures remain, drop the old one. `FAKEPROVIDER_HANG` (default `30s`) sets how long timeout faults hang; chaos uses `3s`. Watch a compensation:
+`FAKEPROVIDER_HANG` (default `30s`) sets how long timeout faults hang; chaos uses `3s`.
+
+**Rotating the webhook secret without losing events:** set `IDEM_PROVIDER_WEBHOOK_SECRETS=<new>,<old>` on the API and restart it (both verify), switch the provider to the new secret, and once no `bad_signature` failures remain, drop the old one.
+
+Watch a compensation:
 
 ```bash
-curl -s -X POST localhost:8080/workflows -H 'Authorization: Bearer demo-token-0123456789' \
+curl -s -X POST localhost:8080/workflows -H "Authorization: Bearer $IDEM_DEMO_TOKEN" \
   -H 'Idempotency-Key: comp-1' -d '{"amount_cents":10000,"currency":"EUR","customer_id":"cus_1","merchant_id":"mer_invalid_1"}'
 docker compose exec postgres psql -U idem -c "select name, status from steps order by created_at"
 # charge SUCCEEDED, payout FAILED_PERMANENT, refund SUCCEEDED; workflow COMPENSATED; its ledger nets to zero
@@ -110,7 +122,7 @@ make down
 When idem cannot finish a workflow without guessing about money, it parks it in `NEEDS_ATTENTION` and alerts. The [runbook](docs/runbooks/needs-attention.md) explains every parking reason and which command resolves it.
 
 ```bash
-export IDEM_DATABASE_URL=postgres://idem:idem@localhost:5432/idem?sslmode=disable
+export IDEM_DATABASE_URL="postgres://idem:${POSTGRES_PASSWORD}@localhost:5432/idem?sslmode=disable"   # after loading .env
 idem admin list                       # what is parked, why, and its VERSION
 # every action below also takes --expect-version <VERSION from list>
 idem admin retry-step <step-id> --reason "provider recovered"  # same key: always safe

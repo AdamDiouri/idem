@@ -7,7 +7,7 @@ idem parks a workflow in `NEEDS_ATTENTION` when it cannot finish it **without gu
 ## 1. Triage
 
 ```bash
-export IDEM_DATABASE_URL=postgres://…    # compose: postgres://idem:idem@localhost:5432/idem?sslmode=disable
+export IDEM_DATABASE_URL=postgres://…    # compose: "postgres://idem:${POSTGRES_PASSWORD}@localhost:5432/idem?sslmode=disable" (password in .env)
 export IDEM_ADMIN_ACTOR=your.name        # recorded in the audit log (defaults to $USER)
 
 idem admin list                          # every parked workflow, its version, step and reason
@@ -221,9 +221,10 @@ Provider webhooks keep failing verification (`bad_signature` or `stale`). Likely
 
 ```bash
 make up
+set -a; . ./.env; set +a     # IDEM_DEMO_TOKEN and the other local settings
 # a payout that is refused after an ambiguous first attempt
 curl -s -X PUT localhost:9090/_faults -d '{"rules":[{"endpoint":"payouts","mode":"error_before_effect","times":1}]}'
-curl -s -X POST localhost:8080/workflows -H 'Authorization: Bearer demo-token-0123456789' \
+curl -s -X POST localhost:8080/workflows -H "Authorization: Bearer $IDEM_DEMO_TOKEN" \
   -H 'Idempotency-Key: rb-1' -d '{"amount_cents":10000,"currency":"EUR","customer_id":"cus_1","merchant_id":"mer_invalid_1"}'
 
 docker compose run --rm --entrypoint /idem worker admin list
