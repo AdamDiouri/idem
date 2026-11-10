@@ -51,6 +51,8 @@ func (v Violation) String() string {
 //     FAILED = nothing. A workflow parked because its payout was refused
 //     after an ambiguous attempt shows a charge and nothing else.
 //   - I6: every inbound idempotency key maps to exactly one workflow.
+//   - I8: every terminal workflow has exactly one outbox event, of its type,
+//     carrying its view; no other workflow has one (checkOutbox).
 //
 // I4 (liveness) is CheckLiveness: it only holds after quiescence.
 func Check(ctx context.Context, pool *pgxpool.Pool, effects []fakeprovider.Effect) ([]Violation, error) {
@@ -90,6 +92,12 @@ func Check(ctx context.Context, pool *pgxpool.Pool, effects []fakeprovider.Effec
 		violations = append(violations, Violation{Invariant: "I10", WorkflowID: c.WorkflowID.String(),
 			Detail: fmt.Sprintf("provider event %s: %s", c.ProviderEventID, c.Note)})
 	}
+
+	outboxViolations, err := checkOutbox(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	violations = append(violations, outboxViolations...)
 
 	keyViolations, err := checkKeys(ctx, q)
 	if err != nil {

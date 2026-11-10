@@ -344,6 +344,25 @@ func (q *Queries) MarkWorkflowRunning(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const outboxStats = `-- name: OutboxStats :one
+SELECT
+  (SELECT count(*) FROM outbox WHERE status = 'PENDING')::int AS pending,
+  COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000 FROM outbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms
+`
+
+type OutboxStatsRow struct {
+	Pending         int32
+	OldestPendingMs int64
+}
+
+// For the sweeper's gauges: outcome events not delivered yet.
+func (q *Queries) OutboxStats(ctx context.Context) (OutboxStatsRow, error) {
+	row := q.db.QueryRow(ctx, outboxStats)
+	var i OutboxStatsRow
+	err := row.Scan(&i.Pending, &i.OldestPendingMs)
+	return i, err
+}
+
 const reclaimExpiredLeases = `-- name: ReclaimExpiredLeases :one
 WITH reclaimed AS (
   UPDATE steps

@@ -212,6 +212,24 @@ func TestSweeper_ExportsInboxAndCallbackGauges(t *testing.T) {
 	require.Equal(t, 1.0, testutil.ToFloat64(m.CallbacksOverdue))
 }
 
+// Slice 2.4: the outbox backlog is visible. With no relay yet (2.5), every
+// event stays PENDING (F33): durable, waiting.
+func TestSweeper_ExportsOutboxGauges(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	for range 2 {
+		wf := submitTo(t, h, "cus_1", "mer_1")
+		_, err := h.pool.Exec(ctx, `UPDATE workflows SET status = 'FAILED' WHERE id = $1`, wf)
+		require.NoError(t, err)
+		_, err = h.pool.Exec(ctx, `INSERT INTO outbox (id, client_id, workflow_id, type, payload, created_at)
+			VALUES (gen_random_uuid(), 'c', $1, 'workflow.failed', '\x7b7d', now() - interval '1 hour')`, wf)
+		require.NoError(t, err)
+	}
+	m := sweepOnce(t, h)
+	require.Equal(t, 2.0, testutil.ToFloat64(m.OutboxPending))
+	require.GreaterOrEqual(t, testutil.ToFloat64(m.OutboxOldestPending), 3500.0)
+}
+
 // Review focus: labels must stay bounded — no IDs, keys or error text.
 func TestMetrics_NoUnboundedLabels(t *testing.T) {
 	h := newHarness(t)

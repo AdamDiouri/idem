@@ -228,6 +228,59 @@ func (q *Queries) NonTerminalWorkflows(ctx context.Context) ([]NonTerminalWorkfl
 	return items, nil
 }
 
+const outboxMismatches = `-- name: OutboxMismatches :many
+SELECT w.id AS workflow_id, w.status,
+       count(o.id)::int AS events,
+       COALESCE(string_agg(DISTINCT o.type, ',') FILTER (WHERE o.type IS DISTINCT FROM workflow_event_type(w.status)), '')::text AS wrong_types,
+       (count(o.id) FILTER (WHERE o.payload IS DISTINCT FROM convert_to(workflow_view(w.id), 'UTF8')))::int AS wrong_payloads
+FROM workflows w
+LEFT JOIN outbox o ON o.workflow_id = w.id
+GROUP BY w.id, w.status
+HAVING (workflow_event_type(w.status) IS NOT NULL AND count(o.id) <> 1)
+    OR (workflow_event_type(w.status) IS NULL AND count(o.id) > 0)
+    OR count(o.id) FILTER (WHERE o.type IS DISTINCT FROM workflow_event_type(w.status)) > 0
+    OR count(o.id) FILTER (WHERE o.payload IS DISTINCT FROM convert_to(workflow_view(w.id), 'UTF8')) > 0
+ORDER BY w.id
+`
+
+type OutboxMismatchesRow struct {
+	WorkflowID    uuid.UUID
+	Status        string
+	Events        int32
+	WrongTypes    string
+	WrongPayloads int32
+}
+
+// I8: workflows whose outbox events are wrong. A terminal workflow needs
+// exactly one event, of its status's type, whose frozen payload is still its
+// view (nothing changes a workflow after it ends); any other workflow needs
+// none.
+func (q *Queries) OutboxMismatches(ctx context.Context) ([]OutboxMismatchesRow, error) {
+	rows, err := q.db.Query(ctx, outboxMismatches)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OutboxMismatchesRow
+	for rows.Next() {
+		var i OutboxMismatchesRow
+		if err := rows.Scan(
+			&i.WorkflowID,
+			&i.Status,
+			&i.Events,
+			&i.WrongTypes,
+			&i.WrongPayloads,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const parkedStepReasons = `-- name: ParkedStepReasons :many
 SELECT s.workflow_id, s.name, COALESCE(s.dead_reason, '')::text AS dead_reason
 FROM steps s JOIN workflows w ON w.id = s.workflow_id
