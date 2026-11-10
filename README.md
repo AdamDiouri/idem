@@ -167,10 +167,11 @@ The chaos harness runs the real binaries as separate processes and does its best
 - **Infrastructure:** a throwaway Postgres container, the fake provider, **two API replicas** (`--apis`), 4 workers and 2 sweepers.
 - **Traffic:** misbehaving clients (impatient retries, double-clicks, reformatted retries, malformed bodies). Every request goes to the next replica in turn, so one payment's retries usually reach both.
 - **Webhooks:** the provider signs a webhook for every settled payout and rotates deliveries across the replicas, so its retries reach the *other* replica.
-- **Disruptions:** a seeded plan of `kill -9`, `SIGSTOP` beyond the lease, API restarts (one replica at a time), database restarts, provider faults, and the six **webhook faults** (duplicated, sent before the `202`, delayed, a stale contradiction, dropped, badly signed). In runs of a minute or more, the plan reserves a **webhook-fault block**: six back-to-back 8-second windows (5 seconds plus slack for timing drift), one fault each and nothing else, starting once traffic flows.
+- **Disruptions:** a seeded plan of `kill -9`, `SIGSTOP` beyond the lease, API restarts (one replica at a time), **`restart_all`** (every worker, sweeper and API replica gets `SIGTERM` at once and drains: a rolling deploy done badly, F26), database restarts, provider faults, and the six **webhook faults** (duplicated, sent before the `202`, delayed, a stale contradiction, dropped, badly signed). In runs of a minute or more, the plan reserves a **webhook-fault block**: six back-to-back 8-second windows (5 seconds plus slack for timing drift), one fault each and nothing else, starting once traffic flows.
 - **Crash failpoints** make processes `exit` mid-step, including `inbox_before_commit` on workers and `webhook_after_insert` on the API. A supervisor restarts them like Kubernetes would.
+- **Least privilege:** migrations run as the database owner; every idem process logs in as the restricted application user, so a missing grant fails the campaign.
 
-Afterwards it clears every fault, lets the system settle, and checks every invariant.
+Afterwards it clears every fault and lets the system settle: every workflow terminal or parked, and every webhook the provider queued delivered or given up. Then it checks every invariant.
 
 ```bash
 make chaos CHAOS_ARGS="--seed 1 --duration 90s"   # needs Docker
@@ -186,22 +187,23 @@ events executed: 33 (failed to apply: 0, skipped: 1); effective = met work in fl
 provider fault hits: … webhooks/bad_signature:22 webhooks/delay_webhook:17 webhooks/drop_webhook:2 …
 api replicas: 2 (requests api-0=… api-1=…; webhooks accepted api-0=… api-1=…, duplicates api-0=… api-1=…)
 failpoints fired: after_claim=22 after_provider_call=35 before_commit=40 inbox_before_commit=19 webhook_after_insert=25
-webhooks: … applied, … duplicates, … deferred
+webhooks: … applied, … duplicates, … deferred, … stale ignored, 0 in flight at the verdict
 outcomes: COMPENSATED=123 FAILED=44 NEEDS_ATTENTION=7 SUCCEEDED=710
 violations: 0
 ```
 
 **How to read the result:**
 - **`PASSED` requires all of:**
-  - zero invariant violations (I1–I10; any webhook `CONFLICT` is one, since the fake provider never truly contradicts itself)
+  - zero invariant violations (I1–I11). The webhook inbox is checked event by event against the provider's delivery log: every acknowledged event stored, none accepted on a forged signature alone, none the provider never sent, an "applied" event leaving a webhook attempt on its step, stale events ignored as stale and true ones processed. Any webhook `CONFLICT` is a violation, since the fake provider never truly contradicts itself
   - every workflow terminal or parked, with no step left `RUNNING`/`IN_DOUBT`
   - no idempotency key that ever returned two different workflows
   - every workflow a client was told about exists in the database under the same ID
-  - no event that failed to apply
+  - no event that failed to apply, and no webhook delivery still in flight at the verdict
   - parking only for expected reasons
 - **A pass must be earned, not vacuous:**
   - every kind of disruption must have met work in flight (an *effective* event)
   - provider faults must actually have hit requests
+  - webhooks must actually have completed payouts (polling completes every payout even when webhooks are broken), and, in runs of a minute or more, a reordered event must have been recognised as stale
   - every webhook fault that was in force for at least 5 seconds while work was in flight (measured on the executed timeline) must actually have fired; in runs of a minute or more, **every** webhook fault must have had such a window and fired
   - every armed failpoint must actually have fired (failpoints name themselves when they do)
   - with several API replicas, every replica must have answered clients and accepted new webhooks, and, in runs of a minute or more, recognised duplicates (evidence of deduplication across replicas)
