@@ -105,10 +105,11 @@ WHERE client_id = sqlc.arg(client_id)::text AND status = sqlc.arg(status)::text
 ORDER BY created_at
 FOR UPDATE;
 
--- name: RequeueOutboxEvent :exec
+-- name: RequeueOutboxEvent :execrows
 -- An operator sends the event again, with a fresh budget; the epoch bump
--- fences any relay still holding an old lease on it (D7).
+-- fences any relay still holding an old lease on it (D7). Only an event the
+-- relay is done with (slice 2.5b: guarded here, not only in Go).
 UPDATE outbox
 SET status = 'PENDING', attempts = 0, next_attempt_at = now(), last_error = NULL,
     lease_owner = NULL, lease_expires_at = NULL, lease_epoch = lease_epoch + 1
-WHERE id = sqlc.arg(id)::uuid;
+WHERE id = sqlc.arg(id)::uuid AND status IN ('DEAD', 'NO_ENDPOINT', 'SKIPPED', 'DELIVERED');
