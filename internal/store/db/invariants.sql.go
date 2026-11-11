@@ -228,6 +228,50 @@ func (q *Queries) NonTerminalWorkflows(ctx context.Context) ([]NonTerminalWorkfl
 	return items, nil
 }
 
+const outboxEventsForShopCheck = `-- name: OutboxEventsForShopCheck :many
+SELECT o.id, o.workflow_id, o.type, o.status,
+       (workflow_view(o.workflow_id)::json ->> 'status')::text AS view_status
+FROM outbox o
+JOIN workflows w ON w.id = o.workflow_id
+WHERE w.client_id = ANY($1::text[])
+ORDER BY o.created_at
+`
+
+type OutboxEventsForShopCheckRow struct {
+	ID         uuid.UUID
+	WorkflowID uuid.UUID
+	Type       string
+	Status     string
+	ViewStatus string
+}
+
+// I9: every event of the given clients' workflows, with what it announces.
+func (q *Queries) OutboxEventsForShopCheck(ctx context.Context, clients []string) ([]OutboxEventsForShopCheckRow, error) {
+	rows, err := q.db.Query(ctx, outboxEventsForShopCheck, clients)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OutboxEventsForShopCheckRow
+	for rows.Next() {
+		var i OutboxEventsForShopCheckRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkflowID,
+			&i.Type,
+			&i.Status,
+			&i.ViewStatus,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const outboxMismatches = `-- name: OutboxMismatches :many
 WITH w AS (
   SELECT id, status, workflow_event_type(status) AS event_type,
@@ -340,6 +384,37 @@ func (q *Queries) PendingInboxEvents(ctx context.Context) ([]PendingInboxEventsR
 	for rows.Next() {
 		var i PendingInboxEventsRow
 		if err := rows.Scan(&i.ProviderEventID, &i.ReceivedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const pendingOutboxEvents = `-- name: PendingOutboxEvents :many
+SELECT id, workflow_id, attempts FROM outbox WHERE status = 'PENDING' ORDER BY created_at
+`
+
+type PendingOutboxEventsRow struct {
+	ID         uuid.UUID
+	WorkflowID uuid.UUID
+	Attempts   int32
+}
+
+// I4: outcomes still waiting to reach their shop.
+func (q *Queries) PendingOutboxEvents(ctx context.Context) ([]PendingOutboxEventsRow, error) {
+	rows, err := q.db.Query(ctx, pendingOutboxEvents)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PendingOutboxEventsRow
+	for rows.Next() {
+		var i PendingOutboxEventsRow
+		if err := rows.Scan(&i.ID, &i.WorkflowID, &i.Attempts); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
