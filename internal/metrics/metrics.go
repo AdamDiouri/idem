@@ -31,6 +31,8 @@ type Metrics struct {
 	LastSnapshot        prometheus.Gauge       // unix time of the last successful sweeper snapshot
 	Submissions         *prometheus.CounterVec // result
 	StatusRequests      *prometheus.CounterVec // result
+	RelayDeliveries     *prometheus.CounterVec // result
+	RelayDuration       prometheus.Histogram
 	CallbackPolls       *prometheus.CounterVec // step, result
 	WebhooksReceived    *prometheus.CounterVec // result
 	WebhooksApplied     *prometheus.CounterVec // outcome
@@ -95,6 +97,15 @@ func New() *Metrics {
 			Name: "idem_workflow_status_requests_total",
 			Help: "GET /workflows/{id} results: found, not_found, invalid_id, timeout, error.",
 		}, []string{"result"}),
+		RelayDeliveries: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "idem_relay_deliveries_total",
+			Help: "Outbox events handled by the relay: delivered, retry, dead, no_endpoint, fenced.",
+		}, []string{"result"}),
+		RelayDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "idem_relay_delivery_duration_seconds",
+			Help:    "How long shops took to answer a delivery (including failures).",
+			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		}),
 		WebhooksReceived: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "idem_webhooks_received_total",
 			Help: "POST /webhooks/provider results: accepted, duplicate, bad_signature, stale, malformed, too_large, store_error.",
@@ -128,7 +139,7 @@ func New() *Metrics {
 	}
 	for _, c := range []prometheus.Collector{
 		m.StepAttempts, m.ProviderDuration, m.KeyLookups, m.LeasesReclaimed, m.Workflows, m.Steps,
-		m.UnsettledIdle, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions, m.StatusRequests, m.CallbackPolls, m.WebhooksReceived, m.WebhooksApplied,
+		m.UnsettledIdle, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions, m.StatusRequests, m.RelayDeliveries, m.RelayDuration, m.CallbackPolls, m.WebhooksReceived, m.WebhooksApplied,
 		m.InboxPending, m.InboxOldestPending, m.OutboxPending, m.OutboxOldestPending, m.ConflictsOpen, m.CallbacksOverdue,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	} {
@@ -266,6 +277,18 @@ func (m *Metrics) ObserveWebhook(result string) {
 		return
 	}
 	m.WebhooksReceived.WithLabelValues(result).Inc()
+}
+
+// ObserveRelay counts one relay outcome and, for an attempted delivery, how
+// long the shop took (d < 0: no request was made).
+func (m *Metrics) ObserveRelay(result string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.RelayDeliveries.WithLabelValues(result).Inc()
+	if d >= 0 {
+		m.RelayDuration.Observe(d.Seconds())
+	}
 }
 
 // ObserveStatusRequest counts one GET /workflows/{id} by result.

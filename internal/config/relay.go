@@ -13,13 +13,11 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/AdamDiouri/idem/internal/failpoint"
+	"github.com/AdamDiouri/idem/internal/relay"
 )
 
 // minWebhookSecret is the shortest client webhook secret accepted.
 const minWebhookSecret = 16
-
-// relayFailpoints are the failpoints `idem relay` may arm.
-var relayFailpoints = []string{"relay_before_send", "relay_after_send"}
 
 // RelayConfig configures `idem relay` (M2 design §5.3). Client URLs and
 // secrets are set by the operator only, never through the API, so no request
@@ -103,7 +101,7 @@ func (c RelayConfig) validate() error {
 	if _, err := parseLevel(c.LogLevel); err != nil {
 		return err
 	}
-	return failpoint.ValidateSpec(c.Failpoints, relayFailpoints...)
+	return failpoint.ValidateSpec(c.Failpoints, relay.FailpointNames...)
 }
 
 // SlogLevel returns the configured log level.
