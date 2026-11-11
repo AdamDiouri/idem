@@ -69,6 +69,7 @@ type Effect struct {
 	WorkflowID     string    `json:"workflow_id"`
 	IdempotencyKey string    `json:"idempotency_key"`
 	AmountCents    int64     `json:"amount_cents"`
+	Currency       string    `json:"currency"`
 	RefundOf       string    `json:"refund_of,omitempty"` // refunds: the charge ID
 	At             time.Time `json:"at"`
 }
@@ -217,6 +218,7 @@ func (p *Provider) Handler() http.Handler {
 	mux.HandleFunc("GET /_webhooks", p.getWebhooks)
 	mux.HandleFunc("PUT /_faults", p.putFaults)
 	mux.HandleFunc("GET /_effects", p.getEffects)
+	mux.HandleFunc("GET /reports/balance_transactions", p.getBalanceTransactions)
 	mux.HandleFunc("GET /_fault_hits", p.getFaultHits)
 	mux.HandleFunc("POST /_reset", p.postReset)
 	return mux
@@ -392,6 +394,7 @@ func (p *Provider) perform(res resource, slot, key string, req request, fail boo
 		WorkflowID:     req.WorkflowID,
 		IdempotencyKey: key,
 		AmountCents:    req.AmountCents,
+		Currency:       req.Currency,
 		RefundOf:       req.ChargeID,
 		At:             time.Now().UTC(),
 	})
@@ -547,7 +550,7 @@ func (p *Provider) settleDueLocked(now time.Time) {
 			po.status = "paid"
 			p.effects = append(p.effects, Effect{
 				ID: po.id, Type: "payout", WorkflowID: po.req.WorkflowID, IdempotencyKey: po.key,
-				AmountCents: po.req.AmountCents, At: po.settleAt.UTC(),
+				AmountCents: po.req.AmountCents, Currency: po.req.Currency, At: po.settleAt.UTC(),
 			})
 		}
 		p.enqueueWebhookLocked(po, now)

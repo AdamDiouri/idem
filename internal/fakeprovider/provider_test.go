@@ -426,7 +426,7 @@ func TestPayout_AcceptedThenPaid(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond)
 	effects := p.Effects()
 	require.Len(t, effects, 1)
-	require.Equal(t, fakeprovider.Effect{ID: id, Type: "payout", WorkflowID: wfID, IdempotencyKey: "k1", AmountCents: 9825, At: effects[0].At}, effects[0])
+	require.Equal(t, fakeprovider.Effect{ID: id, Type: "payout", WorkflowID: wfID, IdempotencyKey: "k1", AmountCents: 9825, Currency: "EUR", At: effects[0].At}, effects[0])
 	v := payoutState(t, get(t, srv.URL+"/payouts/"+id))
 	require.Equal(t, int64(9825), v.AmountCents)
 	require.Equal(t, "EUR", v.Currency)
