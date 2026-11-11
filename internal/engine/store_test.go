@@ -469,7 +469,9 @@ func TestComplete_DeadIsFenced(t *testing.T) {
 func TestSchema_DeadRequiresReason(t *testing.T) {
 	pool := testutil.NewPool(t, dsn)
 	submit(t, pool, "cus_1")
+	plant(t, `UPDATE steps SET status = 'RUNNING'`) // RUNNING → DEAD is an allowed move: only the constraint refuses it
 	_, err := pool.Exec(context.Background(), `UPDATE steps SET status = 'DEAD'`)
+	require.ErrorContains(t, err, "steps_dead_has_reason")
 	require.Error(t, err)
 	var code string
 	require.True(t, func() bool {
@@ -596,7 +598,7 @@ func TestSchema_RefundChargeRefIsImmutable(t *testing.T) {
 	require.True(t, errors.As(err, &pgErr))
 	require.Equal(t, "42501", pgErr.SQLState())
 
-	_, err = pool.Exec(ctx, `UPDATE steps SET status = 'IN_DOUBT' WHERE name = 'refund'`)
+	_, err = pool.Exec(ctx, `UPDATE steps SET max_attempts = max_attempts + 1 WHERE name = 'refund'`)
 	require.NoError(t, err, "other columns stay updatable")
 }
 
@@ -606,9 +608,8 @@ func TestChargeProviderRef_PicksHighestGeneration(t *testing.T) {
 	ctx := context.Background()
 	pool := testutil.NewPool(t, dsn)
 	wf := submit(t, pool, "cus_1")
-	_, err := pool.Exec(ctx, `UPDATE steps SET status = 'SUCCEEDED', provider_ref = 'ch_a' WHERE workflow_id = $1`, wf)
-	require.NoError(t, err)
-	_, err = pool.Exec(ctx, `
+	plant(t, `UPDATE steps SET status = 'SUCCEEDED', provider_ref = 'ch_a' WHERE workflow_id = $1`, wf)
+	_, err := pool.Exec(ctx, `
 		INSERT INTO steps (id, workflow_id, name, generation, status, idempotency_key, max_attempts, provider_ref)
 		VALUES (gen_random_uuid(), $1, 'charge', 1, 'SUCCEEDED', $2, 8, 'ch_b'),
 		       (gen_random_uuid(), $1, 'payout', 0, 'PENDING', $3, 8, NULL)`, wf, uuid.NewString(), uuid.NewString())
@@ -633,9 +634,8 @@ func awaitingStep(t *testing.T, pool *pgxpool.Pool, runAfter, sendOutcome string
 	step := scalar[uuid.UUID](t, pool, `SELECT id FROM steps WHERE workflow_id = $1`, wf)
 	_, err := pool.Exec(ctx, `UPDATE workflows SET status = 'RUNNING' WHERE id = $1`, wf)
 	require.NoError(t, err)
-	_, err = pool.Exec(ctx, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_test-'||id::text, attempt_count = 1,
+	plant(t, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_test-'||id::text, attempt_count = 1,
 		first_attempted_at = now(), run_after = now() + $2::interval, callback_deadline = now() + $2::interval WHERE id = $1`, step, runAfter)
-	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id, outcome, finished_at)
 		VALUES ($1, 1, 1, 'w0', $2, now())`, step, sendOutcome)
 	require.NoError(t, err)

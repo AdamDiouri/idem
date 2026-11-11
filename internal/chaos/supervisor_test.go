@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -202,7 +203,7 @@ func TestApply_RestartAll(t *testing.T) {
 
 	all = append(all, procs.relays...)
 	before[relay] = relay.PID()
-	require.NoError(t, apply(context.Background(), Event{Kind: RestartAll}, procs, nil, "", "", nil))
+	require.NoError(t, apply(context.Background(), &Event{Kind: RestartAll}, procs, nil, "", "", nil))
 	for _, p := range all {
 		require.NotEqual(t, before[p], p.PID(), p.Name())
 		require.True(t, alive(p.PID()), p.Name())
@@ -221,7 +222,7 @@ func TestApply_KillAllRelays(t *testing.T) {
 		procs.relays = append(procs.relays, p)
 	}
 	before := []int{procs.relays[0].PID(), procs.relays[1].PID()}
-	require.NoError(t, apply(context.Background(), Event{Kind: KillAllRelays}, procs, nil, "", "", nil))
+	require.NoError(t, apply(context.Background(), &Event{Kind: KillAllRelays}, procs, nil, "", "", nil))
 	for i, p := range procs.relays {
 		require.Eventually(t, func() bool { return p.Restarts() == 1 && p.PID() != before[i] && alive(p.PID()) },
 			5*time.Second, 20*time.Millisecond, p.Name())
@@ -236,7 +237,86 @@ func TestApply_KillRelay(t *testing.T) {
 		require.NoError(t, err)
 		procs.relays = append(procs.relays, p)
 	}
-	require.NoError(t, apply(context.Background(), Event{Kind: KillRelay, Target: 1}, procs, nil, "", "", nil))
+	require.NoError(t, apply(context.Background(), &Event{Kind: KillRelay, Target: 1}, procs, nil, "", "", nil))
 	require.Eventually(t, func() bool { return procs.relays[1].Restarts() == 1 }, 5*time.Second, 20*time.Millisecond)
 	require.Zero(t, procs.relays[0].Restarts())
+}
+
+// Slice 2.5b (the 2.5 flake): an event whose target worker is mid-restart
+// goes to another running worker, so a seed cannot lose a whole event kind to
+// bad timing; it is skipped only when no worker runs.
+func TestApply_KillRetargetsWhenTargetDown(t *testing.T) {
+	s := newSupervisor(t)
+	var procs procSet
+	for _, name := range []string{"worker-0", "worker-1"} {
+		p, err := s.Start(helperSpec(t, name))
+		require.NoError(t, err)
+		procs.workers = append(procs.workers, p)
+	}
+	require.NoError(t, procs.workers[0].Stop(context.Background()))
+	require.NoError(t, apply(context.Background(), &Event{Kind: KillWorker, Target: 0}, procs, nil, "", "", nil))
+	require.Eventually(t, func() bool { return procs.workers[1].Restarts() == 1 }, 5*time.Second, 20*time.Millisecond)
+
+	require.NoError(t, procs.workers[1].Stop(context.Background()))
+	require.ErrorIs(t, apply(context.Background(), &Event{Kind: KillWorker, Target: 0}, procs, nil, "", "", nil), ErrNotRunning)
+}
+
+func TestApply_PauseRetargetsWhenTargetDown(t *testing.T) {
+	s := newSupervisor(t)
+	var procs procSet
+	for _, name := range []string{"worker-0", "worker-1"} {
+		p, err := s.Start(helperSpec(t, name))
+		require.NoError(t, err)
+		procs.workers = append(procs.workers, p)
+	}
+	require.NoError(t, procs.workers[0].Stop(context.Background()))
+	var pauses sync.WaitGroup
+	require.NoError(t, apply(context.Background(), &Event{Kind: PauseWorker, Target: 0, Duration: 200 * time.Millisecond}, procs, nil, "", "", &pauses))
+	before := logSize(t, procs.workers[1].spec.LogPath)
+	time.Sleep(120 * time.Millisecond)
+	require.Equal(t, before, logSize(t, procs.workers[1].spec.LogPath), "worker-1 is the one frozen")
+	pauses.Wait()
+}
+
+// The same for relays: they crash at their failpoints too, so kill_relay must
+// not be lost to a relay mid-restart.
+func TestApply_KillRelayRetargetsWhenTargetDown(t *testing.T) {
+	s := newSupervisor(t)
+	var procs procSet
+	for _, name := range []string{"relay-0", "relay-1"} {
+		p, err := s.Start(helperSpec(t, name))
+		require.NoError(t, err)
+		procs.relays = append(procs.relays, p)
+	}
+	require.NoError(t, procs.relays[1].Stop(context.Background()))
+	require.NoError(t, apply(context.Background(), &Event{Kind: KillRelay, Target: 1}, procs, nil, "", "", nil))
+	require.Eventually(t, func() bool { return procs.relays[0].Restarts() == 1 }, 5*time.Second, 20*time.Millisecond)
+}
+
+// Final review, minor 2: no process to target means the event is skipped, not
+// recorded as done (and a pause never resumes a nil process).
+func TestApply_NoProcessesIsSkipped(t *testing.T) {
+	var pauses sync.WaitGroup
+	for _, kind := range []EventKind{KillWorker, PauseWorker, KillRelay} {
+		ev := Event{Kind: kind, Duration: time.Millisecond}
+		require.ErrorIs(t, apply(context.Background(), &ev, procSet{}, nil, "", "", &pauses), ErrNotRunning, kind)
+	}
+}
+
+// Final review, minor 3: a retargeted event records the process it hit and
+// the one it was planned for.
+func TestApply_RetargetIsRecorded(t *testing.T) {
+	s := newSupervisor(t)
+	var procs procSet
+	for _, name := range []string{"worker-0", "worker-1"} {
+		p, err := s.Start(helperSpec(t, name))
+		require.NoError(t, err)
+		procs.workers = append(procs.workers, p)
+	}
+	require.NoError(t, procs.workers[0].Stop(context.Background()))
+	ev := Event{Kind: KillWorker, Target: 0}
+	require.NoError(t, apply(context.Background(), &ev, procs, nil, "", "", nil))
+	require.Equal(t, 1, ev.Target)
+	require.NotNil(t, ev.PlannedTarget)
+	require.Equal(t, 0, *ev.PlannedTarget)
 }

@@ -307,8 +307,7 @@ func TestCheckLiveness_ReportsAwaitingCallback(t *testing.T) {
 	e := setup(t)
 	wf, step := newWorkflow(t, e.pool)
 	e.setStatus(t, wf, "RUNNING")
-	_, err := e.pool.Exec(ctx, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_1', callback_deadline = now() WHERE id = $1`, step)
-	require.NoError(t, err)
+	testutil.Plant(t, dsn, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_1', callback_deadline = now() WHERE id = $1`, step)
 
 	v, err := invariants.CheckLiveness(ctx, e.pool)
 	require.NoError(t, err)
@@ -353,8 +352,7 @@ func TestCheckLiveness_ReportsLeftoverSteps(t *testing.T) {
 	e := setup(t)
 	wf, step := newWorkflow(t, e.pool)
 	e.setStatus(t, wf, "NEEDS_ATTENTION")
-	_, err := e.pool.Exec(ctx, `UPDATE steps SET status = 'IN_DOUBT' WHERE id = $1`, step)
-	require.NoError(t, err)
+	testutil.Plant(t, dsn, `UPDATE steps SET status = 'IN_DOUBT' WHERE id = $1`, step)
 
 	v, err := invariants.CheckLiveness(ctx, e.pool)
 	require.NoError(t, err)

@@ -28,3 +28,4 @@ D1 to D20 were first recorded as one-line rows in the design documents and expan
 | [D20](0020-trace-context-stored-in-work-rows.md) | Trace context stored in work rows | Planned (M3) |
 | [D21](0021-append-only-by-privilege-logins-are-infrastructure.md) | Ledger append-only by privilege; logins are infrastructure | Built (2.3b) |
 | [D22](0022-toolchain-pinned-in-go-mod.md) | Go toolchain pinned in `go.mod`, on a supported release | Built (CI PR) |
+| [D23](0023-state-transitions-enforced-by-the-database.md) | Workflow and step transitions enforced by the database | Built (2.5b) |

@@ -169,9 +169,8 @@ func TestSweeper_ScheduledCallbackWaitIsNotIdle(t *testing.T) {
 			step := scalar[uuid.UUID](t, h.pool, `SELECT id FROM steps WHERE workflow_id = $1`, wf)
 			_, err := h.pool.Exec(ctx, `UPDATE workflows SET status = 'RUNNING', updated_at = now() - interval '2 hours' WHERE id = $1`, wf)
 			require.NoError(t, err)
-			_, err = h.pool.Exec(ctx, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_x', attempt_count = 1,
+			plant(t, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_x', attempt_count = 1,
 				callback_deadline = now() + $2::interval, run_after = now() + $2::interval WHERE id = $1`, step, tc.deadline)
-			require.NoError(t, err)
 			_, err = h.pool.Exec(ctx, `INSERT INTO step_attempts (step_id, attempt_no, lease_epoch, worker_id, outcome, started_at, finished_at)
 				VALUES ($1, 1, 1, 'w0', 'AWAITING_CALLBACK', now() - interval '2 hours', now() - interval '2 hours')`, step)
 			require.NoError(t, err)
@@ -195,9 +194,8 @@ func TestSweeper_ExportsInboxAndCallbackGauges(t *testing.T) {
 	step := scalar[uuid.UUID](t, h.pool, `SELECT id FROM steps WHERE workflow_id = $1`, wf)
 	_, err := h.pool.Exec(ctx, `UPDATE workflows SET status = 'RUNNING' WHERE id = $1`, wf)
 	require.NoError(t, err)
-	_, err = h.pool.Exec(ctx, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_x',
+	plant(t, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_x',
 		callback_deadline = now() - interval '10 minutes', run_after = now() + interval '1 hour' WHERE id = $1`, step)
-	require.NoError(t, err)
 	_, err = h.pool.Exec(ctx, `INSERT INTO webhook_inbox (provider_event_id, type, payload, received_at) VALUES
 		('evt_pending', 'payout.paid', '{}', now() - interval '1 hour')`)
 	require.NoError(t, err)
@@ -271,15 +269,12 @@ func TestMetrics_NoUnboundedLabels(t *testing.T) {
 // Review finding 5: finished steps never count as over their attempt limit
 // (a crash on the last attempt leaves attempt_count = max + 1 forever).
 func TestSweeper_OverLimitIgnoresFinishedSteps(t *testing.T) {
-	ctx := context.Background()
 	h := newHarness(t)
 	m := metrics.New()
 	done := submitTo(t, h, "cus_1", "mer_1")
 	stuck := submitTo(t, h, "cus_2", "mer_2")
-	_, err := h.pool.Exec(ctx, `UPDATE steps SET status = 'SUCCEEDED', attempt_count = 2, max_attempts = 1 WHERE workflow_id = $1`, done)
-	require.NoError(t, err)
-	_, err = h.pool.Exec(ctx, `UPDATE steps SET status = 'IN_DOUBT', attempt_count = 5, max_attempts = 1 WHERE workflow_id = $1`, stuck)
-	require.NoError(t, err)
+	plant(t, `UPDATE steps SET status = 'SUCCEEDED', attempt_count = 2, max_attempts = 1 WHERE workflow_id = $1`, done)
+	plant(t, `UPDATE steps SET status = 'IN_DOUBT', attempt_count = 5, max_attempts = 1 WHERE workflow_id = $1`, stuck)
 
 	_, _ = runInBackground(t, func(ctx context.Context) error {
 		return engine.RunSweeper(ctx, h.pool, engine.SweeperOptions{Interval: 10 * time.Millisecond, StuckAfter: time.Hour,

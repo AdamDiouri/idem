@@ -19,14 +19,14 @@ LEFT JOIN ledger_entries e ON e.transaction_id = t.id
 GROUP BY t.id, t.workflow_id, t.kind;
 
 -- name: TerminalWorkflows :many
-SELECT id, status FROM workflows WHERE status IN ('SUCCEEDED', 'FAILED', 'COMPENSATED');
+SELECT id, status FROM workflows WHERE workflow_is_terminal(status);
 
 -- name: NeedsAttentionWorkflows :many
 SELECT id FROM workflows WHERE status = 'NEEDS_ATTENTION' ORDER BY updated_at;
 
 -- name: NonTerminalWorkflows :many
 SELECT id, status, updated_at FROM workflows
-WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING') ORDER BY updated_at;
+WHERE workflow_is_active(status) ORDER BY updated_at;
 
 -- name: KeysWithoutWorkflow :many
 SELECT client_id, key FROM api_idempotency_keys

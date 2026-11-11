@@ -116,8 +116,12 @@ func (a *Admin) RedeliverAll(ctx context.Context, clientID, status, reason strin
 
 // requeue makes a locked event PENDING again with a fresh budget, audited.
 func (a *Admin) requeue(ctx context.Context, q *db.Queries, eventID, workflowID uuid.UUID, from string, attempts int32, reason string) error {
-	if err := q.RequeueOutboxEvent(ctx, eventID); err != nil {
+	n, err := q.RequeueOutboxEvent(ctx, eventID)
+	if err != nil {
 		return fmt.Errorf("requeue outbox event: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("%w: event %s is not DEAD, NO_ENDPOINT, SKIPPED or DELIVERED", ErrNotActionable, eventID)
 	}
 	details, err := json.Marshal(map[string]any{"event_id": eventID, "from_status": from, "attempts": attempts})
 	if err != nil {

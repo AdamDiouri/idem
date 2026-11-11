@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AdamDiouri/idem/internal/engine"
+	"github.com/AdamDiouri/idem/internal/store/db"
 )
 
 // outboxEvent ends a new workflow and sets its event's status and attempts.
@@ -184,4 +185,15 @@ func TestAdmin_RedeliverAllForClient(t *testing.T) {
 	}
 	_, err = h.admin().RedeliverAll(ctx, "acme", "DEAD", " ")
 	require.Error(t, err)
+}
+
+// Slice 2.5b: the requeue itself refuses an event the relay still has, in
+// SQL, like the step queries; the Go check is no longer the only guard.
+func TestRequeueOutboxEvent_RefusesPendingInSQL(t *testing.T) {
+	h := newHarness(t)
+	id, _ := h.outboxEventWith(t, "PENDING", 3)
+	n, err := db.New(h.pool).RequeueOutboxEvent(context.Background(), id)
+	require.NoError(t, err)
+	require.Zero(t, n)
+	require.Equal(t, int32(3), scalar[int32](t, h.pool, `SELECT attempts FROM outbox WHERE id = $1`, id), "unchanged")
 }

@@ -23,6 +23,7 @@ A *shop* asks idem to take €100 from a *customer* and pay it, minus a *fee*, t
 
 ## Workflows and steps
 
+- **Transition.** A change of status. The allowed ones are tables in the design doc (§8.2 for workflows, §8.3 for steps), and the database refuses any other with an error naming both statuses (D23).
 - **Workflow.** One payment from start to finish: charge, payout, and if needed refund. One row in `workflows`, with a status (below) and the request's details in `input`. Created by `POST /workflows`. *Code:* `internal/workflow/` (creation), `internal/engine/` (execution).
 - **Step.** One external action within a workflow (`charge`, `payout`, `refund`), with its own status, attempts and idempotency key. One row in `steps`. Steps run one after another; each successful step creates the next.
 - **Saga.** A sequence of steps where, instead of one big transaction (impossible across companies), each step is undone, if needed, by a later *compensating* step. idem's saga is charge → payout, compensated by refund.

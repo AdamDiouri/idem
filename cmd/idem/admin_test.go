@@ -35,10 +35,8 @@ func parkedCharge(t *testing.T, pool *pgxpool.Pool) (uuid.UUID, uuid.UUID) {
 	require.NoError(t, err)
 	var wf, step uuid.UUID
 	require.NoError(t, pool.QueryRow(ctx, `SELECT workflow_id, id FROM steps ORDER BY created_at DESC LIMIT 1`).Scan(&wf, &step))
-	_, err = pool.Exec(ctx, `UPDATE steps SET status = 'DEAD', dead_reason = 'attempts_exhausted_no_effect', attempt_count = 8 WHERE id = $1`, step)
-	require.NoError(t, err)
-	_, err = pool.Exec(ctx, `UPDATE workflows SET status = 'NEEDS_ATTENTION' WHERE id = $1`, wf)
-	require.NoError(t, err)
+	testutil.Plant(t, dsn, `UPDATE steps SET status = 'DEAD', dead_reason = 'attempts_exhausted_no_effect', attempt_count = 8 WHERE id = $1`, step)
+	testutil.SetWorkflowStatus(t, pool, wf, "NEEDS_ATTENTION") // via RUNNING, as a claimed workflow is
 	return wf, step
 }
 

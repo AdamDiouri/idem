@@ -46,6 +46,9 @@ type Event struct {
 	Duration   time.Duration       `json:"duration,omitempty"` // pauses
 	Faults     fakeprovider.Faults `json:"faults,omitzero"`
 	ShopFaults fakeshop.Faults     `json:"shop_faults,omitzero"`
+	// PlannedTarget is set when the planned target was down and the event
+	// went to another process (Target is then the one actually hit).
+	PlannedTarget *int `json:"planned_target,omitempty"`
 }
 
 // PlanConfig parameterises NewPlan.

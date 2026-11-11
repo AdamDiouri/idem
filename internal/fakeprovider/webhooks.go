@@ -14,6 +14,24 @@ import (
 
 const webhookTimeout = 2 * time.Second
 
+// deliveryState is a delivery's lifecycle (slice 2.5b: one field instead of
+// three booleans, so delivered-and-given-up cannot be represented):
+//
+//	queued ──take──▶ sending ──2xx──▶ delivered
+//	   ▲                │
+//	   └──── retry ─────┤  (backing off = queued with nextAt in the future)
+//	                    └──last attempt──▶ gaveUp
+//
+// A drop_webhook fault starts it as gaveUp: never sent.
+type deliveryState int
+
+const (
+	queued deliveryState = iota
+	sending
+	delivered
+	gaveUp
+)
+
 // delivery is one webhook event on its way to WebhookURLs (and its log entry).
 type delivery struct {
 	index     int      // position in the queue: rotates the first target
@@ -24,9 +42,7 @@ type delivery struct {
 	stale     bool // a reorder fault's contradictory copy
 	attempts  int
 	nextAt    time.Time
-	sending   bool
-	delivered bool
-	gaveUp    bool
+	state     deliveryState
 	fast      bool // fast_webhook: delivered inline by POST /payouts
 	sentTwice bool // dup_webhook: the second copy went out
 }
@@ -58,7 +74,7 @@ func (p *Provider) enqueueWebhookLocked(po *payout, now time.Time) {
 	d.fault = po.webhookFault
 	switch d.fault {
 	case ModeDropWebhook:
-		d.gaveUp = true // never sent
+		d.state = gaveUp // never sent
 	case ModeDelayWebhook:
 		d.nextAt = now.Add(4 * p.opts.WebhookRetryBase)
 	case ModeFastWebhook:
@@ -130,8 +146,8 @@ func (p *Provider) deliverFast(ctx context.Context, slot string) {
 func (p *Provider) takeDueLocked(match func(*delivery) bool) []*delivery {
 	var due []*delivery
 	for _, d := range p.webhooks {
-		if !d.delivered && !d.gaveUp && !d.sending && match(d) {
-			d.sending = true
+		if d.state == queued && match(d) {
+			d.state = sending
 			due = append(due, d)
 		}
 	}
@@ -160,11 +176,10 @@ func (p *Provider) send(ctx context.Context, d *delivery) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	d.targets = append(d.targets, sent...)
-	d.sending = false
 	d.attempts++
 	switch {
 	case ok:
-		d.delivered = true
+		d.state = delivered
 		if d.fault == ModeDupWebhook {
 			d.sentTwice = true
 		}
@@ -172,8 +187,9 @@ func (p *Provider) send(ctx context.Context, d *delivery) {
 			p.enqueueStaleLocked(d)
 		}
 	case d.attempts >= p.opts.WebhookMaxAttempts:
-		d.gaveUp = true
+		d.state = gaveUp
 	default:
+		d.state = queued
 		d.nextAt = time.Now().Add(p.opts.WebhookRetryBase << (d.attempts - 1))
 	}
 }
@@ -217,7 +233,7 @@ func (p *Provider) Webhooks() []WebhookDelivery {
 	for _, d := range p.webhooks {
 		out = append(out, WebhookDelivery{
 			EventID: d.event.ID, Type: d.event.Type, PayoutID: d.event.Data.PayoutID,
-			Attempts: d.attempts, Delivered: d.delivered, GaveUp: d.gaveUp, Stale: d.stale, Fault: d.fault,
+			Attempts: d.attempts, Delivered: d.state == delivered, GaveUp: d.state == gaveUp, Stale: d.stale, Fault: d.fault,
 			Created: d.event.Created,
 			Targets: append([]string(nil), d.targets...),
 		})

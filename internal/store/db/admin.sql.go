@@ -398,18 +398,22 @@ func (q *Queries) ProviderRefInUse(ctx context.Context, arg ProviderRefInUsePara
 	return used, err
 }
 
-const requeueOutboxEvent = `-- name: RequeueOutboxEvent :exec
+const requeueOutboxEvent = `-- name: RequeueOutboxEvent :execrows
 UPDATE outbox
 SET status = 'PENDING', attempts = 0, next_attempt_at = now(), last_error = NULL,
     lease_owner = NULL, lease_expires_at = NULL, lease_epoch = lease_epoch + 1
-WHERE id = $1::uuid
+WHERE id = $1::uuid AND status IN ('DEAD', 'NO_ENDPOINT', 'SKIPPED', 'DELIVERED')
 `
 
 // An operator sends the event again, with a fresh budget; the epoch bump
-// fences any relay still holding an old lease on it (D7).
-func (q *Queries) RequeueOutboxEvent(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.Exec(ctx, requeueOutboxEvent, id)
-	return err
+// fences any relay still holding an old lease on it (D7). Only an event the
+// relay is done with (slice 2.5b: guarded here, not only in Go).
+func (q *Queries) RequeueOutboxEvent(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, requeueOutboxEvent, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const resetStepForRetry = `-- name: ResetStepForRetry :execrows

@@ -52,7 +52,7 @@ func RecordHookFailure(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, f
 	// that history), below the limit or at it.
 	poll := s.PriorStatus == string(ResultAwaitingCallback)
 	refused := failed.Kind == ResultFailedPermanent && !poll
-	noEffect := refused && !s.SendDoubt && s.PriorStatus != string(ResultInDoubt)
+	noEffect := refused && !s.MoneyMayHaveMoved()
 
 	r := Result{Kind: ResultInDoubt, RetryDelay: delay, Error: hookErr.Error()}
 	switch {

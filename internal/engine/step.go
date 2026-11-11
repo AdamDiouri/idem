@@ -144,3 +144,13 @@ type Step interface {
 type Poller interface {
 	Poll(ctx context.Context, s ClaimedStep) provider.Outcome
 }
+
+// MoneyMayHaveMoved is the one Go definition of "an earlier send of this step
+// may have moved money": it came back IN_DOUBT (sticky ambiguity, D5), or its
+// send history holds an ambiguous or abandoned attempt (step_send_doubt; an
+// accepted re-send makes the status AWAITING_CALLBACK, which hides the taint).
+// Every decision that must not guess about money reads this; the admin
+// commands read the same facts in SQL (step_send_doubt and the dead reason).
+func (s ClaimedStep) MoneyMayHaveMoved() bool {
+	return s.PriorStatus == string(ResultInDoubt) || s.SendDoubt
+}
