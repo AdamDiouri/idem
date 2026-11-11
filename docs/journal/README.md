@@ -16,3 +16,4 @@ One write-up per delivery slice: what shipped, and what broke on the way. Entrie
 | 2.3b | 2026-11-10 | [Hardening](2026-11-10-slice-2.3b-hardening.md) | Chaos proves webhooks do real work; the ledger is append-only by privilege. |
 | 2.4 | 2026-11-11 | [Status and outbox](2026-11-11-slice-2.4-status-and-outbox.md) | Shops can read the true outcome; every outcome is an event written in its own transaction. |
 | 2.5 | 2026-11-11 | [Relay and fake shop](2026-11-11-slice-2.5-relay-and-fake-shop.md) | Outcomes reach shops, signed, at least once; a misbehaving shop still learns exactly what idem decided. |
+| 2.5b | 2026-11-11 | [Explicit state machines](2026-11-11-slice-2.5b-explicit-state-machines.md) | Transitions enforced by the database; one definition of "money may have moved". |

@@ -219,32 +219,73 @@ Ledger postings are **not** separate steps. Each is written inside the success t
 | `refund` | `POST /refunds` | No | Post reversal entries; workflow `COMPENSATED` | No (must be retried hard) |
 
 ### 8.2 Workflow states
+
+Enforced by the database since slice 2.5b (migration 00017, D23): a trigger refuses any other move with SQLSTATE `23514`, naming the workflow and both statuses. Writing a status again is always allowed.
+
 ```
-PENDING ─▶ RUNNING ─┬─▶ SUCCEEDED                     (terminal)
-                    ├─▶ FAILED                        (terminal: charge declined)
-                    ├─▶ COMPENSATING ─▶ COMPENSATED   (terminal)
-                    └─▶ NEEDS_ATTENTION               (from any non-terminal state)
+PENDING ─▶ RUNNING ─┬─▶ SUCCEEDED                        (terminal)
+              ▲     ├─▶ FAILED                           (terminal: charge declined, or an operator's `fail`)
+              │     ├─▶ COMPENSATING ─┬─▶ COMPENSATED    (terminal)
+              │     │       ▲         └─▶ NEEDS_ATTENTION
+              │     └─▶ NEEDS_ATTENTION ──▶ FAILED (operator)
+              │               │    └─────▶ COMPENSATING (operator: compensate, or retry of a refund)
+              └───────────────┘ (operator: retry-step, new-generation, confirm-step)
 ```
-`NEEDS_ATTENTION` exits only via an explicit admin action (§11.4).
+
+| From | To | Who |
+|---|---|---|
+| `PENDING` | `RUNNING` | the first claim of its step |
+| `RUNNING` | `SUCCEEDED`, `FAILED`, `COMPENSATING` | step hooks (payout paid; charge refused; payout refused) |
+| `RUNNING`, `COMPENSATING` | `NEEDS_ATTENTION` | a step parked (`DEAD`, or a refund refused) |
+| `COMPENSATING` | `COMPENSATED` | the refund's hook |
+| `NEEDS_ATTENTION` | `RUNNING`, `COMPENSATING`, `FAILED` | admin actions (§11.4) |
+
+- **Terminal** (`SUCCEEDED`, `FAILED`, `COMPENSATED`) is defined once, by the SQL function `workflow_is_terminal`, and never left; each terminal workflow has exactly one outbox event (D13, I8). **Active** (`PENDING`, `RUNNING`, `COMPENSATING`: claimable, watched by the stuck alert) is `workflow_is_active`.
+- `PENDING` never parks: a workflow is `RUNNING` by the time any of its steps can be `DEAD`.
 
 ### 8.3 Step states
+
+Enforced by the database since slice 2.5b (migration 00018), the same way.
+
 ```
          claim                 success
-PENDING ───────▶ RUNNING ─────────────────▶ SUCCEEDED
+PENDING ───────▶ RUNNING ─────────────────▶ SUCCEEDED   (final)
    ▲               │  │  │
-   │ backoff       │  │  └─ 202 accepted ─▶ AWAITING_CALLBACK ─┬─ webhook/poll: paid ──▶ SUCCEEDED
-   │ (no effect)   │  │                                         └─ webhook/poll: failed ─▶ FAILED_PERMANENT
+   │ backoff       │  │  └─ 202 accepted ─▶ AWAITING_CALLBACK ─┬─ poll: claim ─▶ RUNNING
+   │ (no effect)   │  │                                         └─ webhook: paid / failed ─▶ SUCCEEDED / FAILED_PERMANENT / DEAD
    └───────────────┘  │
                       ├─ permanent error ─▶ FAILED_PERMANENT
-                      │
+                      ├─ attempts exhausted, or parked ─▶ DEAD
                       └─ ambiguous outcome, or lease expired ─▶ IN_DOUBT ── claim ──▶ RUNNING
                                                                       (same key, or lookup)
-
-any non-terminal, attempts exhausted ─▶ DEAD   (workflow → NEEDS_ATTENTION)
+DEAD, FAILED_PERMANENT ── operator: retry-step ─▶ PENDING / IN_DOUBT;  confirm-step ─▶ SUCCEEDED
 ```
+
+| From | To | Who |
+|---|---|---|
+| `PENDING`, `IN_DOUBT`, `AWAITING_CALLBACK` | `RUNNING` | a claim (send, re-send, lookup or poll) |
+| `RUNNING` | `PENDING`, `IN_DOUBT`, `AWAITING_CALLBACK`, `SUCCEEDED`, `FAILED_PERMANENT`, `DEAD` | the worker's completion, the sweeper's lease reclaim, the hook-failure limit |
+| `AWAITING_CALLBACK` | `SUCCEEDED`, `FAILED_PERMANENT`, `DEAD` | a provider webhook, applied without a lease (fenced by `lease_epoch`) |
+| `DEAD`, `FAILED_PERMANENT` | `PENDING`, `IN_DOUBT`, `SUCCEEDED` | admin `retry-step` and `confirm-step` |
+
 - `PENDING` and `IN_DOUBT` are both claimable. The difference is semantic: `IN_DOUBT` means *"we may already have caused an effect"*, which matters for metrics, alerting, and for what happens when attempts run out (a `DEAD` step that was `IN_DOUBT` may have moved money — the alert says so).
 - `AWAITING_CALLBACK` arrived in **M2 slice 2.1**. An accepted payout waits there until its `callback_deadline`, then becomes claimable for a **poll** (`GET /payouts/{id}`). Polls are attempts of kind `poll`, counted in `poll_count` and not in the send budget. They send nothing, so they never create doubt (D17), and a crashed poll goes back to waiting, not to `IN_DOUBT`. Polls back off from `IDEM_RETRY_BASE` up to `IDEM_CALLBACK_POLL_CAP` (1h). After `IDEM_CALLBACK_MAX_WAIT` (72h) since acceptance, or an optional `IDEM_CALLBACK_MAX_POLLS` per acceptance, the step is `DEAD` with `callback_unresolved` (money may have moved); an operator's retry re-sends and starts a fresh budget. A waiting step counts as healthy for the stuck alert until its poll is due.
 - `DEAD` is the dead-letter state. There is **no separate DLQ table** in M1; the dead-letter queue is `SELECT … WHERE status = 'DEAD'` (decision D4).
+
+### 8.4 State encoded in other columns
+
+Some states live outside the `status` columns. They are deliberate (adding statuses would multiply the tables above), but they are states, and code that reads them must read them the same way:
+
+| What | Encoded as | Read by |
+|---|---|---|
+| **Money may have moved** (sticky, cleared only by a new generation) | step `IN_DOUBT`, or an ambiguous / abandoned / dead send in its history (`step_send_doubt`): an accepted re-send makes the status `AWAITING_CALLBACK`, which hides the taint | one Go predicate, `ClaimedStep.MoneyMayHaveMoved` (the pivot rule, dead reasons, sticky doubt, lookup near key retention, hook failures); admin commands read the same facts in SQL |
+| **Why a step is `RUNNING`**: a first send, a re-send after doubt, or a poll | `steps.prior_status` (`PENDING`, `IN_DOUBT`, `AWAITING_CALLBACK`) | the attempt kind, `decide` vs `decidePoll`, where the sweeper reclaims to (a poll goes back to waiting, never to doubt) |
+| **How an `IN_DOUBT` step is resolved**: re-send, or look up by key | the key's age against `IDEM_PROVIDER_KEY_RETENTION − IDEM_KEY_RETENTION_MARGIN`; changes with time, without a write | `Worker.nearKeyRetention` |
+| **Leases**: free, held, expired | `lease_expires_at` against `now()` on steps, inbox and outbox rows; for inbox and outbox also backing off (`next_attempt_at` in the future), all inside `PENDING` | the claim queries; the relay's per-client cap counts "`PENDING` with a live lease" |
+| **`AWAITING_CALLBACK`**: waiting, or due for a poll | `callback_deadline` (and `run_after`) against `now()`; the poll budget restarts at each acceptance (the latest send attempt) | `ClaimStep`, `decidePoll` |
+| **Current step or history** | a `DEAD` step is parked only if it is its workflow's newest step | `LockParkedStep`, the inbox's matching |
+| **Hook failures** | `hook_failures` below or at `IDEM_HOOK_MAX_FAILURES` | `RecordHookFailure` (reset by admin) |
+| **Inbound idempotency key**: free, reserved, committed | no row; a row whose inserting transaction is still open (its lock holds back others); a committed row with its response | `Submit` |
 
 ---
 
@@ -592,6 +633,7 @@ Each decision has an architecture decision record in [`docs/adr/`](adr/README.md
 | [D20](adr/0020-trace-context-stored-in-work-rows.md) | (M3) Tracing with the trace context stored in the rows that hand work between processes | Work moves through database rows, not RPC calls, so headers alone cannot carry a trace; storing it keeps one payment one trace | Trace each process separately; header-only propagation |
 | [D21](adr/0021-append-only-by-privilege-logins-are-infrastructure.md) | (2.3b) The ledger and audit trail are append-only by privilege (role `idem_app`); database logins are infrastructure, never created by idem | The owner could drop the triggers; an application should not manage credentials | Triggers only; `idem migrate` creates the login |
 | [D22](adr/0022-toolchain-pinned-in-go-mod.md) | The Go toolchain is pinned in `go.mod` and kept on a supported release; govulncheck runs in CI | Go 1.25 had left support with reachable, unpatched vulnerabilities; one version everywhere | Whatever Go is installed locally |
+| [D23](adr/0023-state-transitions-enforced-by-the-database.md) | (2.5b) Workflow and step transitions are enforced by the database; terminal and active defined once in SQL | Moves lived only in Go call sites and the docs had drifted; an illegal move now fails loudly | Checks in Go only; a state-machine library |
 
 **Calls made by Claude while drafting (please check):** D2, D4, D7, D8; fee defaults and rounding rule; retry defaults; one hard-coded workflow type; static API token; in-memory fake provider; `generation` mechanism for deliberate new keys.
 
