@@ -42,8 +42,11 @@ func reconcileCmd() *cobra.Command {
 				var err1, err2 error
 				from, err1 = time.Parse(time.RFC3339, fromFlag)
 				to, err2 = time.Parse(time.RFC3339, toFlag)
-				if err := errors.Join(err1, err2); err != nil || !to.After(from) {
-					return usageError{fmt.Errorf("--from and --to must be RFC 3339 times, --from before --to: %v", err)}
+				if err := errors.Join(err1, err2); err != nil {
+					return usageError{fmt.Errorf("--from and --to must be RFC 3339 times: %w", err)}
+				}
+				if !to.After(from) {
+					return usageError{errors.New("--from must be before --to")}
 				}
 			}
 			cfg, err := config.LoadRecon()

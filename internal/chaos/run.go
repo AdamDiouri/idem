@@ -811,7 +811,7 @@ func runReconcile(ctx context.Context, idem, dsn, providerURL string, from, to t
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	var exit *exec.ExitError
-	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 3) {
+	if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 3) {
 		return &ReconSummary{Error: fmt.Sprintf("%v: %s", err, strings.TrimSpace(stderr.String()))}
 	}
 	s, perr := parseReconOutput(stdout.String())

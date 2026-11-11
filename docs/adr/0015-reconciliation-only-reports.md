@@ -1,6 +1,6 @@
 # D15. Reconciliation only reports
 
-**Status:** Accepted 2026-11-10 · not yet built (planned for slice 2.6; [M2 design](../superpowers/specs/2026-11-10-milestone-2-design.md) §6)
+**Status:** Accepted 2026-11-10 · built in slice 2.6 ([M2 design](../superpowers/specs/2026-11-10-milestone-2-design.md) §6)
 
 ## Context
 `idem reconcile` compares the provider's balance-transaction records with idem's ledger. When they disagree, idem is by definition unsure which side is right.

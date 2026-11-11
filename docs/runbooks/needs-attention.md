@@ -271,6 +271,27 @@ The event gets a fresh budget and the relay sends it at once, with the same `Ide
 - a `SKIPPED` event: an outcome from before the outbox existed, not announced at upgrade. Send one only if its shop asks;
 - a `DELIVERED` event, if the shop lost it.
 
+### IdemReconciliationDrift
+
+The latest reconciliation found differences between the provider's record of money movements and idem's ledger, on workflows that are **not** parked. This is the alert that says the books disagree. Nothing was changed automatically (D15). Start with:
+
+```bash
+idem admin recon list         # WORKFLOW, KIND, TYPE, PROVIDER and LEDGER amounts, DETAIL
+```
+
+By kind:
+- **`missing_in_ledger`**: the provider moved money idem never recorded. If the workflow is unknown to idem (no workflow ID, or one idem has no row for), the money moved outside idem: find who made the request (the provider's idempotency key and metadata). If idem knows the workflow, check its steps and the provider's object: the effect happened, so the ledger must get it, through `confirm-step` once the workflow is parked, never by hand.
+- **`missing_at_provider`**: idem posted a movement the provider has no record of. Check the step's `provider_ref` at the provider; a provider-side reversal or a lost record needs the provider's support. Correct the ledger only with a new reversing transaction.
+- **`amount_mismatch`**: both sides recorded the movement with different amounts. Compare the request idem sent (the step's input and fee) with the provider's object.
+- **`duplicate_effect`**: two charges, payouts or refunds for one workflow. The customer or the merchant got money twice; recover it outside idem (refund the extra charge, claw back the extra payout) and record why.
+- **`status_mismatch`**: money moved for a step idem recorded as definitely refused. The provider said no and then did it anyway (or a later attempt did): treat it as `missing_in_ledger` on a workflow whose saga already moved on, and decide the recovery with finance.
+
+Differences on **parked** workflows do not page here (the parked alert already does); they appear next to the workflow in `idem admin list` (column `RECON`) as evidence for the operator's choice.
+
+### IdemReconciliationStale
+
+No reconciliation has succeeded for over 3 hours, so drift would go unnoticed. Check the `reconcile` process (compose: the `reconcile` service) and its logs: a run that fails (for example, the provider's report unreachable) is recorded `FAILED` with its error in `recon_runs` and reports nothing.
+
 ## 5. Worked example (compose)
 
 ```bash

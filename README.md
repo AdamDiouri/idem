@@ -8,7 +8,7 @@ See [`docs/design.md`](docs/design.md) for the design, guarantees, fault model a
 - [journal](docs/journal/README.md): one write-up per delivery slice, covering what shipped and what broke along the way;
 - [glossary](docs/glossary.md): what every term means (ledger, outbox, idempotency key, lease, …), for readers new to payment systems.
 
-**Status:** Milestone 1 complete. The full saga (charge, payout, or refund on a definite payout failure) runs with leases, fencing, retries, dead letters and invariant checks. A chaos harness proves it under crashes and faults, and operators get audited admin actions, Prometheus metrics, alerts and a runbook. Milestone 2 is in progress ([design](docs/superpowers/specs/2026-11-10-milestone-2-design.md)). Done so far: asynchronous payouts with polling (2.1), signed provider webhooks (2.2), chaos for the async path (2.3), hardening after an external review (2.3b), workflow status plus the outbox (2.4), and the relay that delivers each outcome to its shop (2.5).
+**Status:** Milestones 1 and 2 complete. The full saga (charge, payout, or refund on a definite payout failure) runs with leases, fencing, retries, dead letters and invariant checks, and a chaos harness proves it under crashes and faults. Milestone 2 ([design](docs/superpowers/specs/2026-11-10-milestone-2-design.md)) made sure nobody silently disagrees: asynchronous payouts settle by signed provider webhook or by polling, the shop can read and is told each outcome (outbox and relay, at least once), the database enforces every state transition, and a reconciliation job audits the ledger against the provider's own records. Next: milestone 3 (scale: load tests, tracing, SLOs).
 
 ## Prerequisites
 
@@ -35,6 +35,7 @@ After changing `POSTGRES_PASSWORD`, run `make reset` (it deletes the local datab
 | `api` | `idem api` | Accepts workflows idempotently |
 | `worker` | `idem worker` | Claims steps under a lease, calls the provider, posts the ledger |
 | `sweeper` | `idem sweeper` | Moves steps with expired leases to `IN_DOUBT` (crashed/paused workers); exports state gauges |
+| `reconcile` | `idem reconcile --every 10m` | Compares the provider's record of money movements with the ledger and reports every difference; changes nothing |
 | `relay` | `idem relay` | Delivers each workflow outcome from the outbox to its shop's webhook URL, signed, at least once |
 | `prometheus` | `prom/prometheus` | Scrapes every process; evaluates the alert rules (<http://localhost:9091>) |
 | `fakeprovider` | `/fakeprovider` | Stripe-like provider with fault injection and an effects oracle |
@@ -172,6 +173,30 @@ curl -s localhost:8000/_seen
 
 Fake shop faults: `down` (closes the connection), `slow`, `5xx`, `ack_then_5xx` (processes it, then answers 500: the retry is a duplicate), `ack_after_timeout` (processes it, answers too late).
 
+## Reconcile with the provider
+
+idem's ledger and the provider are two separate records of the same money. `idem reconcile` compares them: it reads the provider's report of every movement (`GET /reports/balance_transactions`, as a real provider offers), compares each with the ledger's postings and the steps, records every difference, and changes nothing else (D15).
+
+```bash
+idem reconcile                                  # the last complete hour, ending IDEM_RECON_LAG ago
+idem reconcile --from 2026-11-11T10:00:00Z --to 2026-11-11T12:00:00Z
+# run 0193…: 412 records, 205 workflows (3 in flight), 0 discrepancies (0 parked)
+idem admin recon list                           # the latest run's discrepancies
+```
+
+- **What counts as a difference**, one per workflow and kind of movement:
+  - `missing_in_ledger`: the provider moved money idem never recorded (including a workflow idem does not know);
+  - `missing_at_provider`: idem posted a movement the provider has no record of;
+  - `amount_mismatch`;
+  - `duplicate_effect`: two charges, payouts or refunds for one workflow;
+  - `status_mismatch`: money moved for a step idem recorded as definitely refused.
+- **Not yet final is never a difference:** a workflow with a step still running or waiting is skipped (`in flight`).
+- **Parked workflows are reported, flagged `parked`,** and shown next to them in `idem admin list` (column `RECON`): "the provider shows a payout the ledger doesn't have" is exactly what an operator needs to choose `confirm-step` over `compensate`.
+- **Exit codes:** `0` clean, `3` differences on workflows that are not parked, `1` the run failed (e.g. the provider was unreachable; it then reports nothing).
+- **Timing:** a payout settles at the provider before idem posts it. The window decides which workflows are reconciled (those with a movement or a posting in it); each is compared on everything known about it, reading the provider's report `IDEM_RECON_MARGIN` (`1h`) beyond both edges.
+
+Compose runs it every 10 minutes; the sweeper exports the latest run as `idem_reconciliation_discrepancies{kind,parked}` and `idem_reconciliation_last_success_timestamp_seconds`, which the alerts watch.
+
 ## Operate it
 
 When idem cannot finish a workflow without guessing about money, it parks it in `NEEDS_ATTENTION` and alerts. The [runbook](docs/runbooks/needs-attention.md) explains every parking reason and which command resolves it.
@@ -226,6 +251,7 @@ curl -s 'http://localhost:8090/debug/pprof/goroutine?debug=1' | head            
   - `IdemSweeperDown`
   - `IdemSweeperSnapshotStale` (every state alert depends on a live sweeper)
   - `IdemOutboxBacklog`, `IdemOutboxDead` (outcomes not reaching their shop)
+  - `IdemReconciliationDrift` (the ledger and the provider disagree), `IdemReconciliationStale` (no successful reconciliation for 3 hours)
 
 ## Run a chaos campaign
 
@@ -337,6 +363,8 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_CLIENT_WEBHOOK_SECRETS` | (none) | Relay: `client=secret,...`, one per URL, each at least 16 characters, no commas. Client IDs are trimmed and may not contain spaces; a configured client with no workflow is logged as a likely typo |
 | `IDEM_RELAY_CONCURRENCY` | `4` | Deliveries at once per relay |
 | `IDEM_RELAY_PER_CLIENT` | `2` | At most this many of them for one client, so a slow shop cannot delay the others |
+| `IDEM_RECON_LAG` | `5m` | Reconcile: the default window is the last complete hour ending this long ago |
+| `IDEM_RECON_MARGIN` | `1h` | Reconcile: how far beyond the window's edges the provider's report is read (late settlements) |
 | `IDEM_RELAY_TIMEOUT` | `10s` | How long a shop has to answer; plus 2s must stay below the lease |
 | `IDEM_RELAY_LEASE_TTL` | `30s` | How long a relay owns an event while delivering it |
 | `IDEM_RELAY_MAX_ATTEMPTS` | `15` | Deliveries before an event is `DEAD` |
