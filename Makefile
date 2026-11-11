@@ -15,6 +15,7 @@ build:
 	go build -o bin/idem ./cmd/idem
 	go build -o bin/fakeprovider ./cmd/fakeprovider
 	go build -o bin/chaos ./cmd/chaos
+	go build -o bin/fakeshop ./cmd/fakeshop
 
 # Release build: failpoints compiled out.
 build-release:
