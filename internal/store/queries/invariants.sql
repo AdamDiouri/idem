@@ -66,6 +66,31 @@ ORDER BY i.received_at;
 SELECT workflow_id, count(*)::int AS keys FROM api_idempotency_keys
 WHERE workflow_id IS NOT NULL GROUP BY workflow_id HAVING count(*) > 1;
 
+-- name: OutboxMismatches :many
+-- I8: workflows whose outbox events are wrong. A terminal workflow needs
+-- exactly one event, of its status's type, whose frozen payload is still its
+-- view (nothing changes a workflow after it ends); any other workflow needs
+-- none.
+-- Each terminal workflow's view is computed once (final review M4).
+WITH w AS (
+  SELECT id, status, workflow_event_type(status) AS event_type,
+         CASE WHEN workflow_event_type(status) IS NOT NULL
+              THEN convert_to(workflow_view(id), 'UTF8') END AS view
+  FROM workflows
+)
+SELECT w.id AS workflow_id, w.status,
+       count(o.id)::int AS events,
+       COALESCE(string_agg(DISTINCT o.type, ',') FILTER (WHERE o.type IS DISTINCT FROM w.event_type), '')::text AS wrong_types,
+       (count(o.id) FILTER (WHERE o.payload IS DISTINCT FROM w.view))::int AS wrong_payloads
+FROM w
+LEFT JOIN outbox o ON o.workflow_id = w.id
+GROUP BY w.id, w.status, w.event_type, w.view
+HAVING (w.event_type IS NOT NULL AND count(o.id) <> 1)
+    OR (w.event_type IS NULL AND count(o.id) > 0)
+    OR count(o.id) FILTER (WHERE o.type IS DISTINCT FROM w.event_type) > 0
+    OR count(o.id) FILTER (WHERE o.payload IS DISTINCT FROM w.view) > 0
+ORDER BY w.id;
+
 -- name: ParkedStepReasons :many
 -- The DEAD steps of workflows that need attention, with why they died.
 SELECT s.workflow_id, s.name, COALESCE(s.dead_reason, '')::text AS dead_reason

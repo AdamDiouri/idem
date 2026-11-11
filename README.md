@@ -3,9 +3,12 @@
 An effectively-once payments workflow engine: **charge → ledger → payout**, designed failure-first.
 Work may be attempted more than once; its effects happen at most once.
 
-See [`docs/design.md`](docs/design.md) for the design, guarantees, fault model and failure-mode table.
+See [`docs/design.md`](docs/design.md) for the design, guarantees, fault model and failure-mode table. Also:
+- [decision records](docs/adr/README.md): why each design choice was made, and what was rejected;
+- [journal](docs/journal/README.md): one write-up per delivery slice, covering what shipped and what broke along the way;
+- [glossary](docs/glossary.md): what every term means (ledger, outbox, idempotency key, lease, …), for readers new to payment systems.
 
-**Status:** Milestone 1 complete. The full saga (charge, payout, or refund on a definite payout failure) runs with leases, fencing, retries, dead letters and invariant checks. A chaos harness proves it under crashes and faults, and operators get audited admin actions, Prometheus metrics, alerts and a runbook. Milestone 2 in progress ([design](docs/superpowers/specs/2026-11-10-milestone-2-design.md)): asynchronous payouts with polling (2.1) and signed provider webhooks (2.2) are done.
+**Status:** Milestone 1 complete. The full saga (charge, payout, or refund on a definite payout failure) runs with leases, fencing, retries, dead letters and invariant checks. A chaos harness proves it under crashes and faults, and operators get audited admin actions, Prometheus metrics, alerts and a runbook. Milestone 2 is in progress ([design](docs/superpowers/specs/2026-11-10-milestone-2-design.md)). Done so far: asynchronous payouts with polling (2.1), signed provider webhooks (2.2), chaos for the async path (2.3), hardening after an external review (2.3b), and workflow status plus the outbox (2.4).
 
 ## Prerequisites
 
@@ -47,6 +50,19 @@ curl -i -X POST localhost:8080/workflows \
 - First call: `201 Created` with the workflow (fee `175` = 1.5% + €0.25).
 - Same call again: `201`, identical body, header `Idempotent-Replayed: true`.
 - Same key, different body: `422 idempotency_key_reused`.
+
+Ask for its status (a client sees only its own workflows; another client's, or an unknown ID, is `404`):
+
+```bash
+curl -s localhost:8080/workflows/<workflow_id> -H "Authorization: Bearer $IDEM_DEMO_TOKEN"
+# {"workflow_id":"…","status":"failed","reason":"card_declined","amount_cents":10000,"fee_cents":175,"currency":"EUR","created_at":"…","updated_at":"…"}
+```
+
+- `status` is `processing` until there is an outcome, then `succeeded`, `failed` or `compensated` (charged, then refunded because the payout failed). A workflow waiting for a human is still `processing`.
+- `reason` comes with `failed` (the provider's code, e.g. `card_declined`, else `charge_failed`) and `compensated` (`payout_failed`).
+- If your `POST` timed out, don't guess from `GET`: retry the `POST` with the same key. It replays.
+
+Every outcome is also recorded as an event in the **outbox**, in the same transaction that decides it, carrying exactly this JSON. Delivering it to your webhook URL arrives with the relay (milestone 2, slice 2.5); until then events wait, durably, as `PENDING`.
 
 Health: `GET /healthz` (process alive), `GET /readyz` (database reachable, else `503`).
 

@@ -50,6 +50,22 @@ type LedgerTransaction struct {
 	CreatedAt  pgtype.Timestamptz
 }
 
+type Outbox struct {
+	ID             uuid.UUID
+	ClientID       string
+	WorkflowID     uuid.UUID
+	Type           string
+	Payload        []byte
+	CreatedAt      pgtype.Timestamptz
+	Status         string
+	Attempts       int32
+	NextAttemptAt  pgtype.Timestamptz
+	LeaseOwner     *string
+	LeaseExpiresAt pgtype.Timestamptz
+	DeliveredAt    pgtype.Timestamptz
+	LastError      *string
+}
+
 type Step struct {
 	ID               uuid.UUID
 	WorkflowID       uuid.UUID
@@ -73,6 +89,7 @@ type Step struct {
 	RefundChargeRef  *string
 	PollCount        int32
 	HookFailures     int32
+	FailureCode      *string
 }
 
 type StepAttempt struct {

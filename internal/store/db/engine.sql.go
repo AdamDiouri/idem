@@ -142,14 +142,15 @@ SET status           = $1::text,
     provider_ref     = COALESCE($2::text, provider_ref),
     last_error       = $3::text,
     dead_reason      = $4::text,
+    failure_code     = $5::text,
     run_after        = CASE WHEN $1::text IN ('IN_DOUBT', 'PENDING', 'AWAITING_CALLBACK')
-                            THEN now() + ($5::bigint * interval '1 millisecond')
+                            THEN now() + ($6::bigint * interval '1 millisecond')
                             ELSE run_after END,
     -- A waiting step is polled at its callback deadline (run_after, same instant).
     callback_deadline = CASE WHEN $1::text = 'AWAITING_CALLBACK'
-                             THEN now() + ($5::bigint * interval '1 millisecond')
+                             THEN now() + ($6::bigint * interval '1 millisecond')
                              ELSE NULL END
-WHERE id = $6 AND lease_epoch = $7 AND status = 'RUNNING'
+WHERE id = $7 AND lease_epoch = $8 AND status = 'RUNNING'
 `
 
 type CompleteStepParams struct {
@@ -157,6 +158,7 @@ type CompleteStepParams struct {
 	ProviderRef *string
 	LastError   *string
 	DeadReason  *string
+	FailureCode *string
 	RetryMs     int64
 	ID          uuid.UUID
 	LeaseEpoch  int64
@@ -169,6 +171,7 @@ func (q *Queries) CompleteStep(ctx context.Context, arg CompleteStepParams) (int
 		arg.ProviderRef,
 		arg.LastError,
 		arg.DeadReason,
+		arg.FailureCode,
 		arg.RetryMs,
 		arg.ID,
 		arg.LeaseEpoch,
@@ -339,6 +342,25 @@ WHERE id = $1 AND status = 'PENDING'
 func (q *Queries) MarkWorkflowRunning(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, markWorkflowRunning, id)
 	return err
+}
+
+const outboxStats = `-- name: OutboxStats :one
+SELECT
+  (SELECT count(*) FROM outbox WHERE status = 'PENDING')::int AS pending,
+  COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000 FROM outbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms
+`
+
+type OutboxStatsRow struct {
+	Pending         int32
+	OldestPendingMs int64
+}
+
+// For the sweeper's gauges: outcome events not delivered yet.
+func (q *Queries) OutboxStats(ctx context.Context) (OutboxStatsRow, error) {
+	row := q.db.QueryRow(ctx, outboxStats)
+	var i OutboxStatsRow
+	err := row.Scan(&i.Pending, &i.OldestPendingMs)
+	return i, err
 }
 
 const reclaimExpiredLeases = `-- name: ReclaimExpiredLeases :one

@@ -72,6 +72,10 @@ type Outcome struct {
 	InFlight    bool          // 409: the same key is being processed right now
 	RetryAfter  time.Duration // from a Retry-After header (seconds or HTTP date), capped at 1h
 	Err         error         // set for every non-success outcome
+	// Code is the provider's reason for a Permanent refusal (e.g. card_declined),
+	// as the provider sent it; empty otherwise. Untrusted text: whoever shows it
+	// to a client must validate it.
+	Code string
 }
 
 // ChargeRequest is the body of POST /charges.
@@ -175,7 +179,7 @@ func (c *Client) GetPayout(ctx context.Context, payoutID string, want PayoutRequ
 	case r.Status == "paid":
 		out.Class, out.ProviderRef = Success, r.ID
 	case r.Status == "failed":
-		out.Class, out.Err = Permanent, fmt.Errorf("payout failed: %s", r.FailureCode)
+		out.Class, out.Code, out.Err = Permanent, r.FailureCode, fmt.Errorf("payout failed: %s", r.FailureCode)
 	case r.Status == "pending":
 		out.Class, out.ProviderRef, out.Err = Pending, r.ID, errors.New("payout still pending")
 	default:
@@ -312,7 +316,8 @@ func classify(status int, header http.Header, body []byte, want expect) Outcome 
 			out.Class, out.ProviderRef = Accepted, r.ID
 		case want.acceptOnOK && want.AcceptedStatus != "" && r.ID != "" && r.Status == "failed":
 			// A lookup found the accepted request settled failed: a definite refusal.
-			out.Class, out.Err = Permanent, fmt.Errorf("provider reports %s failed: %s", r.ID, failureCode(body))
+			out.Class, out.Code = Permanent, failureCode(body)
+			out.Err = fmt.Errorf("provider reports %s failed: %s", r.ID, out.Code)
 		case r.ID == "" || r.Status != want.SuccessStatus:
 			out.Class, out.Err = Ambiguous, fmt.Errorf("unexpected response: id=%q status=%q", r.ID, r.Status)
 		case r.AmountCents != want.AmountCents:
@@ -324,7 +329,8 @@ func classify(status int, header http.Header, body []byte, want expect) Outcome 
 		}
 
 	case status == http.StatusBadRequest || status == http.StatusPaymentRequired:
-		out.Class, out.Err = Permanent, fmt.Errorf("provider refused request: %d %s", status, errorCode(body))
+		out.Class, out.Code = Permanent, errorCode(body)
+		out.Err = fmt.Errorf("provider refused request: %d %s", status, out.Code)
 
 	case status == http.StatusUnprocessableEntity:
 		code := errorCode(body)
@@ -332,7 +338,7 @@ func classify(status int, header http.Header, body []byte, want expect) Outcome 
 			// Our bug: same key, different body. We cannot claim nothing happened.
 			out.Class, out.Err = Ambiguous, errors.New("provider reports idempotency key reused with a different body")
 		} else {
-			out.Class, out.Err = Permanent, fmt.Errorf("provider refused request: %d %s", status, code)
+			out.Class, out.Code, out.Err = Permanent, code, fmt.Errorf("provider refused request: %d %s", status, code)
 		}
 
 	case status == http.StatusConflict:

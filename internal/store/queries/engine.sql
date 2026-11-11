@@ -65,6 +65,7 @@ SET status           = sqlc.arg(status)::text,
     provider_ref     = COALESCE(sqlc.narg(provider_ref)::text, provider_ref),
     last_error       = sqlc.narg(last_error)::text,
     dead_reason      = sqlc.narg(dead_reason)::text,
+    failure_code     = sqlc.narg(failure_code)::text,
     run_after        = CASE WHEN sqlc.arg(status)::text IN ('IN_DOUBT', 'PENDING', 'AWAITING_CALLBACK')
                             THEN now() + (sqlc.arg(retry_ms)::bigint * interval '1 millisecond')
                             ELSE run_after END,
@@ -188,6 +189,12 @@ SELECT
   COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(received_at))) * 1000 FROM webhook_inbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms,
   (SELECT count(*) FROM webhook_inbox WHERE status = 'CONFLICT')::int AS conflicts_open,
   (SELECT count(*) FROM steps WHERE status = 'AWAITING_CALLBACK' AND callback_deadline < now() - interval '5 minutes')::int AS callbacks_overdue;
+
+-- name: OutboxStats :one
+-- For the sweeper's gauges: outcome events not delivered yet.
+SELECT
+  (SELECT count(*) FROM outbox WHERE status = 'PENDING')::int AS pending,
+  COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000 FROM outbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms;
 
 -- name: IncrementHookFailures :one
 -- Fenced like CompleteStep: only the current lease holder counts a failure.

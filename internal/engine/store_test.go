@@ -491,8 +491,7 @@ func TestFindStuckWorkflows(t *testing.T) {
 	submit(t, pool, "cus_3") // fresh
 	_, err := pool.Exec(ctx, `UPDATE workflows SET status = 'RUNNING', updated_at = now() - interval '2 hours' WHERE id = $1`, stuck)
 	require.NoError(t, err)
-	_, err = pool.Exec(ctx, `UPDATE workflows SET status = 'SUCCEEDED', updated_at = now() - interval '2 hours' WHERE id = $1`, oldDone)
-	require.NoError(t, err)
+	setWorkflowStatus(t, pool, oldDone, "SUCCEEDED", "updated_at = now() - interval '2 hours'")
 
 	got, err := engine.FindStuckWorkflows(ctx, pool, time.Hour)
 	require.NoError(t, err)
@@ -561,8 +560,7 @@ func TestClaim_SkipsStepsOfInactiveWorkflows(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			pool := testutil.NewPool(t, dsn)
 			wf := submit(t, pool, "cus_1")
-			_, err := pool.Exec(context.Background(), `UPDATE workflows SET status = $2 WHERE id = $1`, wf, status)
-			require.NoError(t, err)
+			setWorkflowStatus(t, pool, wf, status)
 
 			_, ok, err := engine.Claim(context.Background(), pool, "w1", charge, time.Minute)
 			require.NoError(t, err)

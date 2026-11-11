@@ -26,7 +26,19 @@ const (
 // completion rolls back rather than overwrite it.
 var ErrUnexpectedWorkflowStatus = errors.New("workflow is not in the expected status")
 
-// transitionWorkflow moves a workflow to `to` only if it is currently in one of `from`.
+// terminal reports whether a workflow status is an outcome the shop is told about.
+func terminal(status string) bool {
+	return status == wfSucceeded || status == wfFailed || status == wfCompensated
+}
+
+// transitionWorkflow moves a workflow to `to` only if it is currently in one
+// of `from`. It is the only writer of workflow terminal states, and so the
+// only writer of outbox events (D13): a terminal transition inserts its event
+// in the same transaction, so the event exists if and only if the outcome
+// committed (the database also refuses a terminal workflow without its event,
+// migration 00014). A second event of the same type for a workflow fails the
+// transaction; a different type cannot happen, because terminal states have no
+// way out, and I8 would report it.
 func transitionWorkflow(ctx context.Context, q *db.Queries, id uuid.UUID, from []string, to string) error {
 	n, err := q.TransitionWorkflow(ctx, db.TransitionWorkflowParams{ToStatus: to, ID: id, FromStatuses: from})
 	if err != nil {
@@ -34,6 +46,20 @@ func transitionWorkflow(ctx context.Context, q *db.Queries, id uuid.UUID, from [
 	}
 	if n == 0 {
 		return fmt.Errorf("%w: workflow %s, want one of %v before %s", ErrUnexpectedWorkflowStatus, id, from, to)
+	}
+	if !terminal(to) {
+		return nil
+	}
+	eventID, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("new outbox event id: %w", err)
+	}
+	inserted, err := q.InsertOutboxEvent(ctx, db.InsertOutboxEventParams{ID: eventID, WorkflowID: id})
+	if err != nil {
+		return fmt.Errorf("write outbox event for workflow %s: %w", id, err)
+	}
+	if inserted != 1 {
+		return fmt.Errorf("write outbox event for workflow %s: %d rows inserted, want 1", id, inserted)
 	}
 	return nil
 }

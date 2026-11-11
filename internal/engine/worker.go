@@ -428,6 +428,11 @@ func snapshot(ctx context.Context, pool *pgxpool.Pool) (metrics.Snapshot, error)
 	}
 	s.InboxPending, s.ConflictsOpen, s.CallbacksOverdue = int(inbox.Pending), int(inbox.ConflictsOpen), int(inbox.CallbacksOverdue)
 	s.InboxOldestPending = time.Duration(inbox.OldestPendingMs) * time.Millisecond
+	outbox, err := q.OutboxStats(ctx)
+	if err != nil {
+		return s, err
+	}
+	s.OutboxPending, s.OutboxOldestPending = int(outbox.Pending), time.Duration(outbox.OldestPendingMs)*time.Millisecond
 	for _, p := range parked {
 		reason := "refused"
 		if p.DeadReason != nil {

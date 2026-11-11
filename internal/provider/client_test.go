@@ -56,6 +56,15 @@ func TestCreateCharge_DeclineIsPermanent(t *testing.T) {
 	require.Error(t, out.Err)
 }
 
+// Slice 2.4: the provider's refusal code is kept, so a failed workflow can
+// tell its shop why (e.g. card_declined).
+func TestCreateCharge_DeclineKeepsCode(t *testing.T) {
+	_, url := fake(t)
+	out := provider.NewClient(url, time.Second).CreateCharge(context.Background(), "key-1", chargeReq("cus_decline_1"))
+	require.Equal(t, provider.Permanent, out.Class)
+	require.Equal(t, "card_declined", out.Code)
+}
+
 func TestCreateCharge_TimeoutIsAmbiguous(t *testing.T) {
 	p, url := fake(t)
 	p.SetFaults(fakeprovider.Faults{Rules: []fakeprovider.Rule{{Endpoint: "charges", Mode: fakeprovider.ModeTimeoutAfterEffect, Times: 1}}})

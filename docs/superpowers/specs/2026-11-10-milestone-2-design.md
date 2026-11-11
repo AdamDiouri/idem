@@ -1,7 +1,7 @@
 # idem Milestone 2: nobody silently disagrees
 
 **Status:** approved by the owner (2026-11-10)
-**Builds on:** [`docs/design.md`](../../design.md) (the M1 spec, as built through slice 1.6). Section numbers like §9.5 refer to it.
+**Builds on:** [`docs/design.md`](../../design.md) (the M1 spec, as built through slice 1.6). Section numbers like §9.5 refer to it. Terms are defined in the [glossary](../../glossary.md).
 **Order agreed:** provider side first (async payouts, webhooks, polling), then shop side (status, outbox, outbound webhooks), then reconciliation.
 
 ---
@@ -47,7 +47,7 @@ Success is measured the M1 way: each failure mode has a deterministic test, the 
 ## 3. Constraints
 
 Everything in `docs/design.md` §4–§7 still holds. In particular:
-- Go 1.25 with `GOTOOLCHAIN=local`; Postgres as the only state store (D1); sqlc, goose, pgx, cobra, caarlos0/env, client_golang. Dependency versions are pinned to ones that build with Go 1.25.
+- Go, pinned by `go.mod`'s toolchain line and kept on a supported release (D22; Go 1.25 with `GOTOOLCHAIN=local` until 2026-11-10); Postgres as the only state store (D1); sqlc, goose, pgx, cobra, caarlos0/env, client_golang.
 - Effectively-once = at-least-once attempts + idempotent effects. Every external call keeps its stored idempotency key (D6).
 - **Durable before acknowledged** (design principle 6), now for webhooks in both directions.
 - Each slice: plan → native execution → independent review → fixes → PR. Tests against real Postgres; `make test`, `make lint`, `make build-release` and a chaos campaign pass. Commits never carry a `Co-Authored-By` line.
@@ -130,7 +130,10 @@ Everything in `docs/design.md` §4–§7 still holds. In particular:
 
 ### 5.1 `GET /workflows/{id}`
 - Bearer-authenticated like `POST`. A client can only read its own workflows; anything else is `404` (no existence leak).
-- Returns `workflow_id`, `status`, `amount_cents`, `fee_cents`, `currency`, `created_at`, `updated_at`, and for terminal states a short `outcome` (`succeeded`, `failed: card_declined`, `compensated: payout_failed`, …). `NEEDS_ATTENTION` is shown to the shop as **`processing`**: it is not an outcome yet, and parking reasons are internal.
+- Returns `workflow_id`, `status`, `reason`, `amount_cents`, `fee_cents`, `currency`, `created_at`, `updated_at`. *(As built in slice 2.4, owner-approved: two machine-readable fields instead of one `outcome` string such as `failed: card_declined`.)*
+  - `status` is `processing`, `succeeded`, `failed` or `compensated`. `PENDING`, `RUNNING`, `COMPENSATING` and `NEEDS_ATTENTION` are all **`processing`**: none is an outcome yet, and parking reasons are internal.
+  - `reason` comes only with `failed` (the charge's provider code if it is a plain token, e.g. `card_declined`, else `charge_failed`) and `compensated` (`payout_failed`). Raw provider text never reaches the shop.
+  - The view is one SQL function, `workflow_view`, which the outbox also stores (§5.2), so the two cannot drift.
 - No step or ledger internals, and no IDs other than the workflow's.
 - For "my `POST` timed out, what happened?" the answer stays: retry the `POST` with the same key (it replays). The README says so.
 
@@ -210,7 +213,7 @@ The columns `callback_deadline` and status `AWAITING_CALLBACK` already exist fro
 | F30 | Webhook and poll race | Same CAS apply | One applies, the other no-ops | `delay_webhook` + short deadline; exercised in chaos (2.3), asserted by I10/I11 (2.3b) |
 | F31 | Shop down or slow | Relay backoff; `DEAD` after the budget | Delivered when it recovers; loud otherwise | fake shop `down`, `slow` |
 | F32 | Relay crash after the shop's `2xx`, before marking delivered | At least once + event ID | The shop sees it twice, processes it once | failpoint `relay_after_send`, `ack_after_timeout` |
-| F33 | Outcome committed but the relay never runs | Outbox row durable | Delivered when a relay starts | kill all relays |
+| F33 | Outcome committed but the relay never runs | Outbox row durable | Delivered when a relay starts | 2.4: no relay exists; chaos kills workers at `before_commit`/`after_commit` and I8 finds every event, once. 2.5: kill all relays |
 | F34 | Provider record without our posting (or the reverse) | Reconciliation | Reported, nothing changed | inject by test (direct provider call) |
 
 ## 9. Invariants (additions to §13)
@@ -218,7 +221,7 @@ The columns `callback_deadline` and status `AWAITING_CALLBACK` already exist fro
 | ID | Invariant | Checked against |
 |---|---|---|
 | **I4** (extended; chaos since 2.3) | After quiescence: no step `AWAITING_CALLBACK`, no inbox row `PENDING`, no outbox row `PENDING` | DB |
-| **I8** | Every terminal workflow has exactly one outbox event, of the matching type; no non-terminal workflow has one | DB |
+| **I8** (checked by every chaos run and `idem check` since 2.4) | Every terminal workflow has exactly one outbox event, of the matching type, whose payload is its view; no non-terminal workflow has one | DB |
 | **I9** | The fake shop's deduplicated view equals idem's terminal workflows: same set, same outcomes. No event the shop saw contradicts the database | Fake shop `/_seen` × DB |
 | **I10** (checked by every chaos run since 2.3; tightened in 2.3b) | After quiescence, checked event by event against the fake provider's delivery log: a true event ends `PROCESSED`; a stale (reordered) one ends `IGNORED` as stale, or `PROCESSED` when it reached a payout still waiting (applied with the provider's re-checked state, never its own claim; I3 and I7 judge the money); either may be `EVIDENCE` only on a workflow in `NEEDS_ATTENTION`. Orphan, malformed, unsupported or mismatch notes, and a true event dismissed as stale, are violations: the honest fake provider never causes them. `CONFLICT` appears only if the provider's state truly contradicts idem's, which the fake provider never does, so chaos expects none. | DB × fake provider delivery log (`/_webhooks`) |
 | **I11** (2.3b) | Every event the provider saw acknowledged (2xx) is in the inbox; no event was accepted on a wrongly signed delivery alone; the inbox holds no event the provider never sent. Chaos also requires that webhooks completed payouts and (runs ≥ 1 min) that the provider delivered reordered events, because polling completes every payout even when webhooks are broken. | DB × fake provider delivery log |
