@@ -614,18 +614,7 @@ None open.
 
 ## 18. Glossary
 
-| Term | Meaning |
-|---|---|
-| **Effectively-once** | Work may run more than once; its effects apply once. |
-| **Idempotency key** | Identifier for one *intended* effect; the receiver performs it once and replays the result for repeats. |
-| **Lease** | Time-limited ownership of a step by a worker. |
-| **Fencing token** | Monotonic number (`lease_epoch`) that lets the database reject writes from a worker that lost its lease. |
-| **`IN_DOUBT`** | We may have caused an external effect but don't know. |
-| **Pivot step** | The point after which a saga can only move forward (here: payout). |
-| **Compensation** | A new action that semantically undoes an earlier one (refund undoes charge). Not a rollback. |
-| **Outbox** | Table of events written in the same transaction as state changes, published later, so events never disagree with state. |
-| **Inbox** | Table of received messages, deduplicated by ID, processed asynchronously. |
-| **Oracle** | Independent record of ground truth (here: the fake provider's effect log) used to check invariants. |
+Moved to [`docs/glossary.md`](glossary.md), which defines every term used here (workflow, step, ledger, idempotency key, lease, outbox, webhook, invariant, …) in plain language, grouped by area, with where each lives in the code.
 
 ## 19. References
 - Brandur Leach — *Implementing Stripe-like Idempotency Keys in Postgres*

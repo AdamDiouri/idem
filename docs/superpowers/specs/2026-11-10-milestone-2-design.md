@@ -1,7 +1,7 @@
 # idem Milestone 2: nobody silently disagrees
 
 **Status:** approved by the owner (2026-11-10)
-**Builds on:** [`docs/design.md`](../../design.md) (the M1 spec, as built through slice 1.6). Section numbers like §9.5 refer to it.
+**Builds on:** [`docs/design.md`](../../design.md) (the M1 spec, as built through slice 1.6). Section numbers like §9.5 refer to it. Terms are defined in the [glossary](../../glossary.md).
 **Order agreed:** provider side first (async payouts, webhooks, polling), then shop side (status, outbox, outbound webhooks), then reconciliation.
 
 ---
