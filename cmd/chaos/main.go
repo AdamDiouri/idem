@@ -31,7 +31,8 @@ func run() int {
 	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "worker processes")
 	flag.IntVar(&cfg.APIs, "apis", cfg.APIs, "API replicas (clients and webhooks rotate across them)")
 	flag.IntVar(&cfg.Sweepers, "sweepers", cfg.Sweepers, "sweeper processes")
-	flag.StringVar(&cfg.BinDir, "bin-dir", cfg.BinDir, "directory with the idem and fakeprovider binaries")
+	flag.IntVar(&cfg.Relays, "relays", cfg.Relays, "relay processes delivering outcomes to the fake shop")
+	flag.StringVar(&cfg.BinDir, "bin-dir", cfg.BinDir, "directory with the idem, fakeprovider and fakeshop binaries")
 	out := flag.String("out", "chaos-runs", "parent directory for run artifacts")
 	flag.Parse()
 

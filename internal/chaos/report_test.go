@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AdamDiouri/idem/internal/fakeprovider"
+	"github.com/AdamDiouri/idem/internal/fakeshop"
 
 	"github.com/AdamDiouri/idem/internal/invariants"
 )
@@ -317,4 +318,50 @@ func TestReport_ShortRunNeedsNoDuplicatesPerReplica(t *testing.T) {
 	r.WebhooksDuplicate = map[string]int{"api-0": 1}
 	r.Evaluate()
 	require.NotContains(t, strings.Join(r.Reasons, "\n"), "deduplicated no webhook")
+}
+
+// withShop is healthy() for a run with relays and a shop that did its part.
+func withShop() Report {
+	r := healthy()
+	r.Config.Relays = 2
+	r.Shop = ShopCounts{Events: 1, Duplicates: 2}
+	r.Outbox = map[string]int{"DELIVERED": 1}
+	return r
+}
+
+// Slice 2.5: a run with relays must show delivery and redelivery, every shop
+// fault, and no event given up on.
+func TestReport_ShopVacuity(t *testing.T) {
+	r := withShop()
+	r.Evaluate()
+	require.True(t, r.Passed, r.Reasons)
+
+	r = withShop()
+	r.Shop.Events = 0
+	r.Evaluate()
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "no outcome reached the shop")
+
+	r = withShop()
+	r.Outbox["DEAD"] = 2
+	r.Evaluate()
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "2 outbox events DEAD")
+
+	long := withShop()
+	long.Config.Duration = 90 * time.Second
+	long.Shop.Duplicates = 0
+	long.ShopFaultHits = map[string]int{fakeshop.ModeDown: 1}
+	long.Evaluate()
+	reasons := strings.Join(long.Reasons, "\n")
+	require.Contains(t, reasons, "no redelivery")
+	require.Contains(t, reasons, "shop fault "+fakeshop.ModeSlow+" never fired")
+	require.NotContains(t, reasons, "shop fault "+fakeshop.ModeDown+" never fired")
+}
+
+// Relay failpoints are judged like the workers' and the APIs'.
+func TestReport_RelayFailpointsMustFire(t *testing.T) {
+	r := withShop()
+	r.Config.Duration = 90 * time.Second
+	r.Config.RelayFailpoints = "relay_after_send=exit@0.02"
+	r.Evaluate()
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "failpoint relay_after_send was armed but never fired")
 }

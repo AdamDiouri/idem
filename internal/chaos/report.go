@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AdamDiouri/idem/internal/fakeshop"
 	"github.com/AdamDiouri/idem/internal/invariants"
 )
 
@@ -72,9 +73,14 @@ type Report struct {
 	SettleTime      time.Duration          `json:"settle_time"`
 	// WebhooksInFlight counts provider webhooks neither delivered nor given
 	// up when the settle phase ended: the inbox was judged incomplete.
-	WebhooksInFlight int      `json:"webhooks_in_flight"`
-	Passed           bool     `json:"passed"`
-	Reasons          []string `json:"reasons"`
+	WebhooksInFlight int `json:"webhooks_in_flight"`
+	// Slice 2.5: what reached the shop, which shop faults fired, and the
+	// outbox by status at the verdict.
+	Shop          ShopCounts     `json:"shop"`
+	ShopFaultHits map[string]int `json:"shop_fault_hits"`
+	Outbox        map[string]int `json:"outbox"`
+	Passed        bool           `json:"passed"`
+	Reasons       []string       `json:"reasons"`
 }
 
 // Evaluate sets Passed and Reasons. A run passes only if every check holds AND
@@ -93,6 +99,9 @@ func (r *Report) Evaluate() {
 	}
 	if n := r.WebhooksInFlight; n > 0 {
 		add("%d webhook deliveries still in flight at the verdict", n)
+	}
+	if n := r.Outbox["DEAD"]; n > 0 {
+		add("%d outbox events DEAD: the relay gave up on a shop that recovers", n)
 	}
 	if n := len(r.Clients.Conflicts); n > 0 {
 		add("%d idempotency keys returned two different workflows", n)
@@ -182,7 +191,8 @@ func (r *Report) Evaluate() {
 	if effective[SetProviderFaults] > 0 && hits == 0 {
 		add("vacuous: provider faults were set but never fired")
 	}
-	if (r.Config.Failpoints != "" || r.Config.APIFailpoints != "") && r.FailpointExits == 0 {
+	r.evaluateShop(add)
+	if (r.Config.Failpoints != "" || r.Config.APIFailpoints != "" || r.Config.RelayFailpoints != "") && r.FailpointExits == 0 {
 		add("vacuous: failpoints were armed but none fired (binary built with -tags nofailpoint?)")
 	}
 	if r.Config.APIs > 1 {
@@ -202,7 +212,7 @@ func (r *Report) Evaluate() {
 		}
 	}
 	if r.Config.Duration >= time.Minute {
-		for _, name := range armedFailpoints(r.Config.Failpoints + "," + r.Config.APIFailpoints) {
+		for _, name := range armedFailpoints(r.Config.Failpoints + "," + r.Config.APIFailpoints + "," + r.Config.RelayFailpoints) {
 			if r.FailpointFires[name] == 0 {
 				add("vacuous: failpoint %s was armed but never fired", name)
 			}
@@ -221,8 +231,8 @@ func (r *Report) Evaluate() {
 // Reproduce returns the command that replays this run's fault plan.
 func (r *Report) Reproduce() string {
 	c := r.Config
-	return fmt.Sprintf("bin/chaos --seed %d --duration %s --workflows %d --workers %d --apis %d --sweepers %d",
-		r.Seed, c.Duration, c.Workflows, c.Workers, max(c.APIs, 1), c.Sweepers)
+	return fmt.Sprintf("bin/chaos --seed %d --duration %s --workflows %d --workers %d --apis %d --sweepers %d --relays %d",
+		r.Seed, c.Duration, c.Workflows, c.Workers, max(c.APIs, 1), c.Sweepers, c.Relays)
 }
 
 // Text renders a human-readable summary.
@@ -288,6 +298,11 @@ func (r *Report) Text() string {
 	fmt.Fprintf(&b, "callback polls: %d (payouts that waited: %d)\n", r.CallbackPolls, r.PayoutsWaited)
 	fmt.Fprintf(&b, "webhooks: %d applied, %d duplicates, %d deferred, %d stale delivered (%d ignored as stale), %d in flight at the verdict\n",
 		r.Webhooks.Applied, r.Webhooks.Duplicates, r.Webhooks.Deferred, r.Webhooks.StaleDelivered, r.Webhooks.StaleIgnored, r.WebhooksInFlight)
+
+	if r.Config.Relays > 0 {
+		fmt.Fprintf(&b, "shop: %d outcomes learned, %d redeliveries deduplicated; shop fault hits: %v; outbox: %v\n",
+			r.Shop.Events, r.Shop.Duplicates, r.ShopFaultHits, r.Outbox)
+	}
 
 	fmt.Fprintf(&b, "crash restarts:\n")
 	for _, name := range slices.Sorted(maps.Keys(r.Restarts)) {
@@ -417,4 +432,33 @@ func (r *Report) realWebhookWindows() map[string]bool {
 		}
 	}
 	return out
+}
+
+// ShopCounts is what the fake shop learned (slice 2.5).
+type ShopCounts struct {
+	Events     int `json:"events"`     // outcomes learned, each once
+	Duplicates int `json:"duplicates"` // redeliveries it recognised (at least once, D14)
+}
+
+// evaluateShop judges runs with relays: outcomes reached the shop and, in
+// runs of a minute or more, redelivery happened (a relay crash or a lost
+// acknowledgement) and every shop fault fired.
+func (r *Report) evaluateShop(add func(string, ...any)) {
+	if r.Config.Relays == 0 {
+		return
+	}
+	if r.Shop.Events == 0 {
+		add("vacuous: no outcome reached the shop")
+	}
+	if r.Config.Duration < time.Minute {
+		return
+	}
+	if r.Shop.Duplicates == 0 {
+		add("vacuous: no redelivery reached the shop (no evidence of at-least-once delivery)")
+	}
+	for _, mode := range fakeshop.Modes {
+		if r.ShopFaultHits[mode] == 0 {
+			add("vacuous: shop fault %s never fired", mode)
+		}
+	}
 }
