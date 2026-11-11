@@ -133,3 +133,22 @@ groups:
         annotations:
           summary: "{{ $labels.job }} processes spend {{ $value | humanize }}s per second waiting for a database connection"
           runbook: docs/runbooks/needs-attention.md#idemdbpoolsaturated
+
+      # Slice 2.5: workflow outcomes waiting to reach their shop.
+      - alert: IdemOutboxBacklog
+        expr: max(idem_outbox_oldest_pending_age_seconds{job="idem-sweeper"}) > 900
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A workflow outcome has waited {{ $value | humanizeDuration }} to reach its shop: a shop is down or slow, or no relay runs"
+          runbook: docs/runbooks/needs-attention.md#idemoutboxbacklog
+
+      - alert: IdemOutboxDead
+        expr: max(idem_outbox_dead{job="idem-sweeper"}) > 0
+        for: 0m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} workflow outcomes were never delivered to their shop; redeliver them once it is back"
+          runbook: docs/runbooks/needs-attention.md#idemoutboxdead

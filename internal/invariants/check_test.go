@@ -179,6 +179,13 @@ func (e env) setStatus(t *testing.T, wf uuid.UUID, status string) {
 	testutil.SetWorkflowStatus(t, e.pool, wf, status)
 }
 
+// delivered marks wf's outbox event as delivered, as the relay would.
+func (e env) delivered(t *testing.T, wf uuid.UUID) {
+	t.Helper()
+	_, err := e.pool.Exec(context.Background(), `UPDATE outbox SET status = 'DELIVERED', delivered_at = now() WHERE workflow_id = $1`, wf)
+	require.NoError(t, err)
+}
+
 func requireViolation(t *testing.T, vs []invariants.Violation, invariant string, wf uuid.UUID, detail string) {
 	t.Helper()
 	for _, v := range vs {
@@ -288,6 +295,7 @@ func TestCheckLiveness_ReportsStuck(t *testing.T) {
 	require.Contains(t, v[0].Detail, "PENDING")
 
 	e.setStatus(t, wf, "SUCCEEDED")
+	e.delivered(t, wf) // settled includes the shop having been told (slice 2.5)
 	v, err = invariants.CheckLiveness(ctx, e.pool)
 	require.NoError(t, err)
 	require.Empty(t, v)
@@ -299,8 +307,7 @@ func TestCheckLiveness_ReportsAwaitingCallback(t *testing.T) {
 	e := setup(t)
 	wf, step := newWorkflow(t, e.pool)
 	e.setStatus(t, wf, "RUNNING")
-	_, err := e.pool.Exec(ctx, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_1', callback_deadline = now() WHERE id = $1`, step)
-	require.NoError(t, err)
+	testutil.Plant(t, dsn, `UPDATE steps SET status = 'AWAITING_CALLBACK', provider_ref = 'po_1', callback_deadline = now() WHERE id = $1`, step)
 
 	v, err := invariants.CheckLiveness(ctx, e.pool)
 	require.NoError(t, err)
@@ -345,8 +352,7 @@ func TestCheckLiveness_ReportsLeftoverSteps(t *testing.T) {
 	e := setup(t)
 	wf, step := newWorkflow(t, e.pool)
 	e.setStatus(t, wf, "NEEDS_ATTENTION")
-	_, err := e.pool.Exec(ctx, `UPDATE steps SET status = 'IN_DOUBT' WHERE id = $1`, step)
-	require.NoError(t, err)
+	testutil.Plant(t, dsn, `UPDATE steps SET status = 'IN_DOUBT' WHERE id = $1`, step)
 
 	v, err := invariants.CheckLiveness(ctx, e.pool)
 	require.NoError(t, err)
@@ -373,6 +379,7 @@ func TestCheckLiveness_ReportsPendingInbox(t *testing.T) {
 	e := setup(t)
 	wf, _ := newWorkflow(t, e.pool)
 	e.setStatus(t, wf, "SUCCEEDED")
+	e.delivered(t, wf)
 	_, err := e.pool.Exec(ctx, `INSERT INTO webhook_inbox (provider_event_id, type, payload) VALUES ('evt_p', 'payout.paid', '{}')`)
 	require.NoError(t, err)
 	v, err := invariants.CheckLiveness(ctx, e.pool)

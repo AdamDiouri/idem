@@ -35,10 +35,8 @@ func parkedCharge(t *testing.T, pool *pgxpool.Pool) (uuid.UUID, uuid.UUID) {
 	require.NoError(t, err)
 	var wf, step uuid.UUID
 	require.NoError(t, pool.QueryRow(ctx, `SELECT workflow_id, id FROM steps ORDER BY created_at DESC LIMIT 1`).Scan(&wf, &step))
-	_, err = pool.Exec(ctx, `UPDATE steps SET status = 'DEAD', dead_reason = 'attempts_exhausted_no_effect', attempt_count = 8 WHERE id = $1`, step)
-	require.NoError(t, err)
-	_, err = pool.Exec(ctx, `UPDATE workflows SET status = 'NEEDS_ATTENTION' WHERE id = $1`, wf)
-	require.NoError(t, err)
+	testutil.Plant(t, dsn, `UPDATE steps SET status = 'DEAD', dead_reason = 'attempts_exhausted_no_effect', attempt_count = 8 WHERE id = $1`, step)
+	testutil.SetWorkflowStatus(t, pool, wf, "NEEDS_ATTENTION") // via RUNNING, as a claimed workflow is
 	return wf, step
 }
 
@@ -175,4 +173,48 @@ func TestAdminCLI_ConflictListAndResolve(t *testing.T) {
 	require.Equal(t, 1, code, out)
 	code, _ = admin(t, "conflict", "resolve", "evt_cli")
 	require.Equal(t, 2, code, "missing --reason")
+}
+
+// Slice 2.5: redeliver needs a reason and the version the operator saw.
+func TestAdminOutbox_RedeliverNeedsReasonAndVersion(t *testing.T) {
+	testutil.NewPool(t, dsn)
+	id := "0190f1d2-0000-7000-8000-000000000000"
+	code, out := admin(t, "outbox", "redeliver", id, "--expect-version", "3")
+	require.Equal(t, 2, code, out)
+	code, out = admin(t, "outbox", "redeliver", id, "--reason", "back")
+	require.Equal(t, 2, code, out)
+	code, out = admin(t, "outbox", "redeliver", id, "--reason", "back", "--expect-version", "3")
+	require.Equal(t, 1, code, out) // unknown event: not actionable
+}
+
+func TestAdminOutbox_ListShowsEvents(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	wf, _ := parkedCharge(t, pool)
+	testutil.SetWorkflowStatus(t, pool, wf, "FAILED")
+	code, out := admin(t, "outbox", "list")
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "VERSION")
+	require.Contains(t, out, wf.String())
+	require.Contains(t, out, "workflow.failed")
+
+	_, err := pool.Exec(context.Background(), `UPDATE outbox SET status = 'DELIVERED' WHERE workflow_id = $1`, wf)
+	require.NoError(t, err)
+	_, out = admin(t, "outbox", "list")
+	require.NotContains(t, out, wf.String())
+	_, out = admin(t, "outbox", "list", "--all")
+	require.Contains(t, out, wf.String(), "final review, minor 2: delivered events can be listed")
+}
+
+// Final review, Important 2: one command resends a client's dead events.
+func TestAdminOutbox_RedeliverAll(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	wf, _ := parkedCharge(t, pool)
+	testutil.SetWorkflowStatus(t, pool, wf, "FAILED")
+	_, err := pool.Exec(context.Background(), `UPDATE outbox SET status = 'DEAD' WHERE workflow_id = $1`, wf)
+	require.NoError(t, err)
+	code, out := admin(t, "outbox", "redeliver-all", "--client", "c", "--status", "DEAD", "--reason", "shop back")
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "1 event")
+	code, out = admin(t, "outbox", "redeliver-all", "--client", "c", "--status", "DEAD")
+	require.Equal(t, 2, code, out) // --reason is required
 }

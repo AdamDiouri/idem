@@ -71,13 +71,13 @@ func Complete(ctx context.Context, pool *pgxpool.Pool, s ClaimedStep, r Result, 
 }
 
 // stepStatus maps a result to the step's next status. A definite no-effect
-// answer only clears doubt that this attempt created: a step that was already
-// IN_DOUBT stays IN_DOUBT, because an earlier attempt may have moved money.
+// answer only clears doubt that this attempt created: a step whose earlier
+// send may have moved money stays IN_DOUBT (sticky doubt).
 func stepStatus(s ClaimedStep, kind ResultKind) string {
 	if kind != ResultRetryNoEffect {
 		return string(kind)
 	}
-	if s.PriorStatus == string(ResultInDoubt) {
+	if s.MoneyMayHaveMoved() {
 		return string(ResultInDoubt)
 	}
 	return "PENDING"

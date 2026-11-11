@@ -36,7 +36,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(migrateCmd(), apiCmd(), workerCmd(), sweeperCmd(), checkCmd(), adminCmd())
+	root.AddCommand(migrateCmd(), apiCmd(), workerCmd(), sweeperCmd(), relayCmd(), checkCmd(), adminCmd())
 	markUsageErrors(root)
 	return root
 }

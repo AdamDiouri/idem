@@ -441,10 +441,9 @@ func TestMayHaveMoved_DeadSendAttemptCounts(t *testing.T) {
 	h := newHarness(t)
 	wf := parkCharge(t, h, fakeprovider.ModeRateLimit) // provably no effect so far
 	step := h.parkedStep(t, wf).StepID
-	_, err := h.pool.Exec(ctx, `
+	plant(t, `
 		UPDATE steps SET status = 'FAILED_PERMANENT', dead_reason = NULL WHERE id = $1;`, step)
-	require.NoError(t, err)
-	_, err = h.pool.Exec(ctx, `
+	_, err := h.pool.Exec(ctx, `
 		UPDATE step_attempts SET outcome = 'DEAD'
 		WHERE step_id = $1 AND kind = 'send' AND attempt_no = (SELECT min(attempt_no) FROM step_attempts WHERE step_id = $1)`, step)
 	require.NoError(t, err)

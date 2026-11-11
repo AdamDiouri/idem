@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AdamDiouri/idem/internal/fakeprovider"
+	"github.com/AdamDiouri/idem/internal/fakeshop"
 )
 
 func cfg(seed int64) PlanConfig {
@@ -241,6 +242,43 @@ func TestPlan_WebhookFaultBlock(t *testing.T) {
 				require.Less(t, e.At, d, "%s seed %d: event past the run", d, seed)
 			}
 			require.Len(t, kinds, len(AllKinds), "%s seed %d: every disruption kind still occurs", d, seed)
+		}
+	}
+}
+
+// Slice 2.5: in runs of a minute or more, every shop fault gets a window of
+// its own, long enough to meet deliveries, inside the campaign.
+func TestPlan_ShopFaultBlockCoversEveryMode(t *testing.T) {
+	for _, d := range []time.Duration{60 * time.Second, 90 * time.Second, 120 * time.Second, 300 * time.Second} {
+		for seed := int64(1); seed <= 500; seed++ {
+			events := NewPlan(PlanConfig{Seed: seed, Duration: d, Workers: 4, APIs: 2, Relays: 2, LeaseTTL: 4 * time.Second})
+			found := map[string]bool{}
+			for i, e := range events {
+				if e.Kind != SetShopFaults || len(e.ShopFaults.Rules) != 1 {
+					continue
+				}
+				if shopFaultWindow(events, i, d) < minFaultWindow+faultWindowSlack || e.At < d/10 || e.At > d*9/10 {
+					continue
+				}
+				found[e.ShopFaults.Rules[0].Mode] = true
+			}
+			for _, m := range fakeshop.Modes {
+				require.True(t, found[m], "%s seed %d: no dedicated %s window", d, seed, m)
+			}
+		}
+	}
+}
+
+func TestPlan_ShopFaultsAreValidAndRelayTargetsExist(t *testing.T) {
+	for seed := int64(1); seed <= 50; seed++ {
+		for _, e := range NewPlan(PlanConfig{Seed: seed, Duration: 90 * time.Second, Workers: 4, APIs: 2, Relays: 2, LeaseTTL: 4 * time.Second}) {
+			switch e.Kind {
+			case SetShopFaults:
+				require.NoError(t, e.ShopFaults.Validate())
+				require.NotEmpty(t, e.ShopFaults.Rules)
+			case KillRelay:
+				require.Less(t, e.Target, 2)
+			}
 		}
 	}
 }

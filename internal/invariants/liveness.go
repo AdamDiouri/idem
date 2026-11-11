@@ -49,6 +49,19 @@ func CheckLiveness(ctx context.Context, pool *pgxpool.Pool) ([]Violation, error)
 			Detail:    fmt.Sprintf("provider event %s still unprocessed since %s", e.ProviderEventID, e.ReceivedAt.Time.UTC().Format(time.RFC3339)),
 		})
 	}
+
+	// Slice 2.5: an outcome still waiting to reach its shop is unfinished work.
+	outbox, err := db.New(pool).PendingOutboxEvents(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query pending outbox events: %w", err)
+	}
+	for _, o := range outbox {
+		violations = append(violations, Violation{
+			Invariant:  "I4",
+			WorkflowID: o.WorkflowID.String(),
+			Detail:     fmt.Sprintf("outbox event %s still PENDING after %d attempts", o.ID, o.Attempts),
+		})
+	}
 	return violations, nil
 }
 

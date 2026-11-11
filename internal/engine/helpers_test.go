@@ -20,3 +20,10 @@ func setWorkflowStatus(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, status st
 	t.Helper()
 	testutil.SetWorkflowStatus(t, pool, id, status, set...)
 }
+
+// plant sets up a fixture state no legal transition reaches, as the owner
+// with triggers off (slice 2.5b); see testutil.Plant.
+func plant(t *testing.T, sql string, args ...any) {
+	t.Helper()
+	testutil.Plant(t, dsn, sql, args...)
+}

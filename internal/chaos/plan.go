@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/AdamDiouri/idem/internal/fakeprovider"
+	"github.com/AdamDiouri/idem/internal/fakeshop"
 )
 
 // EventKind is one kind of disruption.
@@ -26,18 +27,28 @@ const (
 	// RestartAll is a rolling deploy done badly (F26): every worker, sweeper
 	// and API replica gets SIGTERM at once, drains, and starts again.
 	RestartAll EventKind = "restart_all"
+	// Slice 2.5: the relays and the shop.
+	KillRelay       EventKind = "kill_relay"      // SIGKILL one relay; the supervisor restarts it
+	KillAllRelays   EventKind = "kill_all_relays" // F33: no relay runs for a moment; the outbox waits, durable
+	SetShopFaults   EventKind = "set_shop_faults" // the fake shop misbehaves (F31, F32)
+	ClearShopFaults EventKind = "clear_shop_faults"
 )
 
 // AllKinds lists every disruption kind.
-var AllKinds = []EventKind{KillWorker, PauseWorker, RestartAPI, RestartPostgres, SetProviderFaults, ClearProviderFaults, RestartAll}
+var AllKinds = []EventKind{KillWorker, PauseWorker, RestartAPI, RestartPostgres, SetProviderFaults, ClearProviderFaults, RestartAll,
+	KillRelay, KillAllRelays, SetShopFaults, ClearShopFaults}
 
 // Event is one scheduled disruption.
 type Event struct {
-	At       time.Duration       `json:"at"`
-	Kind     EventKind           `json:"kind"`
-	Target   int                 `json:"target"`             // worker index, or API replica for restart_api
-	Duration time.Duration       `json:"duration,omitempty"` // pauses
-	Faults   fakeprovider.Faults `json:"faults,omitzero"`
+	At         time.Duration       `json:"at"`
+	Kind       EventKind           `json:"kind"`
+	Target     int                 `json:"target"`             // worker index; API replica for restart_api; relay for kill_relay
+	Duration   time.Duration       `json:"duration,omitempty"` // pauses
+	Faults     fakeprovider.Faults `json:"faults,omitzero"`
+	ShopFaults fakeshop.Faults     `json:"shop_faults,omitzero"`
+	// PlannedTarget is set when the planned target was down and the event
+	// went to another process (Target is then the one actually hit).
+	PlannedTarget *int `json:"planned_target,omitempty"`
 }
 
 // PlanConfig parameterises NewPlan.
@@ -46,6 +57,7 @@ type PlanConfig struct {
 	Duration time.Duration
 	Workers  int
 	APIs     int // API replicas; a RestartAPI event targets one of them
+	Relays   int // relays; a KillRelay event targets one of them
 	LeaseTTL time.Duration
 }
 
@@ -55,8 +67,9 @@ var kindWeights = []struct {
 	kind   EventKind
 	weight int
 }{
-	{KillWorker, 28}, {PauseWorker, 20}, {SetProviderFaults, 25},
-	{RestartAPI, 10}, {RestartPostgres, 10}, {ClearProviderFaults, 4}, {RestartAll, 3},
+	{KillWorker, 22}, {PauseWorker, 15}, {SetProviderFaults, 20},
+	{RestartAPI, 8}, {RestartPostgres, 7}, {ClearProviderFaults, 3}, {RestartAll, 2},
+	{KillRelay, 8}, {KillAllRelays, 2}, {SetShopFaults, 10}, {ClearShopFaults, 3},
 }
 
 var endpointModes = map[string][]string{
@@ -100,6 +113,7 @@ func NewPlan(cfg PlanConfig) []Event {
 			}
 		}
 		events = webhookFaultBlock(rng, events, cfg.Duration)
+		events = shopFaultBlock(rng, events, cfg.Duration)
 	}
 
 	sort.SliceStable(events, func(i, j int) bool { return events[i].At < events[j].At })
@@ -134,6 +148,12 @@ func newEvent(rng *rand.Rand, cfg PlanConfig, at time.Duration, kind EventKind) 
 		e.Duration = time.Duration(float64(cfg.LeaseTTL) * (1.5 + rng.Float64()))
 	case SetProviderFaults:
 		e.Faults = randomFaults(rng)
+	case KillRelay:
+		e.Target = rng.IntN(max(cfg.Relays, 1))
+	case SetShopFaults:
+		e.ShopFaults = fakeshop.Faults{Seed: rng.Int64N(math.MaxInt32) + 1, Rules: []fakeshop.Rule{
+			shopRule(rng, fakeshop.Modes[rng.IntN(len(fakeshop.Modes))]),
+		}}
 	}
 	return e
 }
@@ -222,6 +242,59 @@ func webhookFaultBlock(rng *rand.Rand, events []Event, duration time.Duration) [
 	}
 	if clears == 0 {
 		kept = append(kept, Event{At: end, Kind: ClearProviderFaults})
+	}
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].At < kept[j].At })
+	return kept
+}
+
+// shopRule is a shop fault, likely enough (0.3–0.6 per delivery) to meet the
+// deliveries of its window.
+func shopRule(rng *rand.Rand, mode string) fakeshop.Rule {
+	return fakeshop.Rule{Mode: mode, Probability: 0.3 + 0.3*rng.Float64()}
+}
+
+// shopFaultWindow is how long the shop fault set of events[i] stays in force:
+// until the next shop fault change, or the end of the campaign.
+func shopFaultWindow(events []Event, i int, end time.Duration) time.Duration {
+	for _, n := range events[i+1:] {
+		if n.Kind == SetShopFaults || n.Kind == ClearShopFaults {
+			return n.At - events[i].At
+		}
+	}
+	return end - events[i].At
+}
+
+// shopFaultBlock is webhookFaultBlock for the shop (slice 2.5): one window of
+// minFaultWindow + faultWindowSlack per shop fault, back to back, once traffic
+// flows, with any other shop fault change inside it dropped. It is
+// independent of the provider's block (they may overlap: different processes).
+func shopFaultBlock(rng *rand.Rand, events []Event, duration time.Duration) []Event {
+	slot := minFaultWindow + faultWindowSlack
+	block := time.Duration(len(fakeshop.Modes)) * slot
+	earliest, latest := duration/10, duration*9/10-block
+	latest = max(latest, earliest)
+	start := earliest + time.Duration(rng.Int64N(int64(latest-earliest)+1))
+	end := start + block
+
+	kept := events[:0:0]
+	clears := 0
+	for _, e := range events {
+		change := e.Kind == SetShopFaults || e.Kind == ClearShopFaults
+		if change && e.At >= start && e.At < end {
+			continue
+		}
+		if e.Kind == ClearShopFaults {
+			clears++
+		}
+		kept = append(kept, e)
+	}
+	for i, mode := range fakeshop.Modes {
+		kept = append(kept, Event{At: start + time.Duration(i)*slot, Kind: SetShopFaults, ShopFaults: fakeshop.Faults{
+			Seed: rng.Int64N(math.MaxInt32) + 1, Rules: []fakeshop.Rule{shopRule(rng, mode)},
+		}})
+	}
+	if clears == 0 {
+		kept = append(kept, Event{At: end, Kind: ClearShopFaults})
 	}
 	sort.SliceStable(kept, func(i, j int) bool { return kept[i].At < kept[j].At })
 	return kept

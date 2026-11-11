@@ -19,14 +19,14 @@ LEFT JOIN ledger_entries e ON e.transaction_id = t.id
 GROUP BY t.id, t.workflow_id, t.kind;
 
 -- name: TerminalWorkflows :many
-SELECT id, status FROM workflows WHERE status IN ('SUCCEEDED', 'FAILED', 'COMPENSATED');
+SELECT id, status FROM workflows WHERE workflow_is_terminal(status);
 
 -- name: NeedsAttentionWorkflows :many
 SELECT id FROM workflows WHERE status = 'NEEDS_ATTENTION' ORDER BY updated_at;
 
 -- name: NonTerminalWorkflows :many
 SELECT id, status, updated_at FROM workflows
-WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING') ORDER BY updated_at;
+WHERE workflow_is_active(status) ORDER BY updated_at;
 
 -- name: KeysWithoutWorkflow :many
 SELECT client_id, key FROM api_idempotency_keys
@@ -96,3 +96,16 @@ ORDER BY w.id;
 SELECT s.workflow_id, s.name, COALESCE(s.dead_reason, '')::text AS dead_reason
 FROM steps s JOIN workflows w ON w.id = s.workflow_id
 WHERE w.status = 'NEEDS_ATTENTION' AND s.status = 'DEAD';
+
+-- name: OutboxEventsForShopCheck :many
+-- I9: every event of the given clients' workflows, with what it announces.
+SELECT o.id, o.workflow_id, o.type, o.status,
+       (workflow_view(o.workflow_id)::json ->> 'status')::text AS view_status
+FROM outbox o
+JOIN workflows w ON w.id = o.workflow_id
+WHERE w.client_id = ANY(sqlc.arg(clients)::text[])
+ORDER BY o.created_at;
+
+-- name: PendingOutboxEvents :many
+-- I4: outcomes still waiting to reach their shop.
+SELECT id, workflow_id, attempts FROM outbox WHERE status = 'PENDING' ORDER BY created_at;

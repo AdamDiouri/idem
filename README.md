@@ -8,7 +8,7 @@ See [`docs/design.md`](docs/design.md) for the design, guarantees, fault model a
 - [journal](docs/journal/README.md): one write-up per delivery slice, covering what shipped and what broke along the way;
 - [glossary](docs/glossary.md): what every term means (ledger, outbox, idempotency key, lease, …), for readers new to payment systems.
 
-**Status:** Milestone 1 complete. The full saga (charge, payout, or refund on a definite payout failure) runs with leases, fencing, retries, dead letters and invariant checks. A chaos harness proves it under crashes and faults, and operators get audited admin actions, Prometheus metrics, alerts and a runbook. Milestone 2 is in progress ([design](docs/superpowers/specs/2026-11-10-milestone-2-design.md)). Done so far: asynchronous payouts with polling (2.1), signed provider webhooks (2.2), chaos for the async path (2.3), hardening after an external review (2.3b), and workflow status plus the outbox (2.4).
+**Status:** Milestone 1 complete. The full saga (charge, payout, or refund on a definite payout failure) runs with leases, fencing, retries, dead letters and invariant checks. A chaos harness proves it under crashes and faults, and operators get audited admin actions, Prometheus metrics, alerts and a runbook. Milestone 2 is in progress ([design](docs/superpowers/specs/2026-11-10-milestone-2-design.md)). Done so far: asynchronous payouts with polling (2.1), signed provider webhooks (2.2), chaos for the async path (2.3), hardening after an external review (2.3b), workflow status plus the outbox (2.4), and the relay that delivers each outcome to its shop (2.5).
 
 ## Prerequisites
 
@@ -35,8 +35,10 @@ After changing `POSTGRES_PASSWORD`, run `make reset` (it deletes the local datab
 | `api` | `idem api` | Accepts workflows idempotently |
 | `worker` | `idem worker` | Claims steps under a lease, calls the provider, posts the ledger |
 | `sweeper` | `idem sweeper` | Moves steps with expired leases to `IN_DOUBT` (crashed/paused workers); exports state gauges |
+| `relay` | `idem relay` | Delivers each workflow outcome from the outbox to its shop's webhook URL, signed, at least once |
 | `prometheus` | `prom/prometheus` | Scrapes every process; evaluates the alert rules (<http://localhost:9091>) |
 | `fakeprovider` | `/fakeprovider` | Stripe-like provider with fault injection and an effects oracle |
+| `fakeshop` | `/fakeshop` | The demo client's shop: receives outcome webhooks, verifies and deduplicates them (<http://localhost:8000/_seen>), fails on request |
 
 Submit a workflow:
 
@@ -62,7 +64,7 @@ curl -s localhost:8080/workflows/<workflow_id> -H "Authorization: Bearer $IDEM_D
 - `reason` comes with `failed` (the provider's code, e.g. `card_declined`, else `charge_failed`) and `compensated` (`payout_failed`).
 - If your `POST` timed out, don't guess from `GET`: retry the `POST` with the same key. It replays.
 
-Every outcome is also recorded as an event in the **outbox**, in the same transaction that decides it, carrying exactly this JSON. Delivering it to your webhook URL arrives with the relay (milestone 2, slice 2.5); until then events wait, durably, as `PENDING`.
+Every outcome is also recorded as an event in the **outbox**, in the same transaction that decides it, carrying exactly this JSON, and the **relay** delivers it to the shop's webhook URL (see [Receive outcome webhooks](#receive-outcome-webhooks)). In compose, the demo client's shop is the fake shop: `curl -s localhost:8000/_seen` shows what it learned.
 
 Health: `GET /healthz` (process alive), `GET /readyz` (database reachable, else `503`).
 
@@ -128,10 +130,47 @@ A `500` is ambiguous, so the reason says money may have moved. With `rate_limit`
 Failpoints crash or pause a process at a named point, e.g. `IDEM_FAILPOINTS=after_provider_call=exit@0.2` on the worker:
 - **worker:** `after_claim`, `before_provider_call`, `after_provider_call`, `before_commit`, `after_commit`, and `inbox_before_commit` (applying a provider webhook)
 - **api:** `webhook_after_insert` (a webhook stored but not yet acknowledged)
+- **relay:** `relay_before_send`, `relay_after_send` (the shop answered; the result is not recorded yet)
 
 ```bash
 make down
 ```
+
+## Receive outcome webhooks
+
+For shops. When a workflow ends (`succeeded`, `failed` or `compensated`), idem `POST`s its outcome to your webhook URL. The operator configures the URL and a shared secret (`IDEM_CLIENT_WEBHOOKS`, `IDEM_CLIENT_WEBHOOK_SECRETS`); no API call can change them.
+
+```
+POST /your/hooks
+Content-Type: application/json
+Idem-Event-Id: 019...              ← the event's ID: deduplicate on it
+Idem-Event-Type: workflow.failed
+Idem-Signature: t=1731330000,v1=5f2c...
+
+{"workflow_id":"…","status":"failed","reason":"card_declined","amount_cents":10000,"fee_cents":175,"currency":"EUR","created_at":"…","updated_at":"…"}
+```
+
+The body is exactly what `GET /workflows/{id}` returns for that workflow.
+
+1. **Verify the signature.** `v1` is `hex(HMAC-SHA256(secret, "<t>.<raw body>"))`. Compare it in constant time with what you compute over the raw bytes you received, and reject a `t` more than 5 minutes from your clock (replays). `webhook.Verify` in this repository (`internal/webhook/signature.go`) is a reference implementation to copy; being internal, it cannot be imported.
+2. **Deduplicate on `Idem-Event-Id`.** Delivery is *at least once* (D14): if idem cannot tell whether you got an event (a crash, a timeout, a lost answer), it sends it again with the same ID. Process each ID once.
+3. **Store first, then answer `2xx`.** Anything else, a redirect, or no answer within the relay's timeout (`IDEM_RELAY_TIMEOUT`, 10s) counts as a failure. Answering `2xx` before storing can lose the event if you crash.
+4. **Expect retries.** A failed delivery is retried with backoff (from 30s, up to 6h apart), 15 times by default, about 16 hours on average. Then the event is `DEAD`, an alert fires, and an operator can resend it once you're back (`idem admin outbox redeliver`).
+5. **Each workflow has one event,** sent when it ends. Events have no order to keep. A workflow waiting for a human sends nothing until it ends.
+
+No webhook URL? Then your events are kept as `NO_ENDPOINT`, and you can poll `GET /workflows/{id}` instead.
+
+Try it in compose: make the fake shop fail, submit a workflow, and watch the relay retry until you clear the fault:
+
+```bash
+curl -X PUT localhost:8000/_faults -d '{"rules":[{"mode":"5xx"}]}'
+# submit a workflow, then:
+docker compose run --rm --entrypoint /idem worker admin outbox list   # PENDING, attempts climbing
+curl -X PUT localhost:8000/_faults -d '{"rules":[]}'                  # the next retry delivers it
+curl -s localhost:8000/_seen
+```
+
+Fake shop faults: `down` (closes the connection), `slow`, `5xx`, `ack_then_5xx` (processes it, then answers 500: the retry is a duplicate), `ack_after_timeout` (processes it, answers too late).
 
 ## Operate it
 
@@ -149,6 +188,16 @@ idem admin new-generation <step-id> --reason … --confirm-no-effect   # new key
 ```
 
 (With compose: `docker compose run --rm --entrypoint /idem worker admin list`.)
+
+Outcomes that have not reached their shop:
+
+```bash
+idem admin outbox list [--dead] [--all] [--json]   # PENDING, DEAD, NO_ENDPOINT and SKIPPED events (--all: delivered too), with VERSION
+idem admin outbox redeliver <event-id> --reason "shop is back" --expect-version <VERSION from list>
+idem admin outbox redeliver-all --client <id> --status DEAD|NO_ENDPOINT|SKIPPED --reason "…"   # every such event of one client
+```
+
+`redeliver` gives an event a fresh retry budget. It refuses an event still `PENDING` (the relay has it) or whose version changed since you listed it (the version only grows: every relay claim and every redelivery bumps it). `redeliver-all` is for recovery after a long outage or once a client has a URL; it writes one audit row per event. `SKIPPED` events are outcomes from before the outbox existed, which idem did not announce at upgrade; send one only if its shop asks.
 
 Every change needs `--reason` and `--expect-version` (the `VERSION` column of `list`), refuses anything that isn't parked or changed since you listed it, and is recorded in `admin_actions`. `compensate` and `fail` also need `--confirm-no-effect` when money may have moved. That's because:
 - refunding a customer whose merchant was paid pays out twice
@@ -176,6 +225,7 @@ curl -s 'http://localhost:8090/debug/pprof/goroutine?debug=1' | head            
   - `IdemProviderSlow`
   - `IdemSweeperDown`
   - `IdemSweeperSnapshotStale` (every state alert depends on a live sweeper)
+  - `IdemOutboxBacklog`, `IdemOutboxDead` (outcomes not reaching their shop)
 
 ## Run a chaos campaign
 
@@ -282,5 +332,13 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_INBOX_ORPHAN_AFTER` | `1h` | A provider webhook that matches no payout this long is ignored as an orphan |
 | `IDEM_INBOX_RETENTION` | `720h` | The sweeper deletes processed and ignored provider events older than this; evidence and conflicts are kept |
 | `IDEM_WORKER_ID` | `hostname-pid` | |
-| `IDEM_METRICS_ADDR` | `:8090` | Where worker/sweeper serve `/metrics`; `off` disables |
+| `IDEM_METRICS_ADDR` | `:8090` | Where worker, sweeper and relay serve `/metrics`; `off` disables |
+| `IDEM_CLIENT_WEBHOOKS` | (none) | Relay: `client=url,...`, where each shop receives its outcomes (absolute `http`/`https`). A client without one: events kept as `NO_ENDPOINT` |
+| `IDEM_CLIENT_WEBHOOK_SECRETS` | (none) | Relay: `client=secret,...`, one per URL, each at least 16 characters, no commas. Client IDs are trimmed and may not contain spaces; a configured client with no workflow is logged as a likely typo |
+| `IDEM_RELAY_CONCURRENCY` | `4` | Deliveries at once per relay |
+| `IDEM_RELAY_PER_CLIENT` | `2` | At most this many of them for one client, so a slow shop cannot delay the others |
+| `IDEM_RELAY_TIMEOUT` | `10s` | How long a shop has to answer; plus 2s must stay below the lease |
+| `IDEM_RELAY_LEASE_TTL` | `30s` | How long a relay owns an event while delivering it |
+| `IDEM_RELAY_MAX_ATTEMPTS` | `15` | Deliveries before an event is `DEAD` |
+| `IDEM_RELAY_RETRY_BASE`, `IDEM_RELAY_RETRY_CAP` | `30s`, `6h` | Backoff between deliveries (full jitter): about 16 hours on average before `DEAD` |
 | `IDEM_FAILPOINTS` | (none) | `name=exit\|panic\|sleep:<d>[@probability],...` |

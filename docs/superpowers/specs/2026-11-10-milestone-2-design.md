@@ -152,6 +152,11 @@ Everything in `docs/design.md` §4–§7 still holds. In particular:
 - No ordering promise is needed: a workflow has exactly one terminal event.
 - **Client configuration** stays environment-based, like M1 tokens: `IDEM_CLIENT_WEBHOOKS="demo=http://shop:8000/hooks"` and `IDEM_CLIENT_WEBHOOK_SECRETS="demo=…"`. URLs are operator-set only (never via the API), so no request can make idem call an arbitrary URL (SSRF). **A client with no URL configured** *(owner's decision, D19)*: its outbox rows are still written (I8 has no special case, and the history exists if a URL is added later). The relay marks them `NO_ENDPOINT` (not `DELIVERED`: nothing was delivered), with no alert, because polling `GET /workflows/{id}` is a legitimate integration. `idem admin outbox redeliver` can send them once a URL is configured. The relay logs at startup which clients have no URL.
 - Failpoints: `relay_after_send` (before marking delivered), `relay_before_send`.
+- *As built in slice 2.5 (owner-approved):*
+  - Retry defaults `IDEM_RELAY_RETRY_BASE=30s`, `IDEM_RELAY_RETRY_CAP=6h` with full jitter: 15 attempts take about 16 hours on average, at most about 32.
+  - A third header, `Idem-Event-Type`, lets a shop route without parsing the body.
+  - Every change of an event's owner bumps `outbox.lease_epoch` (D7). The relay never follows a redirect and reads at most 4 KiB of an answer.
+  - Events backfilled at the 2.4 upgrade are `SKIPPED` (migration 00016): announcing every historical outcome at once would flood shops; `redeliver` can still send one.
 
 ### 5.4 Fake shop
 - `cmd/fakeshop`, test-only like the fake provider. It receives webhooks, verifies signatures, deduplicates by event ID, and records what it learned.
@@ -211,9 +216,9 @@ The columns `callback_deadline` and status `AWAITING_CALLBACK` already exist fro
 | F28 | Crash after storing a webhook, before `200` | Provider retries; dedup | Applied once | failpoint `webhook_after_insert`; exercised in chaos (2.3) |
 | F29 | Crash while applying a webhook | Transaction rolls back; row still pending | Applied once later | failpoint `inbox_before_commit`, kills; exercised in chaos (2.3) |
 | F30 | Webhook and poll race | Same CAS apply | One applies, the other no-ops | `delay_webhook` + short deadline; exercised in chaos (2.3), asserted by I10/I11 (2.3b) |
-| F31 | Shop down or slow | Relay backoff; `DEAD` after the budget | Delivered when it recovers; loud otherwise | fake shop `down`, `slow` |
-| F32 | Relay crash after the shop's `2xx`, before marking delivered | At least once + event ID | The shop sees it twice, processes it once | failpoint `relay_after_send`, `ack_after_timeout` |
-| F33 | Outcome committed but the relay never runs | Outbox row durable | Delivered when a relay starts | 2.4: no relay exists; chaos kills workers at `before_commit`/`after_commit` and I8 finds every event, once. 2.5: kill all relays |
+| F31 | Shop down or slow | Relay backoff; `DEAD` after the budget | Delivered when it recovers; loud otherwise | fake shop `down`, `slow`, `5xx`; relay unit tests (refused connection, budget); chaos since 2.5 |
+| F32 | Relay crash after the shop's `2xx`, before marking delivered | At least once + event ID | The shop sees it twice, processes it once | failpoint `relay_after_send`, `ack_after_timeout`, `ack_then_5xx`; chaos requires observed redeliveries since 2.5 |
+| F33 | Outcome committed but the relay never runs | Outbox row durable | Delivered when a relay starts | 2.4: no relay exists; chaos kills workers at `before_commit`/`after_commit` and I8 finds every event, once. 2.5: kill all relays; 2.5: chaos event `kill_all_relays` |
 | F34 | Provider record without our posting (or the reverse) | Reconciliation | Reported, nothing changed | inject by test (direct provider call) |
 
 ## 9. Invariants (additions to §13)
@@ -222,7 +227,7 @@ The columns `callback_deadline` and status `AWAITING_CALLBACK` already exist fro
 |---|---|---|
 | **I4** (extended; chaos since 2.3) | After quiescence: no step `AWAITING_CALLBACK`, no inbox row `PENDING`, no outbox row `PENDING` | DB |
 | **I8** (checked by every chaos run and `idem check` since 2.4) | Every terminal workflow has exactly one outbox event, of the matching type, whose payload is its view; no non-terminal workflow has one | DB |
-| **I9** | The fake shop's deduplicated view equals idem's terminal workflows: same set, same outcomes. No event the shop saw contradicts the database | Fake shop `/_seen` × DB |
+| **I9** (checked by every chaos run since 2.5) | The fake shop's deduplicated view equals idem's terminal workflows: same set, same outcomes. No event the shop saw contradicts the database | Fake shop `/_seen` × DB |
 | **I10** (checked by every chaos run since 2.3; tightened in 2.3b) | After quiescence, checked event by event against the fake provider's delivery log: a true event ends `PROCESSED`; a stale (reordered) one ends `IGNORED` as stale, or `PROCESSED` when it reached a payout still waiting (applied with the provider's re-checked state, never its own claim; I3 and I7 judge the money); either may be `EVIDENCE` only on a workflow in `NEEDS_ATTENTION`. Orphan, malformed, unsupported or mismatch notes, and a true event dismissed as stale, are violations: the honest fake provider never causes them. `CONFLICT` appears only if the provider's state truly contradicts idem's, which the fake provider never does, so chaos expects none. | DB × fake provider delivery log (`/_webhooks`) |
 | **I11** (2.3b) | Every event the provider saw acknowledged (2xx) is in the inbox; no event was accepted on a wrongly signed delivery alone; the inbox holds no event the provider never sent. Chaos also requires that webhooks completed payouts and (runs ≥ 1 min) that the provider delivered reordered events, because polling completes every payout even when webhooks are broken. | DB × fake provider delivery log |
 | **Recon** | `idem reconcile` over the campaign window: zero discrepancies on non-parked workflows; parked workflows' discrepancies match the oracle | Reconciliation tables × oracle |

@@ -31,8 +31,8 @@ func insertWorkflowRaw(t *testing.T, pool *pgxpool.Pool, client, status string) 
 // leave it: a terminal one gets its outbox event in the same transaction.
 func insertWorkflow(t *testing.T, pool *pgxpool.Pool, client, status string) uuid.UUID {
 	t.Helper()
-	id := insertWorkflowRaw(t, pool, client, "RUNNING")
-	testutil.SetWorkflowStatus(t, pool, id, status)
+	id := insertWorkflowRaw(t, pool, client, "PENDING")
+	testutil.SetWorkflowStatus(t, pool, id, status) // along allowed transitions
 	return id
 }
 
@@ -231,4 +231,43 @@ func status(t *testing.T, pool *pgxpool.Pool, wf uuid.UUID) string {
 	var s string
 	require.NoError(t, pool.QueryRow(context.Background(), `SELECT status FROM workflows WHERE id = $1`, wf).Scan(&s))
 	return s
+}
+
+// Slice 2.5 (owner's decision): events backfilled by 00015 describe outcomes
+// that predate the outbox; announcing them all when the first relay starts
+// would flood shops with old news. 00016 marks them SKIPPED, with the reason.
+func TestMigrate_00016SkipsBackfilledEvents(t *testing.T) {
+	ctx := context.Background()
+	testutil.NewPool(t, dsn)
+	owner := testutil.NewOwnerPool(t, dsn)
+	t.Cleanup(func() { require.NoError(t, store.Migrate(ctx, owner)) })
+	require.NoError(t, store.MigrateDownTo(ctx, owner, 13))
+	old := insertWorkflowRaw(t, owner, "c", "SUCCEEDED")
+	require.NoError(t, store.Migrate(ctx, owner))
+	live := insertWorkflow(t, owner, "c", "FAILED") // written after the upgrade
+
+	var st, note string
+	require.NoError(t, owner.QueryRow(ctx, `SELECT status, COALESCE(last_error, '') FROM outbox WHERE workflow_id = $1`, old).Scan(&st, &note))
+	require.Equal(t, "SKIPPED", st)
+	require.Equal(t, "backfilled at upgrade: the outcome predates the outbox, so it was not announced", note)
+	require.NoError(t, owner.QueryRow(ctx, `SELECT status FROM outbox WHERE workflow_id = $1`, live).Scan(&st))
+	require.Equal(t, "PENDING", st)
+}
+
+func TestOutbox_LeaseEpochStartsAtZero(t *testing.T) {
+	testutil.NewPool(t, dsn)
+	owner := testutil.NewOwnerPool(t, dsn)
+	wf := insertWorkflow(t, owner, "c", "SUCCEEDED")
+	var epoch int64
+	require.NoError(t, owner.QueryRow(context.Background(), `SELECT lease_epoch FROM outbox WHERE workflow_id = $1`, wf).Scan(&epoch))
+	require.Zero(t, epoch)
+}
+
+func TestAdminActions_AllowRedeliverEvent(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	owner := testutil.NewOwnerPool(t, dsn)
+	wf := insertWorkflow(t, owner, "c", "SUCCEEDED")
+	_, err := pool.Exec(context.Background(), `INSERT INTO admin_actions (id, actor, action, workflow_id, reason)
+		VALUES ($1, 'op', 'redeliver_event', $2, 'shop lost it')`, uuid.Must(uuid.NewV7()), wf)
+	require.NoError(t, err)
 }

@@ -42,7 +42,7 @@ WITH next AS (
   WHERE st.status IN ('PENDING', 'IN_DOUBT', 'AWAITING_CALLBACK')
     AND st.run_after <= now()
     AND st.name = ANY($3::text[])
-    AND wf.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+    AND workflow_is_active(wf.status)
   ORDER BY st.run_after
   LIMIT 1
   FOR UPDATE OF st SKIP LOCKED
@@ -197,7 +197,7 @@ SELECT id, status, idle_ms FROM (
     SELECT max(LEAST(ws.callback_deadline, now())) AS waiting_until
     FROM steps ws WHERE ws.workflow_id = w.id AND ws.status = 'AWAITING_CALLBACK'
   ) c ON true
-  WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+  WHERE workflow_is_active(w.status)
 ) idle
 WHERE idle_ms > $1::bigint
 ORDER BY idle_ms DESC
@@ -347,19 +347,21 @@ func (q *Queries) MarkWorkflowRunning(ctx context.Context, id uuid.UUID) error {
 const outboxStats = `-- name: OutboxStats :one
 SELECT
   (SELECT count(*) FROM outbox WHERE status = 'PENDING')::int AS pending,
-  COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000 FROM outbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms
+  COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000 FROM outbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms,
+  (SELECT count(*) FROM outbox WHERE status = 'DEAD')::int AS dead
 `
 
 type OutboxStatsRow struct {
 	Pending         int32
 	OldestPendingMs int64
+	Dead            int32
 }
 
 // For the sweeper's gauges: outcome events not delivered yet.
 func (q *Queries) OutboxStats(ctx context.Context) (OutboxStatsRow, error) {
 	row := q.db.QueryRow(ctx, outboxStats)
 	var i OutboxStatsRow
-	err := row.Scan(&i.Pending, &i.OldestPendingMs)
+	err := row.Scan(&i.Pending, &i.OldestPendingMs, &i.Dead)
 	return i, err
 }
 
@@ -475,7 +477,7 @@ LEFT JOIN LATERAL (
   SELECT max(LEAST(ws.callback_deadline, now())) AS waiting_until
   FROM steps ws WHERE ws.workflow_id = w.id AND ws.status = 'AWAITING_CALLBACK'
 ) c ON true
-WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+WHERE workflow_is_active(w.status)
 `
 
 // The longest any unsettled workflow has gone without progress: a status
