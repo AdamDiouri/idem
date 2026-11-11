@@ -1,6 +1,6 @@
 # D19. Outbox rows are written for every client, even without a webhook URL
 
-**Status:** Accepted 2026-11-10 (owner's decision) · not yet built (planned for slice 2.5; [M2 design](../superpowers/specs/2026-11-10-milestone-2-design.md) §5.3)
+**Status:** Accepted 2026-11-10 (owner's decision) · built in slice 2.5 ([M2 design](../superpowers/specs/2026-11-10-milestone-2-design.md) §5.3)
 
 ## Context
 Some clients configure no webhook URL and integrate by polling `GET /workflows/{id}`. Skipping their outbox rows would special-case invariant I8 and lose the history if a URL is added later. Marking them delivered would be false; alerting on them would page for a legitimate integration.

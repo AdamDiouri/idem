@@ -86,6 +86,34 @@ services:
       - "127.0.0.1:8091:8090" # internal: /metrics and /debug/pprof (localhost only)
     depends_on: *worker-deps
 
+  # Slice 2.5: delivers workflow outcomes from the outbox to each shop's
+  # webhook URL, signed with that shop's secret. Any number may run.
+  relay:
+    build: .
+    command: ["relay"]
+    stop_grace_period: 20s # > IDEM_SHUTDOWN_GRACE so an in-flight delivery finishes
+    ports:
+      - "127.0.0.1:8092:8090" # internal: /metrics and /debug/pprof (localhost only)
+    environment:
+      IDEM_DATABASE_URL: *database-url
+      IDEM_CLIENT_WEBHOOKS: demo=http://fakeshop:8000/hooks
+      IDEM_CLIENT_WEBHOOK_SECRETS: demo=${IDEM_DEMO_WEBHOOK_SECRET:?set IDEM_DEMO_WEBHOOK_SECRET in .env (see .env.example)}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      fakeshop:
+        condition: service_started
+
+  # A shop receiving the demo client's webhooks: verifies, deduplicates, and
+  # shows what it learned at http://localhost:8000/_seen.
+  fakeshop:
+    build: .
+    entrypoint: ["/fakeshop"]
+    environment:
+      FAKESHOP_SECRET: ${IDEM_DEMO_WEBHOOK_SECRET:?set IDEM_DEMO_WEBHOOK_SECRET in .env (see .env.example)}
+    ports:
+      - "8000:8000"
+
   prometheus:
     image: prom/prometheus:v3.5.0
     command: ["--config.file=/etc/prometheus/prometheus.yml"]
@@ -97,6 +125,7 @@ services:
       - api
       - worker
       - sweeper
+      - relay
 
 volumes:
   pgdata:

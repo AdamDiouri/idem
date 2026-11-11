@@ -27,7 +27,7 @@ func newShop(t *testing.T, opts fakeshop.Options) (*fakeshop.Shop, string) {
 }
 
 // deliver sends one event the way idem's relay does.
-func deliver(t *testing.T, url, eventID, body, signingSecret string, timeout time.Duration) (*http.Response, error) {
+func deliver(t *testing.T, url, eventID, body, signingSecret string, timeout time.Duration) (int, error) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, url+"/hooks", strings.NewReader(body))
 	require.NoError(t, err)
@@ -35,10 +35,11 @@ func deliver(t *testing.T, url, eventID, body, signingSecret string, timeout tim
 	req.Header.Set("Idem-Event-Type", "workflow.succeeded")
 	req.Header.Set("Idem-Signature", webhook.Sign([]byte(signingSecret), time.Now(), []byte(body)))
 	resp, err := (&http.Client{Timeout: timeout}).Do(req)
-	if resp != nil {
-		_ = resp.Body.Close()
+	if err != nil {
+		return 0, err
 	}
-	return resp, err
+	_ = resp.Body.Close()
+	return resp.StatusCode, nil
 }
 
 func view(wf string) string {
@@ -62,9 +63,9 @@ func TestShop_RecordsSignedEventOnce(t *testing.T) {
 	_, url := newShop(t, fakeshop.Options{})
 	id, wf := uuid.NewString(), uuid.NewString()
 	for range 2 {
-		resp, err := deliver(t, url, id, view(wf), secret, time.Second)
+		code, err := deliver(t, url, id, view(wf), secret, time.Second)
 		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Equal(t, http.StatusOK, code)
 	}
 	got := seen(t, url)
 	require.Equal(t, []fakeshop.SeenEvent{{EventID: id, WorkflowID: wf, Type: "workflow.succeeded", Status: "succeeded", Deliveries: 2}}, got.Events)
@@ -74,9 +75,9 @@ func TestShop_RecordsSignedEventOnce(t *testing.T) {
 
 func TestShop_RejectsBadSignature(t *testing.T) {
 	_, url := newShop(t, fakeshop.Options{})
-	resp, err := deliver(t, url, uuid.NewString(), view(uuid.NewString()), "whsec-wrong-0123456789", time.Second)
+	code, err := deliver(t, url, uuid.NewString(), view(uuid.NewString()), "whsec-wrong-0123456789", time.Second)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, http.StatusBadRequest, code)
 	got := seen(t, url)
 	require.Empty(t, got.Events)
 	require.Equal(t, 1, got.BadSignatures)
@@ -93,9 +94,9 @@ func TestShop_Down(t *testing.T) {
 func TestShop_5xxRecordsNothing(t *testing.T) {
 	_, url := newShop(t, fakeshop.Options{})
 	setFaults(t, url, fakeshop.Rule{Mode: fakeshop.Mode5xx})
-	resp, err := deliver(t, url, uuid.NewString(), view(uuid.NewString()), secret, time.Second)
+	code, err := deliver(t, url, uuid.NewString(), view(uuid.NewString()), secret, time.Second)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	require.Equal(t, http.StatusInternalServerError, code)
 	require.Empty(t, seen(t, url).Events)
 }
 
@@ -104,9 +105,9 @@ func TestShop_5xxRecordsNothing(t *testing.T) {
 func TestShop_AckThen5xxRecords(t *testing.T) {
 	_, url := newShop(t, fakeshop.Options{})
 	setFaults(t, url, fakeshop.Rule{Mode: fakeshop.ModeAckThen5xx})
-	resp, err := deliver(t, url, uuid.NewString(), view(uuid.NewString()), secret, time.Second)
+	code, err := deliver(t, url, uuid.NewString(), view(uuid.NewString()), secret, time.Second)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	require.Equal(t, http.StatusInternalServerError, code)
 	require.Len(t, seen(t, url).Events, 1)
 }
 
@@ -122,9 +123,9 @@ func TestShop_SlowAnswers200(t *testing.T) {
 	_, url := newShop(t, fakeshop.Options{Slow: 100 * time.Millisecond})
 	setFaults(t, url, fakeshop.Rule{Mode: fakeshop.ModeSlow})
 	start := time.Now()
-	resp, err := deliver(t, url, uuid.NewString(), view(uuid.NewString()), secret, time.Second)
+	code, err := deliver(t, url, uuid.NewString(), view(uuid.NewString()), secret, time.Second)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusOK, code)
 	require.GreaterOrEqual(t, time.Since(start), 100*time.Millisecond)
 	require.Len(t, seen(t, url).Events, 1)
 }

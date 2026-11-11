@@ -237,6 +237,34 @@ Provider webhooks keep failing verification (`bad_signature` or `stale`). Likely
 2. Switch the provider to the new secret.
 3. When the failures stay at zero, set `IDEM_PROVIDER_WEBHOOK_SECRETS=<new>`.
 
+### IdemOutboxBacklog
+
+A workflow outcome has waited more than 15 minutes to reach its shop. The outcome itself is committed and safe: the event waits, durably, in the outbox. Find out which shop:
+
+```bash
+idem admin outbox list        # CLIENT, ATTEMPTS and LAST ERROR of every event not delivered
+```
+
+- **One client's events pile up, with errors** (`shop answered 503`, timeouts, refused connections): that shop is down or slow. The relay keeps retrying with backoff; nothing to do unless it stays down long enough for `IdemOutboxDead`. Tell the shop.
+- **Every client's events pile up, with no errors and attempts at 0:** no relay is running. Check the `relay` processes (`idem_relay_deliveries_total` stops moving).
+- **Errors like `shop answered 401` or `400`:** the shop rejects the signature or the body. Check that both sides have the same secret (`IDEM_CLIENT_WEBHOOK_SECRETS`) and that the shop's clock is within 5 minutes.
+
+Events of clients without a webhook URL are `NO_ENDPOINT`, never `PENDING`, so they never cause this alert.
+
+### IdemOutboxDead
+
+The relay gave up on an event after `IDEM_RELAY_MAX_ATTEMPTS` deliveries (default 15, about 16 hours on average). The shop never confirmed the outcome. Once the shop is back:
+
+```bash
+idem admin outbox list --dead
+idem admin outbox redeliver <event-id> --reason "shop back after outage" --expect-attempts <ATTEMPTS from the list>
+```
+
+The event gets a fresh budget and the relay sends it at once, with the same `Idem-Event-Id` (the shop ignores it if it had it after all). `redeliver` also sends:
+- a `NO_ENDPOINT` event, after the client was given a URL;
+- a `SKIPPED` event: an outcome from before the outbox existed, not announced at upgrade. Send one only if its shop asks;
+- a `DELIVERED` event, if the shop lost it.
+
 ## 5. Worked example (compose)
 
 ```bash

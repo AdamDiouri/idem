@@ -12,6 +12,7 @@ A *shop* asks idem to take €100 from a *customer* and pay it, minus a *fee*, t
 - **Customer.** The person paying. Identified by `customer_id` in the request; idem never stores card details.
 - **Merchant.** The party being paid (for example a seller on the marketplace). Identified by `merchant_id`.
 - **Provider (payment provider, PSP).** The external company that actually moves money, like Stripe or Adyen. idem only asks it to: charge a customer, pay a merchant, refund a charge. The provider is a separate *system of record*: it can know something idem does not. *Code:* client in `internal/provider/`.
+- **Fake shop.** A stand-in for a shop receiving idem's outcome webhooks, used in compose and chaos runs. It verifies signatures, processes each event ID once, can be told to fail (down, slow, `5xx`, answering too late), and reports what it learned (`GET /_seen`), which invariant I9 checks. *Code:* `internal/fakeshop/`, binary `fakeshop`.
 - **Fake provider.** A stand-in for a real provider used in development, tests and chaos runs. It behaves like a real one (idempotency keys, asynchronous payouts, signed webhooks) and can be told to fail in specific ways (*faults*). It also keeps the *oracle*. *Code:* `internal/fakeprovider/`, binary `fakeprovider`.
 - **Charge.** Taking money from the customer through the provider. The first step of a workflow.
 - **Payout.** Sending money to the merchant (the amount minus the fee). Payouts are *asynchronous*: the provider accepts the request now and settles it later.
@@ -99,7 +100,8 @@ A *shop* asks idem to take €100 from a *customer* and pay it, minus a *fee*, t
 - **Outbox.** The table where idem writes an event about each workflow outcome, in the **same transaction** as the outcome itself. So an event exists if and only if the outcome committed, and a crash can lose neither (D13). A separate process delivers events later.
 - **Outbox event.** One row in `outbox`: the outcome (`workflow.succeeded`, `workflow.failed`, `workflow.compensated`) and the *workflow view* at that moment, frozen. Its ID is what a shop uses to ignore duplicates.
 - **Workflow view.** What a shop is allowed to see of a workflow: its ID, a public `status` (`processing`, `succeeded`, `failed`, `compensated`), a `reason` for failures, amounts and timestamps. No internal details. Defined once, as the SQL function `workflow_view`, used by both `GET /workflows/{id}` and the outbox.
-- **Relay** *(slice 2.5)*. The process that will deliver outbox events to each shop's webhook URL, signed, retrying until delivered. At-least-once: a shop may receive an event twice and deduplicates on its ID (D14).
+- **Relay.** The process (`idem relay`) that delivers outbox events to each shop's webhook URL, signed with that shop's secret, retrying with backoff. At-least-once: a shop may receive an event twice and deduplicates on its ID (D14). *Code:* `internal/relay/`.
+- **Outbox event statuses.** `PENDING` (waiting for the relay), `DELIVERED` (the shop answered `2xx`), `DEAD` (the relay gave up after its retry budget; an operator can resend it), `NO_ENDPOINT` (the client has no webhook URL; it may poll `GET` instead, D19), `SKIPPED` (an outcome from before the outbox existed, deliberately not announced at upgrade).
 - **Reconciliation** *(slice 2.6)*. A job that compares idem's ledger with the provider's own records and reports every difference without changing anything (D15).
 
 ## When a human must decide
@@ -121,6 +123,7 @@ A *shop* asks idem to take €100 from a *customer* and pay it, minus a *fee*, t
   - I6: one workflow per inbound key;
   - I7: each outcome matches the money that moved;
   - I8: one outbox event per finished workflow;
+  - I9: the shop ends up knowing exactly idem's outcomes;
   - I10 and I11: the webhook inbox handled every event correctly.
 
   Full list in [design §13](design.md#13-invariants-checked-after-every-chaos-run) and the [M2 design §9](superpowers/specs/2026-11-10-milestone-2-design.md).
