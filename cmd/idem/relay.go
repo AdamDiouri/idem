@@ -59,13 +59,21 @@ func relayCmd() *cobra.Command {
 			for client, url := range cfg.ClientWebhooks {
 				clients[client] = relay.Endpoint{URL: url, Secret: []byte(cfg.ClientWebhookSecrets[client])}
 			}
-			logger.Info("relay configured", "relay_id", id, "clients", slices.Sorted(maps.Keys(clients)))
+			configured := slices.Sorted(maps.Keys(clients))
+			logger.Info("relay configured", "relay_id", id, "clients", configured)
 			// D19: events of clients without a URL are kept as NO_ENDPOINT, not
 			// delivered and not alerted (they may poll GET /workflows/{id}).
-			if missing, err := clientsWithoutEndpoint(ctx, pool, clients); err != nil {
-				logger.Warn("list clients without a webhook URL", "error", err)
-			} else if len(missing) > 0 {
-				logger.Info("clients without a webhook URL; their events become NO_ENDPOINT", "clients", missing)
+			withoutURL, unknown, err := checkClients(ctx, pool, configured)
+			switch {
+			case err != nil:
+				logger.Warn("compare configured clients with workflows", "error", err)
+			default:
+				if len(withoutURL) > 0 {
+					logger.Info("clients without a webhook URL; their events become NO_ENDPOINT", "clients", withoutURL)
+				}
+				if len(unknown) > 0 {
+					logger.Warn("configured clients with no workflow: check IDEM_CLIENT_WEBHOOKS for a typo", "clients", unknown)
+				}
 			}
 
 			var m *metrics.Metrics
@@ -79,6 +87,7 @@ func relayCmd() *cobra.Command {
 			return relay.New(pool, relay.Options{
 				ID: id, Clients: clients, LeaseTTL: cfg.LeaseTTL, Timeout: cfg.Timeout, PollInterval: cfg.PollInterval,
 				ShutdownGrace: cfg.ShutdownGrace, MaxAttempts: cfg.MaxAttempts,
+				Concurrency: cfg.Concurrency, PerClient: cfg.PerClient,
 				Retry:   engine.Backoff{Base: cfg.RetryBase, Cap: cfg.RetryCap},
 				Metrics: m, Logger: logger,
 			}).Run(ctx)
@@ -86,21 +95,29 @@ func relayCmd() *cobra.Command {
 	}
 }
 
-// clientsWithoutEndpoint lists the clients with workflows but no webhook URL.
-func clientsWithoutEndpoint(ctx context.Context, pool *pgxpool.Pool, clients map[string]relay.Endpoint) ([]string, error) {
+// checkClients compares the configured clients with those that have
+// workflows: withoutURL have workflows but no URL (their events become
+// NO_ENDPOINT, D19); unknown are configured but have no workflow, often a
+// typo in IDEM_CLIENT_WEBHOOKS that sends a real client's events to
+// NO_ENDPOINT instead.
+func checkClients(ctx context.Context, pool *pgxpool.Pool, configured []string) (withoutURL, unknown []string, err error) {
 	rows, err := pool.Query(ctx, `SELECT DISTINCT client_id FROM workflows ORDER BY client_id`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	all, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	known, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var missing []string
-	for _, c := range all {
-		if _, ok := clients[c]; !ok {
-			missing = append(missing, c)
+	for _, c := range known {
+		if !slices.Contains(configured, c) {
+			withoutURL = append(withoutURL, c)
 		}
 	}
-	return missing, nil
+	for _, c := range configured {
+		if !slices.Contains(known, c) {
+			unknown = append(unknown, c)
+		}
+	}
+	return withoutURL, unknown, nil
 }

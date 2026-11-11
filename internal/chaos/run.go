@@ -148,6 +148,10 @@ func workerEnv(dsn, providerURL string) []string {
 // cleans up its processes and container, and writes the report to cfg.RunDir.
 func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err error) {
 	rep = Report{Seed: cfg.Seed, Config: cfg, Restarts: map[string]int{}}
+	if cfg.Relays < 1 {
+		// Without a relay no outcome is delivered, and I4 fails every run.
+		return rep, errors.New("chaos needs at least one relay (--relays): outcomes must reach the shop for the system to settle")
+	}
 	idem, provider, shop := filepath.Join(cfg.BinDir, "idem"), filepath.Join(cfg.BinDir, "fakeprovider"), filepath.Join(cfg.BinDir, "fakeshop")
 	for _, bin := range []string{idem, provider, shop} {
 		if _, err := os.Stat(bin); err != nil {

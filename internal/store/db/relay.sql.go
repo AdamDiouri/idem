@@ -18,10 +18,13 @@ SET lease_owner      = $1::text,
     lease_expires_at = now() + ($2::bigint * interval '1 millisecond'),
     attempts         = attempts + 1
 WHERE id = (
-  SELECT id FROM outbox
-  WHERE status = 'PENDING' AND next_attempt_at <= now()
-    AND (lease_expires_at IS NULL OR lease_expires_at < now())
-  ORDER BY next_attempt_at
+  SELECT o.id FROM outbox o
+  WHERE o.status = 'PENDING' AND o.next_attempt_at <= now()
+    AND (o.lease_expires_at IS NULL OR o.lease_expires_at < now())
+    AND (SELECT count(*) FROM outbox busy
+         WHERE busy.client_id = o.client_id AND busy.status = 'PENDING' AND busy.lease_expires_at > now())
+        < $3::int
+  ORDER BY o.next_attempt_at
   LIMIT 1
   FOR UPDATE SKIP LOCKED
 )
@@ -29,8 +32,9 @@ RETURNING id, client_id, workflow_id, type, payload, attempts, lease_epoch
 `
 
 type ClaimOutboxEventParams struct {
-	Owner   string
-	LeaseMs int64
+	Owner     string
+	LeaseMs   int64
+	PerClient int32
 }
 
 type ClaimOutboxEventRow struct {
@@ -44,9 +48,12 @@ type ClaimOutboxEventRow struct {
 }
 
 // Takes the next due outbox event under a lease (lease_epoch + 1 fences the
-// previous holder, D7). SKIP LOCKED lets several relays run.
+// previous holder, D7). SKIP LOCKED lets several relays run. A client whose
+// events already hold per_client live leases is skipped, so one slow shop
+// cannot occupy every delivery slot. The relay runs it under an advisory
+// lock, so the count is exact.
 func (q *Queries) ClaimOutboxEvent(ctx context.Context, arg ClaimOutboxEventParams) (ClaimOutboxEventRow, error) {
-	row := q.db.QueryRow(ctx, claimOutboxEvent, arg.Owner, arg.LeaseMs)
+	row := q.db.QueryRow(ctx, claimOutboxEvent, arg.Owner, arg.LeaseMs, arg.PerClient)
 	var i ClaimOutboxEventRow
 	err := row.Scan(
 		&i.ID,

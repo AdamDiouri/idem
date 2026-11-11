@@ -106,11 +106,16 @@ func (q *Queries) ListConflicts(ctx context.Context) ([]ListConflictsRow, error)
 }
 
 const listOutboxEvents = `-- name: ListOutboxEvents :many
-SELECT id, workflow_id, client_id, type, status, attempts, COALESCE(last_error, '')::text AS last_error, created_at
+SELECT id, workflow_id, client_id, type, status, attempts, lease_epoch, COALESCE(last_error, '')::text AS last_error, created_at
 FROM outbox
-WHERE status <> 'DELIVERED' AND (NOT $1::bool OR status = 'DEAD')
+WHERE ($1::bool OR status <> 'DELIVERED') AND (NOT $2::bool OR status = 'DEAD')
 ORDER BY created_at, id
 `
+
+type ListOutboxEventsParams struct {
+	IncludeDelivered bool
+	OnlyDead         bool
+}
 
 type ListOutboxEventsRow struct {
 	ID         uuid.UUID
@@ -119,13 +124,15 @@ type ListOutboxEventsRow struct {
 	Type       string
 	Status     string
 	Attempts   int32
+	LeaseEpoch int64
 	LastError  string
 	CreatedAt  pgtype.Timestamptz
 }
 
-// Events that have not reached their shop (slice 2.5), oldest first.
-func (q *Queries) ListOutboxEvents(ctx context.Context, onlyDead bool) ([]ListOutboxEventsRow, error) {
-	rows, err := q.db.Query(ctx, listOutboxEvents, onlyDead)
+// Events that have not reached their shop (slice 2.5), oldest first; with
+// include_delivered, every event (to resend one a shop lost).
+func (q *Queries) ListOutboxEvents(ctx context.Context, arg ListOutboxEventsParams) ([]ListOutboxEventsRow, error) {
+	rows, err := q.db.Query(ctx, listOutboxEvents, arg.IncludeDelivered, arg.OnlyDead)
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +147,7 @@ func (q *Queries) ListOutboxEvents(ctx context.Context, onlyDead bool) ([]ListOu
 			&i.Type,
 			&i.Status,
 			&i.Attempts,
+			&i.LeaseEpoch,
 			&i.LastError,
 			&i.CreatedAt,
 		); err != nil {
@@ -217,8 +225,55 @@ func (q *Queries) ListParkedSteps(ctx context.Context) ([]ListParkedStepsRow, er
 	return items, nil
 }
 
+const lockClientOutboxEvents = `-- name: LockClientOutboxEvents :many
+SELECT id, workflow_id, status, attempts, lease_epoch FROM outbox
+WHERE client_id = $1::text AND status = $2::text
+ORDER BY created_at
+FOR UPDATE
+`
+
+type LockClientOutboxEventsParams struct {
+	ClientID string
+	Status   string
+}
+
+type LockClientOutboxEventsRow struct {
+	ID         uuid.UUID
+	WorkflowID uuid.UUID
+	Status     string
+	Attempts   int32
+	LeaseEpoch int64
+}
+
+// Every event of one client in one status, locked, for a bulk redelivery.
+func (q *Queries) LockClientOutboxEvents(ctx context.Context, arg LockClientOutboxEventsParams) ([]LockClientOutboxEventsRow, error) {
+	rows, err := q.db.Query(ctx, lockClientOutboxEvents, arg.ClientID, arg.Status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockClientOutboxEventsRow
+	for rows.Next() {
+		var i LockClientOutboxEventsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkflowID,
+			&i.Status,
+			&i.Attempts,
+			&i.LeaseEpoch,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockOutboxEvent = `-- name: LockOutboxEvent :one
-SELECT id, workflow_id, status, attempts FROM outbox WHERE id = $1::uuid FOR UPDATE
+SELECT id, workflow_id, status, attempts, lease_epoch FROM outbox WHERE id = $1::uuid FOR UPDATE
 `
 
 type LockOutboxEventRow struct {
@@ -226,6 +281,7 @@ type LockOutboxEventRow struct {
 	WorkflowID uuid.UUID
 	Status     string
 	Attempts   int32
+	LeaseEpoch int64
 }
 
 func (q *Queries) LockOutboxEvent(ctx context.Context, id uuid.UUID) (LockOutboxEventRow, error) {
@@ -236,6 +292,7 @@ func (q *Queries) LockOutboxEvent(ctx context.Context, id uuid.UUID) (LockOutbox
 		&i.WorkflowID,
 		&i.Status,
 		&i.Attempts,
+		&i.LeaseEpoch,
 	)
 	return i, err
 }

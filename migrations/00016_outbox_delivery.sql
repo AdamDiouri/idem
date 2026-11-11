@@ -1,5 +1,9 @@
 -- +goose Up
 -- Slice 2.5 (M2 design §5.3): what the relay needs to deliver outbox events.
+-- The constraint changes and the UPDATE scan outbox under the table's lock,
+-- briefly blocking new outcomes; fine at this project's size. A large
+-- deployment would add the constraints NOT VALID and validate them in a
+-- separate, non-transactional migration.
 
 -- Every change of an event's owner bumps lease_epoch, and a relay's
 -- completion is a compare-and-swap on it (D7): a relay that paused past its

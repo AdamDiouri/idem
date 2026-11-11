@@ -177,15 +177,15 @@ func TestAdminCLI_ConflictListAndResolve(t *testing.T) {
 	require.Equal(t, 2, code, "missing --reason")
 }
 
-// Slice 2.5: redeliver needs a reason and the attempts the operator saw.
-func TestAdminOutbox_RedeliverNeedsReasonAndAttempts(t *testing.T) {
+// Slice 2.5: redeliver needs a reason and the version the operator saw.
+func TestAdminOutbox_RedeliverNeedsReasonAndVersion(t *testing.T) {
 	testutil.NewPool(t, dsn)
 	id := "0190f1d2-0000-7000-8000-000000000000"
-	code, out := admin(t, "outbox", "redeliver", id, "--expect-attempts", "15")
+	code, out := admin(t, "outbox", "redeliver", id, "--expect-version", "3")
 	require.Equal(t, 2, code, out)
 	code, out = admin(t, "outbox", "redeliver", id, "--reason", "back")
 	require.Equal(t, 2, code, out)
-	code, out = admin(t, "outbox", "redeliver", id, "--reason", "back", "--expect-attempts", "15")
+	code, out = admin(t, "outbox", "redeliver", id, "--reason", "back", "--expect-version", "3")
 	require.Equal(t, 1, code, out) // unknown event: not actionable
 }
 
@@ -195,7 +195,28 @@ func TestAdminOutbox_ListShowsEvents(t *testing.T) {
 	testutil.SetWorkflowStatus(t, pool, wf, "FAILED")
 	code, out := admin(t, "outbox", "list")
 	require.Equal(t, 0, code, out)
-	require.Contains(t, out, "EVENT")
+	require.Contains(t, out, "VERSION")
 	require.Contains(t, out, wf.String())
 	require.Contains(t, out, "workflow.failed")
+
+	_, err := pool.Exec(context.Background(), `UPDATE outbox SET status = 'DELIVERED' WHERE workflow_id = $1`, wf)
+	require.NoError(t, err)
+	_, out = admin(t, "outbox", "list")
+	require.NotContains(t, out, wf.String())
+	_, out = admin(t, "outbox", "list", "--all")
+	require.Contains(t, out, wf.String(), "final review, minor 2: delivered events can be listed")
+}
+
+// Final review, Important 2: one command resends a client's dead events.
+func TestAdminOutbox_RedeliverAll(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	wf, _ := parkedCharge(t, pool)
+	testutil.SetWorkflowStatus(t, pool, wf, "FAILED")
+	_, err := pool.Exec(context.Background(), `UPDATE outbox SET status = 'DEAD' WHERE workflow_id = $1`, wf)
+	require.NoError(t, err)
+	code, out := admin(t, "outbox", "redeliver-all", "--client", "c", "--status", "DEAD", "--reason", "shop back")
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "1 event")
+	code, out = admin(t, "outbox", "redeliver-all", "--client", "c", "--status", "DEAD")
+	require.Equal(t, 2, code, out) // --reason is required
 }

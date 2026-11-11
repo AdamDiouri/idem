@@ -247,6 +247,8 @@ idem admin outbox list        # CLIENT, ATTEMPTS and LAST ERROR of every event n
 
 - **One client's events pile up, with errors** (`shop answered 503`, timeouts, refused connections): that shop is down or slow. The relay keeps retrying with backoff; nothing to do unless it stays down long enough for `IdemOutboxDead`. Tell the shop.
 - **Every client's events pile up, with no errors and attempts at 0:** no relay is running. Check the `relay` processes (`idem_relay_deliveries_total` stops moving).
+- **Several shops' events pile up behind one slow shop:** each relay delivers `IDEM_RELAY_CONCURRENCY` events at once, at most `IDEM_RELAY_PER_CLIENT` for one client, so a shop that hangs holds only its share. If healthy shops still wait, run more relays or raise `IDEM_RELAY_CONCURRENCY`.
+- **A client you expected to be delivered to shows `NO_ENDPOINT`:** its ID in `IDEM_CLIENT_WEBHOOKS` does not match (the relay logs `configured clients with no workflow` at startup for a likely typo). Fix the variable, restart the relays, then `idem admin outbox redeliver-all --client <id> --status NO_ENDPOINT --reason "…"`.
 - **Errors like `shop answered 401` or `400`:** the shop rejects the signature or the body. Check that both sides have the same secret (`IDEM_CLIENT_WEBHOOK_SECRETS`) and that the shop's clock is within 5 minutes.
 
 Events of clients without a webhook URL are `NO_ENDPOINT`, never `PENDING`, so they never cause this alert.
@@ -257,7 +259,9 @@ The relay gave up on an event after `IDEM_RELAY_MAX_ATTEMPTS` deliveries (defaul
 
 ```bash
 idem admin outbox list --dead
-idem admin outbox redeliver <event-id> --reason "shop back after outage" --expect-attempts <ATTEMPTS from the list>
+idem admin outbox redeliver <event-id> --reason "shop back after outage" --expect-version <VERSION from the list>
+# many events of one client (after a long outage, or once a client has a URL):
+idem admin outbox redeliver-all --client <id> --status DEAD --reason "shop back after outage"
 ```
 
 The event gets a fresh budget and the relay sends it at once, with the same `Idem-Event-Id` (the shop ignores it if it had it after all). `redeliver` also sends:

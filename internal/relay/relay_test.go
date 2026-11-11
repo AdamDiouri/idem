@@ -15,10 +15,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	"github.com/AdamDiouri/idem/internal/engine"
 	"github.com/AdamDiouri/idem/internal/failpoint"
+	"github.com/AdamDiouri/idem/internal/metrics"
 	"github.com/AdamDiouri/idem/internal/relay"
 	"github.com/AdamDiouri/idem/internal/testutil"
 	"github.com/AdamDiouri/idem/internal/webhook"
@@ -338,4 +340,94 @@ func TestRelay_RunStopsOnCancel(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after cancel")
 	}
+}
+
+// newEventFor is newEvent for another client.
+func newEventFor(t *testing.T, pool *pgxpool.Pool, client string) uuid.UUID {
+	t.Helper()
+	id := newEvent(t, pool)
+	_, err := pool.Exec(context.Background(), `UPDATE workflows SET client_id = $2 WHERE id = (SELECT workflow_id FROM outbox WHERE id = $1)`, id, client)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(), `UPDATE outbox SET client_id = $2 WHERE id = $1`, id, client)
+	require.NoError(t, err)
+	return id
+}
+
+// Final review, Important 1: a shop that hangs to the timeout must not delay
+// every other shop's outcomes behind it.
+func TestRelay_SlowShopDoesNotDelayOthers(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	stuck := newShop(t, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }) // answers nothing
+	healthy := newShop(t, nil)
+	for range 6 {
+		newEventFor(t, pool, "slow")
+	}
+	fast := newEventFor(t, pool, "fast") // queued behind all of them
+	opts := options("")
+	opts.Clients["slow"] = relay.Endpoint{URL: stuck.srv.URL, Secret: []byte(secret)}
+	opts.Clients["fast"] = relay.Endpoint{URL: healthy.srv.URL, Secret: []byte(secret)}
+	opts.Timeout = 2 * time.Second
+	opts.Concurrency, opts.PerClient = 4, 2
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- relay.New(pool, opts).Run(ctx) }()
+	start := time.Now()
+	require.Eventually(t, func() bool { return eventRow(t, pool, fast).status == "DELIVERED" }, 5*time.Second, 20*time.Millisecond)
+	require.Less(t, time.Since(start), time.Second, "the healthy shop did not wait for the stuck one")
+	require.LessOrEqual(t, stuck.hits.Load(), int32(2), "one shop holds at most PerClient deliveries at once")
+	cancel()
+	<-done
+}
+
+// Final review, minor 4: a failure to record the result is counted as an
+// error, never under an empty label.
+func TestRelay_FinishErrorIsCountedAsError(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	s := newShop(t, nil)
+	newEvent(t, pool)
+	m := metrics.New()
+	opts := options(s.srv.URL)
+	opts.Metrics = m
+	ctx, cancel := context.WithCancel(context.Background())
+	failpoint.Enable(relay.FPAfterSend, func() { cancel() }) // the database write that follows fails
+	t.Cleanup(failpoint.Reset)
+
+	res, err := relay.New(pool, opts).RunOnce(ctx)
+	require.Error(t, err)
+	require.Equal(t, "error", res.Outcome)
+	require.Equal(t, 1.0, promtestutil.ToFloat64(m.RelayDeliveries.WithLabelValues("error")))
+	require.Zero(t, promtestutil.ToFloat64(m.RelayDeliveries.WithLabelValues("")))
+}
+
+// Final review, minor 7 (review focus 1, for real): relay A freezes past its
+// lease, relay B takes the event over and delivers it; when A wakes up its
+// send reaches the shop again (same event ID) and its result is fenced.
+func TestRelay_TakeoverByAnotherRelay(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	s := newShop(t, nil)
+	id := newEvent(t, pool)
+	block, entered, release := failpoint.BlockOnce()
+	failpoint.Enable(relay.FPBeforeSend, block)
+	t.Cleanup(failpoint.Reset)
+	optsA, optsB := options(s.srv.URL), options(s.srv.URL)
+	optsA.ID, optsB.ID = "relay-a", "relay-b"
+	optsA.LeaseTTL = time.Second
+
+	resA := make(chan relay.Result, 1)
+	go func() {
+		res, _ := relay.New(pool, optsA).RunOnce(context.Background())
+		resA <- res
+	}()
+	<-entered                           // A holds the event and is frozen before sending
+	time.Sleep(1200 * time.Millisecond) // its lease expires
+	require.Equal(t, "delivered", runOnce(t, relay.New(pool, optsB)).Outcome)
+	release()
+
+	require.Equal(t, "fenced", (<-resA).Outcome)
+	require.Equal(t, "DELIVERED", eventRow(t, pool, id).status)
+	got := s.deliveries()
+	require.Len(t, got, 2)
+	require.Equal(t, got[0].eventID, got[1].eventID, "the shop deduplicates on it")
 }

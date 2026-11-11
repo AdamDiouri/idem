@@ -12,6 +12,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -48,6 +50,7 @@ const (
 	OutcomeDead       = "dead"
 	OutcomeNoEndpoint = "no_endpoint"
 	OutcomeFenced     = "fenced"
+	OutcomeError      = "error" // the result could not be recorded; the lease expires and the event is retried
 )
 
 // maxResponseRead bounds how much of a shop's answer is read: only its status
@@ -71,10 +74,14 @@ type Options struct {
 	Timeout       time.Duration // per delivery; must leave room for the commit inside the lease
 	PollInterval  time.Duration
 	ShutdownGrace time.Duration
-	MaxAttempts   int32
-	Retry         engine.Backoff
-	Metrics       *metrics.Metrics
-	Logger        *slog.Logger
+	// Concurrency is how many deliveries run at once; PerClient caps how many
+	// of them one client may hold, so a slow shop cannot delay the others.
+	Concurrency int
+	PerClient   int
+	MaxAttempts int32
+	Retry       engine.Backoff
+	Metrics     *metrics.Metrics
+	Logger      *slog.Logger
 }
 
 // Result is what one RunOnce did.
@@ -98,6 +105,10 @@ func New(pool *pgxpool.Pool, opts Options) *Relay {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	opts.Concurrency = max(opts.Concurrency, 1)
+	if opts.PerClient < 1 || opts.PerClient > opts.Concurrency {
+		opts.PerClient = opts.Concurrency
+	}
 	return &Relay{
 		pool: pool,
 		opts: opts,
@@ -111,16 +122,31 @@ func New(pool *pgxpool.Pool, opts Options) *Relay {
 	}
 }
 
-// Run delivers events until ctx is cancelled. A delivery in flight when ctx
-// ends may finish within ShutdownGrace; an interrupted one is retried after
-// its lease expires.
+// Run delivers events until ctx is cancelled, Concurrency at a time. A
+// delivery in flight when ctx ends may finish within ShutdownGrace; an
+// interrupted one is retried after its lease expires.
 func (r *Relay) Run(ctx context.Context) error {
-	r.logger.Info("relay started", "clients", len(r.opts.Clients))
+	r.logger.Info("relay started", "clients", len(r.opts.Clients), "concurrency", r.opts.Concurrency, "per_client", r.opts.PerClient)
 	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelWork()
 	stop := context.AfterFunc(ctx, func() { time.AfterFunc(r.opts.ShutdownGrace, cancelWork) })
 	defer stop()
 
+	var wg sync.WaitGroup
+	for range r.opts.Concurrency {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.loop(ctx, workCtx)
+		}()
+	}
+	wg.Wait()
+	r.logger.Info("relay stopped")
+	return nil
+}
+
+// loop is one delivery slot: it claims and delivers until ctx ends.
+func (r *Relay) loop(ctx, workCtx context.Context) {
 	for ctx.Err() == nil {
 		res, err := r.RunOnce(workCtx)
 		if err != nil {
@@ -133,14 +159,12 @@ func (r *Relay) Run(ctx context.Context) error {
 			}
 		}
 	}
-	r.logger.Info("relay stopped")
-	return nil
 }
 
 // RunOnce claims one due event and delivers it.
 func (r *Relay) RunOnce(ctx context.Context) (Result, error) {
 	q := db.New(r.pool)
-	ev, err := q.ClaimOutboxEvent(ctx, db.ClaimOutboxEventParams{Owner: r.opts.ID, LeaseMs: r.opts.LeaseTTL.Milliseconds()})
+	ev, err := r.claim(ctx)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Result{}, nil
 	}
@@ -178,6 +202,30 @@ func (r *Relay) RunOnce(ctx context.Context) (Result, error) {
 	return res, err
 }
 
+// claimLockKey serialises claims across every relay (pg_advisory_xact_lock),
+// so the per-client count each claim reads is exact: without it, slots that
+// start together all see "0 busy" and one slow shop can take them all. A
+// claim is one short statement, so the lock costs nothing at this scale.
+const claimLockKey = 0x1de0_0057 // "idem outbox"
+
+// claim takes the next due event, or pgx.ErrNoRows.
+func (r *Relay) claim(ctx context.Context) (db.ClaimOutboxEventRow, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return db.ClaimOutboxEventRow{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(claimLockKey)); err != nil {
+		return db.ClaimOutboxEventRow{}, err
+	}
+	ev, err := db.New(tx).ClaimOutboxEvent(ctx, db.ClaimOutboxEventParams{Owner: r.opts.ID, LeaseMs: r.opts.LeaseTTL.Milliseconds(),
+		PerClient: int32(r.opts.PerClient)}) //nolint:gosec // validated small positive int
+	if err != nil {
+		return db.ClaimOutboxEventRow{}, err
+	}
+	return ev, tx.Commit(ctx)
+}
+
 // send POSTs the event; nil means the shop answered 2xx in time.
 func (r *Relay) send(ctx context.Context, ep Endpoint, ev db.ClaimOutboxEventRow) error {
 	ctx, cancel := context.WithTimeout(ctx, r.opts.Timeout)
@@ -208,16 +256,14 @@ func (r *Relay) finish(ctx context.Context, q *db.Queries, ev db.ClaimOutboxEven
 	retry time.Duration, log *slog.Logger) (string, error) {
 	var errText *string
 	if lastError != "" {
-		if len(lastError) > maxErrorLen {
-			lastError = lastError[:maxErrorLen]
-		}
+		lastError = truncateError(lastError)
 		errText = &lastError
 	}
 	n, err := q.FinishOutboxEvent(ctx, db.FinishOutboxEventParams{
 		Status: status, LastError: errText, RetryMs: retry.Milliseconds(), ID: ev.ID, LeaseEpoch: ev.LeaseEpoch,
 	})
 	if err != nil {
-		return "", fmt.Errorf("record outbox event %s: %w", ev.ID, err)
+		return OutcomeError, fmt.Errorf("record outbox event %s: %w", ev.ID, err)
 	}
 	if n == 0 {
 		log.Warn("lease lost before recording the delivery; the new owner decides", "status", status)
@@ -234,4 +280,14 @@ func (r *Relay) finish(ctx context.Context, q *db.Queries, ev db.ClaimOutboxEven
 		return OutcomeDead, nil
 	}
 	return OutcomeRetry, nil
+}
+
+// truncateError cuts an error to maxErrorLen bytes without splitting a
+// character: Postgres rejects invalid UTF-8, and a rejected update would fail
+// every attempt the same way.
+func truncateError(s string) string {
+	if len(s) <= maxErrorLen {
+		return s
+	}
+	return strings.ToValidUTF8(s[:maxErrorLen], "")
 }

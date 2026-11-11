@@ -1,6 +1,7 @@
 package chaos
 
 import (
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -364,4 +365,14 @@ func TestReport_RelayFailpointsMustFire(t *testing.T) {
 	r.Config.RelayFailpoints = "relay_after_send=exit@0.02"
 	r.Evaluate()
 	require.Contains(t, strings.Join(r.Reasons, "\n"), "failpoint relay_after_send was armed but never fired")
+}
+
+// Final review, minor 6: without a relay no event is delivered, so I4 fails
+// every such run; refuse it up front instead of reporting a confusing failure.
+func TestRun_RefusesNoRelays(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Relays = 0
+	cfg.RunDir = t.TempDir()
+	_, err := Run(t.Context(), cfg, slog.New(slog.DiscardHandler))
+	require.ErrorContains(t, err, "--relays")
 }

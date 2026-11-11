@@ -382,14 +382,15 @@ func adminOutboxCmd() *cobra.Command {
 		Use:   "outbox",
 		Short: "Workflow outcomes not delivered to their shop",
 	}
-	var asJSON, onlyDead bool
+	var asJSON bool
+	var filter engine.OutboxFilter
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "List events not delivered (PENDING, DEAD, NO_ENDPOINT, SKIPPED), oldest first",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
-				events, err := a.ListOutbox(ctx, onlyDead)
+				events, err := a.ListOutbox(ctx, filter)
 				if err != nil {
 					return err
 				}
@@ -400,9 +401,9 @@ func adminOutboxCmd() *cobra.Command {
 					return enc.Encode(events)
 				}
 				tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-				_, _ = fmt.Fprintln(tw, "EVENT\tWORKFLOW\tCLIENT\tTYPE\tSTATUS\tATTEMPTS\tCREATED\tLAST ERROR")
+				_, _ = fmt.Fprintln(tw, "EVENT\tVERSION\tWORKFLOW\tCLIENT\tTYPE\tSTATUS\tATTEMPTS\tCREATED\tLAST ERROR")
 				for _, e := range events {
-					_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", e.ID, e.WorkflowID, e.ClientID, e.Type,
+					_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", e.ID, e.Version, e.WorkflowID, e.ClientID, e.Type,
 						e.Status, e.Attempts, e.CreatedAt.UTC().Format(time.RFC3339), truncate(e.LastError, 60))
 				}
 				return tw.Flush()
@@ -410,10 +411,11 @@ func adminOutboxCmd() *cobra.Command {
 		},
 	}
 	list.Flags().BoolVar(&asJSON, "json", false, "print JSON")
-	list.Flags().BoolVar(&onlyDead, "dead", false, "only events the relay gave up on")
+	list.Flags().BoolVar(&filter.OnlyDead, "dead", false, "only events the relay gave up on")
+	list.Flags().BoolVar(&filter.All, "all", false, "delivered events too (to resend one a shop lost)")
 
 	var reason string
-	var attempts int32
+	var version int64
 	redeliver := &cobra.Command{
 		Use:   "redeliver <event-id>",
 		Short: "Send an event again with a fresh retry budget (audited)",
@@ -424,7 +426,7 @@ func adminOutboxCmd() *cobra.Command {
 				return err
 			}
 			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
-				if err := a.Redeliver(ctx, id, attempts, reason); err != nil {
+				if err := a.Redeliver(ctx, id, version, reason); err != nil {
 					return err
 				}
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "event %s queued for delivery\n", id)
@@ -434,10 +436,33 @@ func adminOutboxCmd() *cobra.Command {
 	}
 	redeliver.Flags().StringVar(&reason, "reason", "", "why (recorded in the audit log)")
 	_ = redeliver.MarkFlagRequired("reason")
-	redeliver.Flags().Int32Var(&attempts, "expect-attempts", 0,
-		"the ATTEMPTS shown by `idem admin outbox list`; refused if the event changed since")
-	_ = redeliver.MarkFlagRequired("expect-attempts")
-	cmd.AddCommand(list, redeliver)
+	redeliver.Flags().Int64Var(&version, "expect-version", 0,
+		"the VERSION shown by `idem admin outbox list`; refused if the event changed since")
+	_ = redeliver.MarkFlagRequired("expect-version")
+
+	var bulkReason, client, status string
+	redeliverAll := &cobra.Command{
+		Use:   "redeliver-all",
+		Short: "Send again every event of one client in one status: DEAD, NO_ENDPOINT or SKIPPED (audited, one row per event)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
+				n, err := a.RedeliverAll(ctx, client, status, bulkReason)
+				if err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%d event(s) of client %s queued for delivery\n", n, client)
+				return nil
+			})
+		},
+	}
+	redeliverAll.Flags().StringVar(&client, "client", "", "the client whose events to resend")
+	redeliverAll.Flags().StringVar(&status, "status", "", "DEAD, NO_ENDPOINT or SKIPPED")
+	redeliverAll.Flags().StringVar(&bulkReason, "reason", "", "why (recorded in the audit log, once per event)")
+	for _, f := range []string{"client", "status", "reason"} {
+		_ = redeliverAll.MarkFlagRequired(f)
+	}
+	cmd.AddCommand(list, redeliver, redeliverAll)
 	return cmd
 }
 

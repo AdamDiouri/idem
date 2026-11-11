@@ -152,7 +152,7 @@ Idem-Signature: t=1731330000,v1=5f2c...
 
 The body is exactly what `GET /workflows/{id}` returns for that workflow.
 
-1. **Verify the signature.** `v1` is `hex(HMAC-SHA256(secret, "<t>.<raw body>"))`. Compare it in constant time with what you compute over the raw bytes you received, and reject a `t` more than 5 minutes from your clock (replays). In Go, `webhook.Verify` in `internal/webhook` does exactly this.
+1. **Verify the signature.** `v1` is `hex(HMAC-SHA256(secret, "<t>.<raw body>"))`. Compare it in constant time with what you compute over the raw bytes you received, and reject a `t` more than 5 minutes from your clock (replays). `webhook.Verify` in this repository (`internal/webhook/signature.go`) is a reference implementation to copy; being internal, it cannot be imported.
 2. **Deduplicate on `Idem-Event-Id`.** Delivery is *at least once* (D14): if idem cannot tell whether you got an event (a crash, a timeout, a lost answer), it sends it again with the same ID. Process each ID once.
 3. **Store first, then answer `2xx`.** Anything else, a redirect, or no answer within the relay's timeout (`IDEM_RELAY_TIMEOUT`, 10s) counts as a failure. Answering `2xx` before storing can lose the event if you crash.
 4. **Expect retries.** A failed delivery is retried with backoff (from 30s, up to 6h apart), 15 times by default, about 16 hours on average. Then the event is `DEAD`, an alert fires, and an operator can resend it once you're back (`idem admin outbox redeliver`).
@@ -192,11 +192,12 @@ idem admin new-generation <step-id> --reason … --confirm-no-effect   # new key
 Outcomes that have not reached their shop:
 
 ```bash
-idem admin outbox list [--dead] [--json]     # PENDING, DEAD, NO_ENDPOINT and SKIPPED events, with ATTEMPTS
-idem admin outbox redeliver <event-id> --reason "shop is back" --expect-attempts <ATTEMPTS from list>
+idem admin outbox list [--dead] [--all] [--json]   # PENDING, DEAD, NO_ENDPOINT and SKIPPED events (--all: delivered too), with VERSION
+idem admin outbox redeliver <event-id> --reason "shop is back" --expect-version <VERSION from list>
+idem admin outbox redeliver-all --client <id> --status DEAD|NO_ENDPOINT|SKIPPED --reason "…"   # every such event of one client
 ```
 
-`redeliver` gives an event a fresh retry budget. It refuses an event still `PENDING` (the relay has it) or whose attempts changed since you listed it. `SKIPPED` events are outcomes from before the outbox existed, which idem did not announce at upgrade; send one only if its shop asks.
+`redeliver` gives an event a fresh retry budget. It refuses an event still `PENDING` (the relay has it) or whose version changed since you listed it (the version only grows: every relay claim and every redelivery bumps it). `redeliver-all` is for recovery after a long outage or once a client has a URL; it writes one audit row per event. `SKIPPED` events are outcomes from before the outbox existed, which idem did not announce at upgrade; send one only if its shop asks.
 
 Every change needs `--reason` and `--expect-version` (the `VERSION` column of `list`), refuses anything that isn't parked or changed since you listed it, and is recorded in `admin_actions`. `compensate` and `fail` also need `--confirm-no-effect` when money may have moved. That's because:
 - refunding a customer whose merchant was paid pays out twice
@@ -333,7 +334,9 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_WORKER_ID` | `hostname-pid` | |
 | `IDEM_METRICS_ADDR` | `:8090` | Where worker, sweeper and relay serve `/metrics`; `off` disables |
 | `IDEM_CLIENT_WEBHOOKS` | (none) | Relay: `client=url,...`, where each shop receives its outcomes (absolute `http`/`https`). A client without one: events kept as `NO_ENDPOINT` |
-| `IDEM_CLIENT_WEBHOOK_SECRETS` | (none) | Relay: `client=secret,...`, one per URL, each at least 16 characters |
+| `IDEM_CLIENT_WEBHOOK_SECRETS` | (none) | Relay: `client=secret,...`, one per URL, each at least 16 characters, no commas. Client IDs are trimmed and may not contain spaces; a configured client with no workflow is logged as a likely typo |
+| `IDEM_RELAY_CONCURRENCY` | `4` | Deliveries at once per relay |
+| `IDEM_RELAY_PER_CLIENT` | `2` | At most this many of them for one client, so a slow shop cannot delay the others |
 | `IDEM_RELAY_TIMEOUT` | `10s` | How long a shop has to answer; plus 2s must stay below the lease |
 | `IDEM_RELAY_LEASE_TTL` | `30s` | How long a relay owns an event while delivering it |
 | `IDEM_RELAY_MAX_ATTEMPTS` | `15` | Deliveries before an event is `DEAD` |

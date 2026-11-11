@@ -16,6 +16,7 @@ func setRelayRequired(t *testing.T) {
 		"IDEM_CLIENT_WEBHOOKS", "IDEM_CLIENT_WEBHOOK_SECRETS", "IDEM_RELAY_LEASE_TTL", "IDEM_RELAY_TIMEOUT",
 		"IDEM_RELAY_MAX_ATTEMPTS", "IDEM_RELAY_RETRY_BASE", "IDEM_RELAY_RETRY_CAP", "IDEM_POLL_INTERVAL",
 		"IDEM_SHUTDOWN_GRACE", "IDEM_WORKER_ID", "IDEM_FAILPOINTS", "IDEM_LOG_LEVEL", "IDEM_METRICS_ADDR",
+		"IDEM_RELAY_CONCURRENCY", "IDEM_RELAY_PER_CLIENT",
 	} {
 		t.Setenv(k, "")
 	}
@@ -35,6 +36,8 @@ func TestLoadRelay_Defaults(t *testing.T) {
 	require.Equal(t, 500*time.Millisecond, cfg.PollInterval)
 	require.Equal(t, 15*time.Second, cfg.ShutdownGrace)
 	require.Equal(t, ":8090", cfg.MetricsAddr)
+	require.Equal(t, 4, cfg.Concurrency)
+	require.Equal(t, 2, cfg.PerClient)
 }
 
 func TestLoadRelay_ParsesClients(t *testing.T) {
@@ -69,6 +72,8 @@ func TestLoadRelay_Rejects(t *testing.T) {
 		{"no attempts", okURL, okSecret, map[string]string{"IDEM_RELAY_MAX_ATTEMPTS": "0"}, "IDEM_RELAY_MAX_ATTEMPTS"},
 		{"zero base", okURL, okSecret, map[string]string{"IDEM_RELAY_RETRY_BASE": "0s"}, "IDEM_RELAY_RETRY_BASE"},
 		{"cap below base", okURL, okSecret, map[string]string{"IDEM_RELAY_RETRY_CAP": "10s"}, "IDEM_RELAY_RETRY_CAP"},
+		{"no concurrency", okURL, okSecret, map[string]string{"IDEM_RELAY_CONCURRENCY": "0"}, "IDEM_RELAY_CONCURRENCY"},
+		{"per client above concurrency", okURL, okSecret, map[string]string{"IDEM_RELAY_PER_CLIENT": "5"}, "IDEM_RELAY_PER_CLIENT"},
 		{"unknown failpoint", okURL, okSecret, map[string]string{"IDEM_FAILPOINTS": "before_commit=exit"}, "before_commit"},
 	}
 	for _, c := range cases {
@@ -83,4 +88,42 @@ func TestLoadRelay_Rejects(t *testing.T) {
 			require.ErrorContains(t, err, c.want)
 		})
 	}
+}
+
+// Final review, Important 2: a stray space must not create a client " b" whose
+// events silently become NO_ENDPOINT.
+func TestLoadRelay_TrimsClientIDs(t *testing.T) {
+	setRelayRequired(t)
+	t.Setenv("IDEM_CLIENT_WEBHOOKS", "a=http://x/hooks, b = http://y/hooks")
+	t.Setenv("IDEM_CLIENT_WEBHOOK_SECRETS", " a=whsec-a-0123456789012,b=whsec-b-0123456789012 ")
+	cfg, err := config.LoadRelay()
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"a": "http://x/hooks", "b": "http://y/hooks"}, cfg.ClientWebhooks)
+	require.Equal(t, "whsec-b-0123456789012", cfg.ClientWebhookSecrets["b"])
+}
+
+func TestLoadRelay_RejectsBadClientIDs(t *testing.T) {
+	for name, hooks := range map[string]string{
+		"empty id":     "=http://x/hooks",
+		"inner space":  "a b=http://x/hooks",
+		"no separator": "a",
+	} {
+		t.Run(name, func(t *testing.T) {
+			setRelayRequired(t)
+			t.Setenv("IDEM_CLIENT_WEBHOOKS", hooks)
+			_, err := config.LoadRelay()
+			require.ErrorContains(t, err, "IDEM_CLIENT_WEBHOOKS")
+		})
+	}
+}
+
+// Final review, minor 5: a malformed secrets list never echoes a secret.
+func TestLoadRelay_ErrorsNeverShowSecrets(t *testing.T) {
+	setRelayRequired(t)
+	t.Setenv("IDEM_CLIENT_WEBHOOKS", "a=http://x/hooks")
+	t.Setenv("IDEM_CLIENT_WEBHOOK_SECRETS", "a=whsec-top,secret-part-0123456789")
+	_, err := config.LoadRelay()
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "secret-part")
+	require.NotContains(t, err.Error(), "whsec-top")
 }
