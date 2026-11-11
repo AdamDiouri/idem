@@ -277,3 +277,18 @@ func TestApply_PauseRetargetsWhenTargetDown(t *testing.T) {
 	require.Equal(t, before, logSize(t, procs.workers[1].spec.LogPath), "worker-1 is the one frozen")
 	pauses.Wait()
 }
+
+// The same for relays: they crash at their failpoints too, so kill_relay must
+// not be lost to a relay mid-restart.
+func TestApply_KillRelayRetargetsWhenTargetDown(t *testing.T) {
+	s := newSupervisor(t)
+	var procs procSet
+	for _, name := range []string{"relay-0", "relay-1"} {
+		p, err := s.Start(helperSpec(t, name))
+		require.NoError(t, err)
+		procs.relays = append(procs.relays, p)
+	}
+	require.NoError(t, procs.relays[1].Stop(context.Background()))
+	require.NoError(t, apply(context.Background(), Event{Kind: KillRelay, Target: 1}, procs, nil, "", "", nil))
+	require.Eventually(t, func() bool { return procs.relays[0].Restarts() == 1 }, 5*time.Second, 20*time.Millisecond)
+}

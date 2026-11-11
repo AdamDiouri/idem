@@ -654,7 +654,7 @@ func apply(ctx context.Context, ev Event, procs procSet, pg *Postgres, providerU
 		if len(procs.relays) == 0 {
 			return ErrNotRunning
 		}
-		return procs.relays[ev.Target%len(procs.relays)].Kill()
+		return onRunning(procs.relays, ev.Target%len(procs.relays), (*Proc).Kill)
 	case KillAllRelays:
 		var errs []error
 		for _, r := range procs.relays {
