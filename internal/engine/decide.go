@@ -9,16 +9,17 @@ import (
 // decide turns a provider outcome and the step's history into the step's next
 // state (design §9.3). It is pure so every rule is table-tested.
 //
-//   - Success / Permanent are final, except that a pivot step refused after an
-//     ambiguous send attempt (the previous status, or the send history) is
-//     DEAD (parked for a human), never failed.
+//   - Success / Permanent are final, except that a pivot step refused when
+//     money may have moved (ClaimedStep.MoneyMayHaveMoved) is DEAD (parked
+//     for a human), never failed.
 //   - Accepted (async) waits in AWAITING_CALLBACK until callbackDeadline, when
 //     it is polled (decidePoll).
 //   - Ambiguous retries after backoff (409 in-flight: soon); when attempts are
 //     exhausted the step is DEAD and money may have moved.
 //   - NoEffect retries after max(backoff, Retry-After capped at b.Cap); when
-//     exhausted it is DEAD, and money may have moved only if an earlier
-//     attempt left the step IN_DOUBT (sticky ambiguity).
+//     exhausted it is DEAD, and its reason says money may have moved exactly
+//     when ClaimedStep.MoneyMayHaveMoved: the step was IN_DOUBT, or its send
+//     history holds an ambiguous attempt.
 func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay, callbackDeadline time.Duration, pivot bool) Result {
 	r := Result{ProviderRef: out.ProviderRef, HTTPStatus: out.HTTPStatus}
 	if out.Err != nil {

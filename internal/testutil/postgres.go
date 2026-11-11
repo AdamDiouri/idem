@@ -153,6 +153,11 @@ func SetWorkflowStatus(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, status st
 	for _, s := range set {
 		assignments += ", " + s
 	}
+	if len(path) == 0 && len(set) > 0 { // no transition, but the assignments still apply
+		if _, err := tx.Exec(ctx, `UPDATE workflows SET `+assignments+` WHERE id = $1`, id, status); err != nil {
+			t.Fatalf("set workflow status: %v", err)
+		}
+	}
 	for i, next := range path {
 		sql := `UPDATE workflows SET status = $2 WHERE id = $1`
 		if i == len(path)-1 {
@@ -175,8 +180,12 @@ func SetWorkflowStatus(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, status st
 
 // Plant runs one statement as the table owner with every trigger off
 // (session_replication_role = replica): for fixtures that need a state no
-// legal path reaches, such as a step already DEAD or a corrupted row. The
-// services can never do this; only tests, through this helper.
+// legal path reaches, such as a step already DEAD or a corrupted row. Every
+// trigger means all of them: transition checks, but also foreign keys, the
+// ledger's balance and immutability, and the outbox's one-event rule, so a
+// planted row may break rules the services never could (NewPool truncates
+// before each test). It needs a superuser owner, as the test container has.
+// The services can never do this; only tests, through this helper.
 func Plant(t *testing.T, dsn, sql string, args ...any) {
 	t.Helper()
 	ctx := context.Background()

@@ -302,7 +302,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		case <-time.After(time.Until(start.Add(ev.At))):
 		}
 		inFlight := unsettled(ctx, pool) + int(outstanding.Load())
-		err := apply(ctx, ev, procs, pg, providerURL, shopURL, &pauses)
+		err := apply(ctx, &ev, procs, pg, providerURL, shopURL, &pauses)
 		ex := ExecutedEvent{Event: ev, WallTime: time.Now(), InFlight: inFlight}
 		switch {
 		case errors.Is(err, ErrNotRunning):
@@ -620,16 +620,19 @@ type procSet struct {
 	workers, apis, sweepers, relays []*Proc
 }
 
-func apply(ctx context.Context, ev Event, procs procSet, pg *Postgres, providerURL, shopURL string, pauses *sync.WaitGroup) error {
+// apply executes ev. A kill or pause whose target is down goes to another
+// running process; ev.Target then names the process hit, and
+// ev.PlannedTarget the one planned.
+func apply(ctx context.Context, ev *Event, procs procSet, pg *Postgres, providerURL, shopURL string, pauses *sync.WaitGroup) error {
 	workers, apis := procs.workers, procs.apis
 	switch ev.Kind {
 	case RestartAll:
 		return restartAll(ctx, procs)
 	case KillWorker:
-		return onRunning(workers, ev.Target, (*Proc).Kill)
+		return ev.onRunning(workers, (*Proc).Kill)
 	case PauseWorker:
 		var w *Proc
-		if err := onRunning(workers, ev.Target, func(p *Proc) error {
+		if err := ev.onRunning(workers, func(p *Proc) error {
 			w = p
 			return p.Pause()
 		}); err != nil {
@@ -651,10 +654,7 @@ func apply(ctx context.Context, ev Event, procs procSet, pg *Postgres, providerU
 	case ClearProviderFaults:
 		return fakeprovider.PutFaults(ctx, providerURL, fakeprovider.Faults{})
 	case KillRelay:
-		if len(procs.relays) == 0 {
-			return ErrNotRunning
-		}
-		return onRunning(procs.relays, ev.Target%len(procs.relays), (*Proc).Kill)
+		return ev.onRunning(procs.relays, (*Proc).Kill)
 	case KillAllRelays:
 		var errs []error
 		for _, r := range procs.relays {
@@ -761,16 +761,24 @@ func restartAll(ctx context.Context, procs procSet) error {
 	return errors.Join(errs...)
 }
 
-// onRunning applies f to procs[target], or, if that one is not running (a
-// crash restart in progress), to the next one that is, in index order. Only
-// when none runs is the event skipped (ErrNotRunning): otherwise bad timing
-// could cost a seed every event of a kind, and the verdict would call the run
-// vacuous (slice 2.5b; seen once in 2.5).
-func onRunning(procs []*Proc, target int, f func(*Proc) error) error {
-	var err error
+// onRunning applies f to procs[ev.Target], or, if that one is not running (a
+// crash restart in progress), to the next one that is, in index order, and
+// records which one it hit. Only when none runs (or there are none) is the
+// event skipped (ErrNotRunning): otherwise bad timing could cost a seed every
+// event of a kind, and the verdict would call the run vacuous (slice 2.5b).
+func (ev *Event) onRunning(procs []*Proc, f func(*Proc) error) error {
+	if len(procs) == 0 {
+		return ErrNotRunning
+	}
+	planned := ev.Target % len(procs)
+	err := error(ErrNotRunning)
 	for i := range procs {
-		p := procs[(target+i)%len(procs)]
-		if err = f(p); !errors.Is(err, ErrNotRunning) {
+		target := (planned + i) % len(procs)
+		if err = f(procs[target]); !errors.Is(err, ErrNotRunning) {
+			ev.Target = target
+			if target != planned {
+				ev.PlannedTarget = &planned
+			}
 			return err
 		}
 	}

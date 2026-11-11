@@ -228,8 +228,9 @@ PENDING ─▶ RUNNING ─┬─▶ SUCCEEDED                        (terminal)
               │     ├─▶ COMPENSATING ─┬─▶ COMPENSATED    (terminal)
               │     │       ▲         └─▶ NEEDS_ATTENTION
               │     └─▶ NEEDS_ATTENTION ──▶ FAILED (operator)
-              │               │    └─────▶ COMPENSATING (operator: compensate, or retry of a refund)
-              └───────────────┘ (operator: retry-step, new-generation, confirm-step)
+              │               │    └─────▶ COMPENSATING (operator: compensate; or retry-step,
+              │               │                          new-generation, confirm-step of a refund)
+              └───────────────┘ (operator: retry-step, new-generation, confirm-step of a charge or payout)
 ```
 
 | From | To | Who |

@@ -164,3 +164,14 @@ func TestMigrate_00018DownAndUp(t *testing.T) {
 	require.Zero(t, n)
 	require.NoError(t, store.Migrate(ctx, owner))
 }
+
+// Final review, minor 1: extra assignments apply even when the status does
+// not change (no transition to walk).
+func TestSetWorkflowStatus_SameStatusStillAppliesAssignments(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	id := plantWorkflow(t, "RUNNING")
+	testutil.SetWorkflowStatus(t, pool, id, "RUNNING", "updated_at = now() - interval '2 hours'")
+	var old bool
+	require.NoError(t, pool.QueryRow(context.Background(), `SELECT updated_at < now() - interval '1 hour' FROM workflows WHERE id = $1`, id).Scan(&old))
+	require.True(t, old)
+}
