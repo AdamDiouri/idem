@@ -376,3 +376,30 @@ func TestRun_RefusesNoRelays(t *testing.T) {
 	_, err := Run(t.Context(), cfg, slog.New(slog.DiscardHandler))
 	require.ErrorContains(t, err, "--relays")
 }
+
+// Slice 2.6: a campaign ends with a reconciliation; it must have run and
+// compared workflows.
+func TestReport_ReconVacuity(t *testing.T) {
+	r := healthy()
+	r.Recon = &ReconSummary{RunID: "x", Workflows: 3}
+	r.Evaluate()
+	require.True(t, r.Passed, r.Reasons)
+
+	r = healthy()
+	r.Recon = &ReconSummary{RunID: "x"}
+	r.Evaluate()
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "reconciliation compared no workflow")
+
+	r = healthy()
+	r.Recon = &ReconSummary{Error: "provider down"}
+	r.Evaluate()
+	require.Contains(t, strings.Join(r.Reasons, "\n"), "reconciliation failed: provider down")
+}
+
+func TestParseReconOutput(t *testing.T) {
+	s, err := parseReconOutput("run 01a1cb29-b679-733a-b882-738b8515b79f: 1803 records, 880 workflows (0 in flight), 3 discrepancies (3 parked)\n")
+	require.NoError(t, err)
+	require.Equal(t, ReconSummary{RunID: "01a1cb29-b679-733a-b882-738b8515b79f", Records: 1803, Workflows: 880, Discrepancies: 3, Parked: 3}, s)
+	_, err = parseReconOutput("garbage")
+	require.Error(t, err)
+}
