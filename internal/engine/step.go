@@ -109,6 +109,9 @@ type Result struct {
 	Error       string
 	RetryDelay  time.Duration // IN_DOUBT and RETRY_NO_EFFECT
 	DeadReason  string        // DEAD only
+	// FailureCode is the provider's code for a definite refusal (FAILED_PERMANENT,
+	// or DEAD permanent_after_in_doubt), stored as steps.failure_code.
+	FailureCode string
 	// AttemptOutcome, when set, is what this attempt itself learned, recorded
 	// instead of Kind on its step_attempts row: a provably no-effect attempt
 	// that exhausted the budget is DEAD for the step but not doubt in the

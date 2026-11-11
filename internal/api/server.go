@@ -38,6 +38,8 @@ type Options struct {
 	// endpoint exists only when both are set.
 	WebhookSecrets [][]byte
 	Inbox          WebhookInbox
+	// Workflows serves GET /workflows/{id}; the route exists only when set.
+	Workflows WorkflowReader
 }
 
 // WebhookInbox stores a verified provider event; inserted is false for a
@@ -67,6 +69,9 @@ func NewServer(opts Options, sub Submitter, db Pinger) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /workflows", requireToken(opts.Tokens, http.HandlerFunc(s.postWorkflows)))
+	if opts.Workflows != nil {
+		mux.Handle("GET /workflows/{id}", requireToken(opts.Tokens, http.HandlerFunc(s.getWorkflow)))
+	}
 	if len(opts.WebhookSecrets) > 0 && opts.Inbox != nil {
 		mux.HandleFunc("POST /webhooks/provider", s.postProviderWebhook)
 	}

@@ -172,10 +172,11 @@ func (e env) postKind(t *testing.T, wf, step uuid.UUID, kind string, entries []l
 	require.NoError(t, tx.Commit(ctx))
 }
 
+// setStatus moves wf to status as a real transition would: a terminal status
+// also gets its outbox event (D13), so only the invariant under test fires.
 func (e env) setStatus(t *testing.T, wf uuid.UUID, status string) {
 	t.Helper()
-	_, err := e.pool.Exec(context.Background(), `UPDATE workflows SET status = $2 WHERE id = $1`, wf, status)
-	require.NoError(t, err)
+	testutil.SetWorkflowStatus(t, e.pool, wf, status)
 }
 
 func requireViolation(t *testing.T, vs []invariants.Violation, invariant string, wf uuid.UUID, detail string) {

@@ -124,6 +124,7 @@ func apiCmd() *cobra.Command {
 				RequestTimeout: cfg.RequestTimeout,
 				WebhookSecrets: secrets, // POST /webhooks/provider is off without one
 				Inbox:          webhook.NewInbox(pool),
+				Workflows:      workflow.NewReader(pool), // GET /workflows/{id}
 			}, workflow.NewSubmitter(pool, cfg.IdempotencyLockTimeout, fees), pool)
 
 			if cfg.DebugAddr != "off" {

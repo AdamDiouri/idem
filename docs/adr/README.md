@@ -18,7 +18,7 @@ D1 to D20 were first recorded as one-line rows in the design documents and expan
 | [D10](0010-single-currency.md) | A single currency, `currency` column kept | Built (1.1) |
 | [D11](0011-platform-fees-in-integer-cents.md) | Fees in integer cents, half-to-even, fixed at creation | Built (1.1) |
 | [D12](0012-workers-poll-waiting-payouts.md) | Workers poll waiting payouts, not the sweeper | Built (2.1) |
-| [D13](0013-outbox-written-in-transition.md) | The outbox is written inside `transitionWorkflow` | Planned (2.4) |
+| [D13](0013-outbox-written-in-transition.md) | The outbox is written inside `transitionWorkflow` | Built (2.4) |
 | [D14](0014-at-least-once-outbound-delivery.md) | At-least-once outbound delivery, stable event ID | Planned (2.5) |
 | [D15](0015-reconciliation-only-reports.md) | Reconciliation only reports | Planned (2.6) |
 | [D16](0016-contradictory-news-never-flips-terminal-state.md) | Contradictory news never flips a terminal state | Built (2.2) |
