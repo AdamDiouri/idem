@@ -176,3 +176,44 @@ func TestDecide_InDoubtHonoursRetryAfter(t *testing.T) {
 	require.Equal(t, ResultInDoubt, r.Kind)
 	require.Equal(t, 2*time.Minute, r.RetryDelay)
 }
+
+// Slice 2.5b (implicit-state review, item 5): a step whose earlier send may
+// have moved money, refused "no effect" until its budget ran out, parks as
+// money-may-have-moved, whatever its status just before this claim.
+func TestDecide_NoEffectExhaustedAfterEarlierDoubtIsInDoubt(t *testing.T) {
+	b := Backoff{Base: time.Second, Cap: 5 * time.Minute, Rand: func() float64 { return 0.5 }}
+	refusedNoEffect := provider.Outcome{Class: provider.NoEffect, HTTPStatus: 429, Err: errors.New("rate limited")}
+	r := decide(ClaimedStep{Attempt: 8, MaxAttempts: 8, PriorStatus: "PENDING", SendDoubt: true}, refusedNoEffect, b, time.Second, callbackDeadline, false)
+	require.Equal(t, ResultDead, r.Kind)
+	require.Equal(t, DeadAttemptsExhaustedInDoubt, r.DeadReason)
+}
+
+// The one Go definition of "an earlier send may have moved money".
+func TestMoneyMayHaveMoved_Matrix(t *testing.T) {
+	for _, prior := range []string{"PENDING", "IN_DOUBT", "AWAITING_CALLBACK"} {
+		for _, doubt := range []bool{false, true} {
+			s := ClaimedStep{PriorStatus: prior, SendDoubt: doubt}
+			require.Equal(t, prior == "IN_DOUBT" || doubt, s.MoneyMayHaveMoved(), "%s doubt=%v", prior, doubt)
+		}
+	}
+}
+
+// Sticky doubt follows the same definition: a no-effect retry of a step whose
+// earlier send may have moved money stays IN_DOUBT.
+func TestStepStatus_NoEffectKeepsAnyDoubt(t *testing.T) {
+	require.Equal(t, "IN_DOUBT", stepStatus(ClaimedStep{PriorStatus: "PENDING", SendDoubt: true}, ResultRetryNoEffect))
+	require.Equal(t, "IN_DOUBT", stepStatus(ClaimedStep{PriorStatus: "IN_DOUBT"}, ResultRetryNoEffect))
+	require.Equal(t, "PENDING", stepStatus(ClaimedStep{PriorStatus: "PENDING"}, ResultRetryNoEffect))
+}
+
+// Near key retention, a step whose earlier send may have moved money is
+// looked up, never re-sent: the provider may have forgotten the key and
+// perform it again.
+func TestNearKeyRetention_AnyDoubt(t *testing.T) {
+	w := &Worker{opts: WorkerOptions{KeyRetention: 24 * time.Hour, KeyRetentionMargin: time.Hour}}
+	old := 23*time.Hour + 30*time.Minute
+	require.True(t, w.nearKeyRetention(ClaimedStep{PriorStatus: "PENDING", SendDoubt: true, KeyAge: old}))
+	require.True(t, w.nearKeyRetention(ClaimedStep{PriorStatus: "IN_DOUBT", KeyAge: old}))
+	require.False(t, w.nearKeyRetention(ClaimedStep{PriorStatus: "PENDING", KeyAge: old}))
+	require.False(t, w.nearKeyRetention(ClaimedStep{PriorStatus: "IN_DOUBT", KeyAge: time.Hour}))
+}

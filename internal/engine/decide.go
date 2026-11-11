@@ -33,7 +33,7 @@ func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay, callb
 		r.Kind, r.RetryDelay = ResultAwaitingCallback, callbackDeadline
 	case provider.Permanent:
 		r.Kind, r.FailureCode = ResultFailedPermanent, out.Code
-		if pivot && (s.PriorStatus == string(ResultInDoubt) || s.SendDoubt) {
+		if pivot && s.MoneyMayHaveMoved() {
 			// An earlier attempt may have succeeded even though this one is
 			// refused (a provider that does not replay). Compensating on that
 			// guess could pay the merchant AND refund the customer.
@@ -43,7 +43,7 @@ func decide(s ClaimedStep, out provider.Outcome, b Backoff, inFlightDelay, callb
 		if !attemptsLeft {
 			r.Kind, r.DeadReason = ResultDead, DeadAttemptsExhaustedNoEffect
 			r.AttemptOutcome = ResultRetryNoEffect // this attempt moved nothing
-			if s.PriorStatus == string(ResultInDoubt) {
+			if s.MoneyMayHaveMoved() {
 				r.DeadReason = DeadAttemptsExhaustedInDoubt
 			}
 			break
@@ -105,7 +105,7 @@ func decidePoll(s ClaimedStep, out provider.Outcome, pb Backoff, lim PollLimits,
 		return r
 	case provider.Permanent:
 		r.Kind, r.FailureCode = ResultFailedPermanent, out.Code
-		if pivot && (s.SendDoubt || s.PriorStatus == string(ResultInDoubt)) {
+		if pivot && s.MoneyMayHaveMoved() {
 			r.Kind, r.DeadReason = ResultDead, DeadPermanentAfterInDoubt
 		}
 		return r

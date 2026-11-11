@@ -266,11 +266,12 @@ func pollResult(c provider.Class) string {
 	}
 }
 
-// nearKeyRetention reports whether an in-doubt step's key is old enough that
-// the provider may soon forget it (or already has).
+// nearKeyRetention reports whether the key of a step whose earlier send may
+// have moved money is old enough that the provider may soon forget it (or
+// already has): such a step is looked up, never re-sent.
 func (w *Worker) nearKeyRetention(s ClaimedStep) bool {
 	return w.opts.KeyRetention > 0 &&
-		s.PriorStatus == string(ResultInDoubt) &&
+		s.MoneyMayHaveMoved() &&
 		s.KeyAge >= w.opts.KeyRetention-w.opts.KeyRetentionMargin
 }
 
