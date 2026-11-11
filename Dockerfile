@@ -7,9 +7,11 @@ COPY . .
 # Failpoints stay compiled in (inactive unless IDEM_FAILPOINTS is set) so chaos
 # runs can use them; `make build-release` builds with -tags nofailpoint.
 RUN go build -trimpath -o /idem ./cmd/idem && \
-    go build -trimpath -o /fakeprovider ./cmd/fakeprovider
+    go build -trimpath -o /fakeprovider ./cmd/fakeprovider && \
+    go build -trimpath -o /fakeshop ./cmd/fakeshop
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /idem /idem
 COPY --from=build /fakeprovider /fakeprovider
+COPY --from=build /fakeshop /fakeshop
 ENTRYPOINT ["/idem"]

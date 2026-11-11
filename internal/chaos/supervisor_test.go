@@ -196,10 +196,47 @@ func TestApply_RestartAll(t *testing.T) {
 	for _, p := range all {
 		before[p] = p.PID()
 	}
-	require.NoError(t, apply(context.Background(), Event{Kind: RestartAll}, procs, nil, "", nil))
+	relay, err := s.Start(helperSpec(t, "relay-0"))
+	require.NoError(t, err)
+	procs.relays = []*Proc{relay}
+
+	all = append(all, procs.relays...)
+	before[relay] = relay.PID()
+	require.NoError(t, apply(context.Background(), Event{Kind: RestartAll}, procs, nil, "", "", nil))
 	for _, p := range all {
 		require.NotEqual(t, before[p], p.PID(), p.Name())
 		require.True(t, alive(p.PID()), p.Name())
 		require.Equal(t, 0, p.Restarts(), "a deliberate restart is not a crash")
 	}
+}
+
+// Slice 2.5 (F33 at process level): every relay dies at once; the supervisor
+// brings them back and the outbox, durable, is delivered then.
+func TestApply_KillAllRelays(t *testing.T) {
+	s := newSupervisor(t)
+	var procs procSet
+	for _, name := range []string{"relay-0", "relay-1"} {
+		p, err := s.Start(helperSpec(t, name))
+		require.NoError(t, err)
+		procs.relays = append(procs.relays, p)
+	}
+	before := []int{procs.relays[0].PID(), procs.relays[1].PID()}
+	require.NoError(t, apply(context.Background(), Event{Kind: KillAllRelays}, procs, nil, "", "", nil))
+	for i, p := range procs.relays {
+		require.Eventually(t, func() bool { return p.Restarts() == 1 && p.PID() != before[i] && alive(p.PID()) },
+			5*time.Second, 20*time.Millisecond, p.Name())
+	}
+}
+
+func TestApply_KillRelay(t *testing.T) {
+	s := newSupervisor(t)
+	var procs procSet
+	for _, name := range []string{"relay-0", "relay-1"} {
+		p, err := s.Start(helperSpec(t, name))
+		require.NoError(t, err)
+		procs.relays = append(procs.relays, p)
+	}
+	require.NoError(t, apply(context.Background(), Event{Kind: KillRelay, Target: 1}, procs, nil, "", "", nil))
+	require.Eventually(t, func() bool { return procs.relays[1].Restarts() == 1 }, 5*time.Second, 20*time.Millisecond)
+	require.Zero(t, procs.relays[0].Restarts())
 }

@@ -64,6 +64,7 @@ type Outbox struct {
 	LeaseExpiresAt pgtype.Timestamptz
 	DeliveredAt    pgtype.Timestamptz
 	LastError      *string
+	LeaseEpoch     int64
 }
 
 type Step struct {

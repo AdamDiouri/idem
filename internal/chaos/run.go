@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AdamDiouri/idem/internal/fakeprovider"
+	"github.com/AdamDiouri/idem/internal/fakeshop"
 	"github.com/AdamDiouri/idem/internal/invariants"
 	"github.com/AdamDiouri/idem/internal/store"
 )
@@ -35,20 +36,25 @@ type Config struct {
 	RunDir        string        `json:"run_dir"`
 	Failpoints    string        `json:"failpoints"`     // armed in workers during the campaign
 	APIFailpoints string        `json:"api_failpoints"` // armed in API replicas during the campaign
+	// Slice 2.5: relays deliver outbox events to a fake shop.
+	Relays          int    `json:"relays"`
+	RelayFailpoints string `json:"relay_failpoints"` // armed in relays during the campaign
 }
 
 // DefaultConfig returns the campaign defaults.
 func DefaultConfig() Config {
 	return Config{
-		Duration:      90 * time.Second,
-		SettleTimeout: 120 * time.Second,
-		Workflows:     1000,
-		Workers:       4,
-		APIs:          2,
-		Sweepers:      2,
-		BinDir:        "bin",
-		Failpoints:    "after_claim=exit@0.01,after_provider_call=exit@0.02,before_commit=exit@0.02,inbox_before_commit=exit@0.02",
-		APIFailpoints: "webhook_after_insert=exit@0.02",
+		Duration:        90 * time.Second,
+		SettleTimeout:   120 * time.Second,
+		Workflows:       1000,
+		Workers:         4,
+		APIs:            2,
+		Sweepers:        2,
+		BinDir:          "bin",
+		Failpoints:      "after_claim=exit@0.01,after_provider_call=exit@0.02,before_commit=exit@0.02,inbox_before_commit=exit@0.02",
+		APIFailpoints:   "webhook_after_insert=exit@0.02",
+		Relays:          2,
+		RelayFailpoints: "relay_before_send=exit@0.02,relay_after_send=exit@0.02",
 	}
 }
 
@@ -56,6 +62,34 @@ const (
 	apiToken = "chaos-token-0123456789"
 	leaseTTL = 4 * time.Second
 )
+
+// shopSecret signs idem's webhooks to the chaos shop (client "chaos").
+const shopSecret = "whsec_chaos_shop_0123456789" //nolint:gosec // throwaway secret for a local chaos run
+
+// shopEnv compresses the fake shop's timings: a slow answer takes 300ms, and
+// a late acknowledgement 2s, beyond the relays' 1s timeout.
+func shopEnv(port int) []string {
+	return []string{fmt.Sprintf("FAKESHOP_ADDR=127.0.0.1:%d", port), "FAKESHOP_SECRET=" + shopSecret,
+		"FAKESHOP_SLOW=300ms", "FAKESHOP_LATE_ACK=2s"}
+}
+
+// relayEnv tunes the relays like the workers: short leases and retries, and a
+// budget no healthy run exhausts (a DEAD event fails the verdict).
+func relayEnv(dsn, shopURL string) []string {
+	return []string{
+		"IDEM_DATABASE_URL=" + dsn,
+		"IDEM_CLIENT_WEBHOOKS=chaos=" + shopURL + "/hooks",
+		"IDEM_CLIENT_WEBHOOK_SECRETS=chaos=" + shopSecret,
+		"IDEM_RELAY_LEASE_TTL=" + leaseTTL.String(),
+		"IDEM_RELAY_TIMEOUT=1s",
+		"IDEM_SHUTDOWN_GRACE=3s",
+		"IDEM_RELAY_RETRY_BASE=100ms",
+		"IDEM_RELAY_RETRY_CAP=1s",
+		"IDEM_RELAY_MAX_ATTEMPTS=500",
+		"IDEM_POLL_INTERVAL=50ms",
+		"IDEM_METRICS_ADDR=off",
+	}
+}
 
 // webhookSecret signs the chaos provider's webhooks to the chaos API.
 const webhookSecret = "whsec_chaos_0123456789" //nolint:gosec // throwaway secret for a local chaos run, like apiToken
@@ -114,8 +148,12 @@ func workerEnv(dsn, providerURL string) []string {
 // cleans up its processes and container, and writes the report to cfg.RunDir.
 func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err error) {
 	rep = Report{Seed: cfg.Seed, Config: cfg, Restarts: map[string]int{}}
-	idem, provider := filepath.Join(cfg.BinDir, "idem"), filepath.Join(cfg.BinDir, "fakeprovider")
-	for _, bin := range []string{idem, provider} {
+	if cfg.Relays < 1 {
+		// Without a relay no outcome is delivered, and I4 fails every run.
+		return rep, errors.New("chaos needs at least one relay (--relays): outcomes must reach the shop for the system to settle")
+	}
+	idem, provider, shop := filepath.Join(cfg.BinDir, "idem"), filepath.Join(cfg.BinDir, "fakeprovider"), filepath.Join(cfg.BinDir, "fakeshop")
+	for _, bin := range []string{idem, provider, shop} {
 		if _, err := os.Stat(bin); err != nil {
 			return rep, fmt.Errorf("missing %s (run `make build`): %w", bin, err)
 		}
@@ -216,7 +254,28 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 			return rep, err
 		}
 	}
-	procs := procSet{workers: workers, apis: apis, sweepers: sweepers}
+	// Slice 2.5: the shop, and the relays that deliver to it.
+	shopPort, err := FreePort()
+	if err != nil {
+		return rep, err
+	}
+	shopURL := fmt.Sprintf("http://127.0.0.1:%d", shopPort)
+	if _, err := sup.Start(ProcSpec{Name: "fakeshop", Path: shop, LogPath: logPath("fakeshop"), Env: shopEnv(shopPort)}); err != nil {
+		return rep, err
+	}
+	if err := waitHTTP(ctx, shopURL+"/healthz"); err != nil {
+		return rep, withLogTail(fmt.Errorf("fake shop: %w", err), logPath("fakeshop"))
+	}
+	renv := relayEnv(pg.AppDSN(), shopURL)
+	relays := make([]*Proc, cfg.Relays)
+	for i := range relays {
+		name := fmt.Sprintf("relay-%d", i)
+		if relays[i], err = sup.Start(ProcSpec{Name: name, Path: idem, Args: []string{"relay"}, LogPath: logPath(name),
+			Env: append(renv, fmt.Sprintf("IDEM_WORKER_ID=r%d", i), "IDEM_FAILPOINTS="+cfg.RelayFailpoints)}); err != nil {
+			return rep, err
+		}
+	}
+	procs := procSet{workers: workers, apis: apis, sweepers: sweepers, relays: relays}
 
 	// --- Campaign: traffic and faults --------------------------------------
 	logger.Info("campaign started", "seed", cfg.Seed, "duration", cfg.Duration, "workflows", cfg.Workflows)
@@ -233,7 +292,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		})
 	}()
 
-	plan := NewPlan(PlanConfig{Seed: cfg.Seed, Duration: cfg.Duration, Workers: cfg.Workers, APIs: nAPIs, LeaseTTL: leaseTTL})
+	plan := NewPlan(PlanConfig{Seed: cfg.Seed, Duration: cfg.Duration, Workers: cfg.Workers, APIs: nAPIs, Relays: cfg.Relays, LeaseTTL: leaseTTL})
 	var pauses sync.WaitGroup
 	start := time.Now()
 	for _, ev := range plan {
@@ -243,7 +302,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		case <-time.After(time.Until(start.Add(ev.At))):
 		}
 		inFlight := unsettled(ctx, pool) + int(outstanding.Load())
-		err := apply(ctx, ev, procs, pg, providerURL, &pauses)
+		err := apply(ctx, ev, procs, pg, providerURL, shopURL, &pauses)
 		ex := ExecutedEvent{Event: ev, WallTime: time.Now(), InFlight: inFlight}
 		switch {
 		case errors.Is(err, ErrNotRunning):
@@ -268,6 +327,9 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 	settleStart := time.Now()
 	if err := fakeprovider.PutFaults(ctx, providerURL, fakeprovider.Faults{}); err != nil {
 		return rep, fmt.Errorf("clear faults: %w", err)
+	}
+	if err := fakeshop.PutFaults(ctx, shopURL, fakeshop.Faults{}); err != nil {
+		return rep, fmt.Errorf("clear shop faults: %w", err)
 	}
 	pauses.Wait() // every pause resumes itself
 	for i, w := range workers {
@@ -295,6 +357,19 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		}
 		if err := waitHTTP(ctx, apiURLs[i]+"/readyz"); err != nil {
 			return rep, withLogTail(fmt.Errorf("%s (settle): %w", name, err), logPath(name))
+		}
+	}
+
+	for i, r := range relays {
+		if err := r.Stop(ctx); err != nil {
+			return rep, err
+		}
+		rep.Restarts[r.Name()] = r.Restarts()
+		rep.FailpointExits += r.FailpointExits()
+		name := fmt.Sprintf("relay-%d", i)
+		if _, err := sup.Start(ProcSpec{Name: name + "-settle", Path: idem, Args: []string{"relay"}, LogPath: logPath(name),
+			Env: append(renv, fmt.Sprintf("IDEM_WORKER_ID=r%d-settle", i))}); err != nil {
+			return rep, err
 		}
 	}
 
@@ -347,6 +422,36 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		return rep, err
 	}
 	rep.Violations = append(rep.Violations, webhookViolations...)
+	if cfg.Relays > 0 {
+		seen, err := fakeshop.FetchSeen(ctx, shopURL)
+		if err != nil {
+			return rep, err
+		}
+		shopViolations, err := invariants.CheckShop(ctx, pool, seen, []string{"chaos"})
+		if err != nil {
+			return rep, err
+		}
+		rep.Violations = append(rep.Violations, shopViolations...)
+		rep.Shop = ShopCounts{Events: len(seen.Events), Duplicates: seen.Duplicates}
+		if rep.ShopFaultHits, err = fakeshop.FetchFaultHits(ctx, shopURL); err != nil {
+			return rep, err
+		}
+	}
+	rep.Outbox = map[string]int{}
+	orows, err := pool.Query(ctx, `SELECT status, count(*) FROM outbox GROUP BY status`)
+	if err != nil {
+		return rep, err
+	}
+	for orows.Next() {
+		var status string
+		var n int
+		if err := orows.Scan(&status, &n); err != nil {
+			orows.Close()
+			return rep, err
+		}
+		rep.Outbox[status] = n
+	}
+	orows.Close()
 	for _, d := range deliveries {
 		if d.Stale && d.Delivered {
 			rep.Webhooks.StaleDelivered++
@@ -395,7 +500,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 		rep.WebhooksDuplicate[name] = countMatchingLines(file, `"msg":"provider webhook stored"`, `"result":"duplicate"`)
 	}
 	rep.FailpointFires = map[string]int{}
-	for _, name := range armedFailpoints(cfg.Failpoints + "," + cfg.APIFailpoints) {
+	for _, name := range armedFailpoints(cfg.Failpoints + "," + cfg.APIFailpoints + "," + cfg.RelayFailpoints) {
 		if n := countLogLines(cfg.RunDir, "", "failpoint "+name+" fired"); n > 0 {
 			rep.FailpointFires[name] = n
 		}
@@ -512,10 +617,10 @@ func ackMismatches(ctx context.Context, pool *pgxpool.Pool, accepted map[string]
 
 // procSet is idem's processes, by kind, for apply.
 type procSet struct {
-	workers, apis, sweepers []*Proc
+	workers, apis, sweepers, relays []*Proc
 }
 
-func apply(ctx context.Context, ev Event, procs procSet, pg *Postgres, providerURL string, pauses *sync.WaitGroup) error {
+func apply(ctx context.Context, ev Event, procs procSet, pg *Postgres, providerURL, shopURL string, pauses *sync.WaitGroup) error {
 	workers, apis := procs.workers, procs.apis
 	switch ev.Kind {
 	case RestartAll:
@@ -542,6 +647,23 @@ func apply(ctx context.Context, ev Event, procs procSet, pg *Postgres, providerU
 		return fakeprovider.PutFaults(ctx, providerURL, ev.Faults)
 	case ClearProviderFaults:
 		return fakeprovider.PutFaults(ctx, providerURL, fakeprovider.Faults{})
+	case KillRelay:
+		if len(procs.relays) == 0 {
+			return ErrNotRunning
+		}
+		return procs.relays[ev.Target%len(procs.relays)].Kill()
+	case KillAllRelays:
+		var errs []error
+		for _, r := range procs.relays {
+			if err := r.Kill(); err != nil && !errors.Is(err, ErrNotRunning) {
+				errs = append(errs, fmt.Errorf("%s: %w", r.Name(), err))
+			}
+		}
+		return errors.Join(errs...)
+	case SetShopFaults:
+		return fakeshop.PutFaults(ctx, shopURL, ev.ShopFaults)
+	case ClearShopFaults:
+		return fakeshop.PutFaults(ctx, shopURL, fakeshop.Faults{})
 	}
 	return fmt.Errorf("unknown event kind %q", ev.Kind)
 }
@@ -620,7 +742,7 @@ func undeliveredWebhooks(ds []fakeprovider.WebhookDelivery) int {
 // process that is already down (a crash restart in progress) comes back on its
 // own and is not an error.
 func restartAll(ctx context.Context, procs procSet) error {
-	all := append(append(append([]*Proc{}, procs.workers...), procs.apis...), procs.sweepers...)
+	all := append(append(append(append([]*Proc{}, procs.workers...), procs.apis...), procs.sweepers...), procs.relays...)
 	errs := make([]error, len(all))
 	var wg sync.WaitGroup
 	for i, p := range all {

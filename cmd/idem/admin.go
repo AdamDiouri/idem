@@ -86,7 +86,7 @@ func adminCmd() *cobra.Command {
 			"See docs/runbooks/needs-attention.md for which action fits which situation.",
 	}
 	cmd.AddCommand(adminListCmd(), adminRetryCmd(), adminNewGenerationCmd(), adminConfirmCmd(), adminCompensateCmd(), adminFailCmd(),
-		adminConflictCmd())
+		adminConflictCmd(), adminOutboxCmd())
 	return cmd
 }
 
@@ -372,6 +372,97 @@ func adminConflictCmd() *cobra.Command {
 	resolve.Flags().StringVar(&reason, "reason", "", "what was done (recorded in the audit log)")
 	_ = resolve.MarkFlagRequired("reason")
 	cmd.AddCommand(list, resolve)
+	return cmd
+}
+
+// adminOutboxCmd lists and redelivers workflow outcomes that have not
+// reached their shop (slice 2.5).
+func adminOutboxCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "outbox",
+		Short: "Workflow outcomes not delivered to their shop",
+	}
+	var asJSON bool
+	var filter engine.OutboxFilter
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List events not delivered (PENDING, DEAD, NO_ENDPOINT, SKIPPED), oldest first",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
+				events, err := a.ListOutbox(ctx, filter)
+				if err != nil {
+					return err
+				}
+				out := cmd.OutOrStdout()
+				if asJSON {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(events)
+				}
+				tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+				_, _ = fmt.Fprintln(tw, "EVENT\tVERSION\tWORKFLOW\tCLIENT\tTYPE\tSTATUS\tATTEMPTS\tCREATED\tLAST ERROR")
+				for _, e := range events {
+					_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", e.ID, e.Version, e.WorkflowID, e.ClientID, e.Type,
+						e.Status, e.Attempts, e.CreatedAt.UTC().Format(time.RFC3339), truncate(e.LastError, 60))
+				}
+				return tw.Flush()
+			})
+		},
+	}
+	list.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	list.Flags().BoolVar(&filter.OnlyDead, "dead", false, "only events the relay gave up on")
+	list.Flags().BoolVar(&filter.All, "all", false, "delivered events too (to resend one a shop lost)")
+
+	var reason string
+	var version int64
+	redeliver := &cobra.Command{
+		Use:   "redeliver <event-id>",
+		Short: "Send an event again with a fresh retry budget (audited)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := parseID(args[0])
+			if err != nil {
+				return err
+			}
+			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
+				if err := a.Redeliver(ctx, id, version, reason); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "event %s queued for delivery\n", id)
+				return nil
+			})
+		},
+	}
+	redeliver.Flags().StringVar(&reason, "reason", "", "why (recorded in the audit log)")
+	_ = redeliver.MarkFlagRequired("reason")
+	redeliver.Flags().Int64Var(&version, "expect-version", 0,
+		"the VERSION shown by `idem admin outbox list`; refused if the event changed since")
+	_ = redeliver.MarkFlagRequired("expect-version")
+
+	var bulkReason, client, status string
+	redeliverAll := &cobra.Command{
+		Use:   "redeliver-all",
+		Short: "Send again every event of one client in one status: DEAD, NO_ENDPOINT or SKIPPED (audited, one row per event)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
+				n, err := a.RedeliverAll(ctx, client, status, bulkReason)
+				if err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%d event(s) of client %s queued for delivery\n", n, client)
+				return nil
+			})
+		},
+	}
+	redeliverAll.Flags().StringVar(&client, "client", "", "the client whose events to resend")
+	redeliverAll.Flags().StringVar(&status, "status", "", "DEAD, NO_ENDPOINT or SKIPPED")
+	redeliverAll.Flags().StringVar(&bulkReason, "reason", "", "why (recorded in the audit log, once per event)")
+	for _, f := range []string{"client", "status", "reason"} {
+		_ = redeliverAll.MarkFlagRequired(f)
+	}
+	cmd.AddCommand(list, redeliver, redeliverAll)
 	return cmd
 }
 

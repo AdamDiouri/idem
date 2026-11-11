@@ -19,12 +19,12 @@ D1 to D20 were first recorded as one-line rows in the design documents and expan
 | [D11](0011-platform-fees-in-integer-cents.md) | Fees in integer cents, half-to-even, fixed at creation | Built (1.1) |
 | [D12](0012-workers-poll-waiting-payouts.md) | Workers poll waiting payouts, not the sweeper | Built (2.1) |
 | [D13](0013-outbox-written-in-transition.md) | The outbox is written inside `transitionWorkflow` | Built (2.4) |
-| [D14](0014-at-least-once-outbound-delivery.md) | At-least-once outbound delivery, stable event ID | Planned (2.5) |
+| [D14](0014-at-least-once-outbound-delivery.md) | At-least-once outbound delivery, stable event ID | Built (2.5) |
 | [D15](0015-reconciliation-only-reports.md) | Reconciliation only reports | Planned (2.6) |
 | [D16](0016-contradictory-news-never-flips-terminal-state.md) | Contradictory news never flips a terminal state | Built (2.2) |
 | [D17](0017-polls-never-create-doubt.md) | Polls never create doubt | Built (2.1) |
 | [D18](0018-news-about-parked-steps-is-evidence.md) | News about a parked step is evidence for a human | Built (2.2) |
-| [D19](0019-outbox-rows-for-every-client.md) | Outbox rows for every client, `NO_ENDPOINT` without a URL | Planned (2.5) |
+| [D19](0019-outbox-rows-for-every-client.md) | Outbox rows for every client, `NO_ENDPOINT` without a URL | Built (2.5) |
 | [D20](0020-trace-context-stored-in-work-rows.md) | Trace context stored in work rows | Planned (M3) |
 | [D21](0021-append-only-by-privilege-logins-are-infrastructure.md) | Ledger append-only by privilege; logins are infrastructure | Built (2.3b) |
 | [D22](0022-toolchain-pinned-in-go-mod.md) | Go toolchain pinned in `go.mod`, on a supported release | Built (CI PR) |

@@ -433,6 +433,7 @@ func snapshot(ctx context.Context, pool *pgxpool.Pool) (metrics.Snapshot, error)
 		return s, err
 	}
 	s.OutboxPending, s.OutboxOldestPending = int(outbox.Pending), time.Duration(outbox.OldestPendingMs)*time.Millisecond
+	s.OutboxDead = int(outbox.Dead)
 	for _, p := range parked {
 		reason := "refused"
 		if p.DeadReason != nil {
