@@ -86,3 +86,21 @@ SET status = 'CONFLICT_RESOLVED'
 FROM steps s
 WHERE i.provider_event_id = sqlc.arg(provider_event_id) AND i.status = 'CONFLICT' AND s.id = i.step_id
 RETURNING s.workflow_id, s.id AS step_id, COALESCE(i.note, '')::text AS note;
+
+-- name: ListOutboxEvents :many
+-- Events that have not reached their shop (slice 2.5), oldest first.
+SELECT id, workflow_id, client_id, type, status, attempts, COALESCE(last_error, '')::text AS last_error, created_at
+FROM outbox
+WHERE status <> 'DELIVERED' AND (NOT sqlc.arg(only_dead)::bool OR status = 'DEAD')
+ORDER BY created_at, id;
+
+-- name: LockOutboxEvent :one
+SELECT id, workflow_id, status, attempts FROM outbox WHERE id = sqlc.arg(id)::uuid FOR UPDATE;
+
+-- name: RequeueOutboxEvent :exec
+-- An operator sends the event again, with a fresh budget; the epoch bump
+-- fences any relay still holding an old lease on it (D7).
+UPDATE outbox
+SET status = 'PENDING', attempts = 0, next_attempt_at = now(), last_error = NULL,
+    lease_owner = NULL, lease_expires_at = NULL, lease_epoch = lease_epoch + 1
+WHERE id = sqlc.arg(id)::uuid;

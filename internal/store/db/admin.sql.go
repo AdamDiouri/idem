@@ -105,6 +105,54 @@ func (q *Queries) ListConflicts(ctx context.Context) ([]ListConflictsRow, error)
 	return items, nil
 }
 
+const listOutboxEvents = `-- name: ListOutboxEvents :many
+SELECT id, workflow_id, client_id, type, status, attempts, COALESCE(last_error, '')::text AS last_error, created_at
+FROM outbox
+WHERE status <> 'DELIVERED' AND (NOT $1::bool OR status = 'DEAD')
+ORDER BY created_at, id
+`
+
+type ListOutboxEventsRow struct {
+	ID         uuid.UUID
+	WorkflowID uuid.UUID
+	ClientID   string
+	Type       string
+	Status     string
+	Attempts   int32
+	LastError  string
+	CreatedAt  pgtype.Timestamptz
+}
+
+// Events that have not reached their shop (slice 2.5), oldest first.
+func (q *Queries) ListOutboxEvents(ctx context.Context, onlyDead bool) ([]ListOutboxEventsRow, error) {
+	rows, err := q.db.Query(ctx, listOutboxEvents, onlyDead)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListOutboxEventsRow
+	for rows.Next() {
+		var i ListOutboxEventsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkflowID,
+			&i.ClientID,
+			&i.Type,
+			&i.Status,
+			&i.Attempts,
+			&i.LastError,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listParkedSteps = `-- name: ListParkedSteps :many
 SELECT DISTINCT ON (w.id)
   w.id AS workflow_id, w.version, s.id AS step_id, s.name, s.status, s.dead_reason, s.last_error, s.attempt_count, s.poll_count, w.input,
@@ -167,6 +215,29 @@ func (q *Queries) ListParkedSteps(ctx context.Context) ([]ListParkedStepsRow, er
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockOutboxEvent = `-- name: LockOutboxEvent :one
+SELECT id, workflow_id, status, attempts FROM outbox WHERE id = $1::uuid FOR UPDATE
+`
+
+type LockOutboxEventRow struct {
+	ID         uuid.UUID
+	WorkflowID uuid.UUID
+	Status     string
+	Attempts   int32
+}
+
+func (q *Queries) LockOutboxEvent(ctx context.Context, id uuid.UUID) (LockOutboxEventRow, error) {
+	row := q.db.QueryRow(ctx, lockOutboxEvent, id)
+	var i LockOutboxEventRow
+	err := row.Scan(
+		&i.ID,
+		&i.WorkflowID,
+		&i.Status,
+		&i.Attempts,
+	)
+	return i, err
 }
 
 const lockParkedStep = `-- name: LockParkedStep :one
@@ -268,6 +339,20 @@ func (q *Queries) ProviderRefInUse(ctx context.Context, arg ProviderRefInUsePara
 	var used bool
 	err := row.Scan(&used)
 	return used, err
+}
+
+const requeueOutboxEvent = `-- name: RequeueOutboxEvent :exec
+UPDATE outbox
+SET status = 'PENDING', attempts = 0, next_attempt_at = now(), last_error = NULL,
+    lease_owner = NULL, lease_expires_at = NULL, lease_epoch = lease_epoch + 1
+WHERE id = $1::uuid
+`
+
+// An operator sends the event again, with a fresh budget; the epoch bump
+// fences any relay still holding an old lease on it (D7).
+func (q *Queries) RequeueOutboxEvent(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, requeueOutboxEvent, id)
+	return err
 }
 
 const resetStepForRetry = `-- name: ResetStepForRetry :execrows

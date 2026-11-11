@@ -86,7 +86,7 @@ func adminCmd() *cobra.Command {
 			"See docs/runbooks/needs-attention.md for which action fits which situation.",
 	}
 	cmd.AddCommand(adminListCmd(), adminRetryCmd(), adminNewGenerationCmd(), adminConfirmCmd(), adminCompensateCmd(), adminFailCmd(),
-		adminConflictCmd())
+		adminConflictCmd(), adminOutboxCmd())
 	return cmd
 }
 
@@ -372,6 +372,72 @@ func adminConflictCmd() *cobra.Command {
 	resolve.Flags().StringVar(&reason, "reason", "", "what was done (recorded in the audit log)")
 	_ = resolve.MarkFlagRequired("reason")
 	cmd.AddCommand(list, resolve)
+	return cmd
+}
+
+// adminOutboxCmd lists and redelivers workflow outcomes that have not
+// reached their shop (slice 2.5).
+func adminOutboxCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "outbox",
+		Short: "Workflow outcomes not delivered to their shop",
+	}
+	var asJSON, onlyDead bool
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List events not delivered (PENDING, DEAD, NO_ENDPOINT, SKIPPED), oldest first",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
+				events, err := a.ListOutbox(ctx, onlyDead)
+				if err != nil {
+					return err
+				}
+				out := cmd.OutOrStdout()
+				if asJSON {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(events)
+				}
+				tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+				_, _ = fmt.Fprintln(tw, "EVENT\tWORKFLOW\tCLIENT\tTYPE\tSTATUS\tATTEMPTS\tCREATED\tLAST ERROR")
+				for _, e := range events {
+					_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", e.ID, e.WorkflowID, e.ClientID, e.Type,
+						e.Status, e.Attempts, e.CreatedAt.UTC().Format(time.RFC3339), truncate(e.LastError, 60))
+				}
+				return tw.Flush()
+			})
+		},
+	}
+	list.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	list.Flags().BoolVar(&onlyDead, "dead", false, "only events the relay gave up on")
+
+	var reason string
+	var attempts int32
+	redeliver := &cobra.Command{
+		Use:   "redeliver <event-id>",
+		Short: "Send an event again with a fresh retry budget (audited)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := parseID(args[0])
+			if err != nil {
+				return err
+			}
+			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
+				if err := a.Redeliver(ctx, id, attempts, reason); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "event %s queued for delivery\n", id)
+				return nil
+			})
+		},
+	}
+	redeliver.Flags().StringVar(&reason, "reason", "", "why (recorded in the audit log)")
+	_ = redeliver.MarkFlagRequired("reason")
+	redeliver.Flags().Int32Var(&attempts, "expect-attempts", 0,
+		"the ATTEMPTS shown by `idem admin outbox list`; refused if the event changed since")
+	_ = redeliver.MarkFlagRequired("expect-attempts")
+	cmd.AddCommand(list, redeliver)
 	return cmd
 }
 

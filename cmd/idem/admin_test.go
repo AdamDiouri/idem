@@ -176,3 +176,26 @@ func TestAdminCLI_ConflictListAndResolve(t *testing.T) {
 	code, _ = admin(t, "conflict", "resolve", "evt_cli")
 	require.Equal(t, 2, code, "missing --reason")
 }
+
+// Slice 2.5: redeliver needs a reason and the attempts the operator saw.
+func TestAdminOutbox_RedeliverNeedsReasonAndAttempts(t *testing.T) {
+	testutil.NewPool(t, dsn)
+	id := "0190f1d2-0000-7000-8000-000000000000"
+	code, out := admin(t, "outbox", "redeliver", id, "--expect-attempts", "15")
+	require.Equal(t, 2, code, out)
+	code, out = admin(t, "outbox", "redeliver", id, "--reason", "back")
+	require.Equal(t, 2, code, out)
+	code, out = admin(t, "outbox", "redeliver", id, "--reason", "back", "--expect-attempts", "15")
+	require.Equal(t, 1, code, out) // unknown event: not actionable
+}
+
+func TestAdminOutbox_ListShowsEvents(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	wf, _ := parkedCharge(t, pool)
+	testutil.SetWorkflowStatus(t, pool, wf, "FAILED")
+	code, out := admin(t, "outbox", "list")
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, "EVENT")
+	require.Contains(t, out, wf.String())
+	require.Contains(t, out, "workflow.failed")
+}
