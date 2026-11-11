@@ -197,6 +197,18 @@ SELECT
   COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000 FROM outbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms,
   (SELECT count(*) FROM outbox WHERE status = 'DEAD')::int AS dead;
 
+-- name: ReconStats :many
+-- For the sweeper's gauges: the latest successful reconciliation's
+-- discrepancies by kind and parked flag, and when it finished (one row with
+-- an empty kind when it found none; no row if no run ever succeeded).
+WITH latest AS (
+  SELECT id, finished_at FROM recon_runs WHERE status = 'SUCCEEDED' ORDER BY finished_at DESC LIMIT 1
+)
+SELECT COALESCE(d.kind, '')::text AS kind, COALESCE(d.parked, false)::bool AS parked, count(d.id)::int AS n,
+       EXTRACT(EPOCH FROM l.finished_at)::bigint AS finished_unix
+FROM latest l LEFT JOIN recon_discrepancies d ON d.run_id = l.id
+GROUP BY d.kind, d.parked, l.finished_at;
+
 -- name: IncrementHookFailures :one
 -- Fenced like CompleteStep: only the current lease holder counts a failure.
 UPDATE steps SET hook_failures = hook_failures + 1

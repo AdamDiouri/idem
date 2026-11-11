@@ -31,6 +31,10 @@ func exitCode(err error) int {
 	if errors.As(err, &ue) || errors.Is(err, engine.ErrConfirmationRequired) {
 		return 2 // ErrConfirmationRequired: a missing flag, found once the step's history is known
 	}
+	var drift driftFound
+	if errors.As(err, &drift) {
+		return 3 // reconcile ran and found the ledger and the provider disagreeing
+	}
 	return 1
 }
 

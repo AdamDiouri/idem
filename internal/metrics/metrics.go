@@ -41,6 +41,8 @@ type Metrics struct {
 	OutboxPending       prometheus.Gauge
 	OutboxOldestPending prometheus.Gauge
 	OutboxDead          prometheus.Gauge
+	ReconDiscrepancies  *prometheus.GaugeVec // kind, parked
+	ReconLastSuccess    prometheus.Gauge
 	ConflictsOpen       prometheus.Gauge
 	CallbacksOverdue    prometheus.Gauge
 }
@@ -126,6 +128,14 @@ func New() *Metrics {
 		OutboxDead: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "idem_outbox_dead", Help: "Workflow outcome events the relay gave up delivering (see idem admin outbox list --dead).",
 		}),
+		ReconDiscrepancies: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "idem_reconciliation_discrepancies",
+			Help: "Differences between the provider's records and the ledger found by the latest successful reconciliation, by kind and whether the workflow is parked.",
+		}, []string{"kind", "parked"}),
+		ReconLastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "idem_reconciliation_last_success_timestamp_seconds",
+			Help: "When the latest successful reconciliation finished (0 if none ever did).",
+		}),
 		ConflictsOpen: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "idem_webhook_conflicts_open", Help: "Provider news that truly contradicts idem, not yet resolved by a human.",
 		}),
@@ -144,7 +154,7 @@ func New() *Metrics {
 	for _, c := range []prometheus.Collector{
 		m.StepAttempts, m.ProviderDuration, m.KeyLookups, m.LeasesReclaimed, m.Workflows, m.Steps,
 		m.UnsettledIdle, m.StepsOverLimit, m.Parked, m.LastSnapshot, m.Submissions, m.StatusRequests, m.RelayDeliveries, m.RelayDuration, m.CallbackPolls, m.WebhooksReceived, m.WebhooksApplied,
-		m.InboxPending, m.InboxOldestPending, m.OutboxPending, m.OutboxOldestPending, m.OutboxDead, m.ConflictsOpen, m.CallbacksOverdue,
+		m.InboxPending, m.InboxOldestPending, m.OutboxPending, m.OutboxOldestPending, m.OutboxDead, m.ReconDiscrepancies, m.ReconLastSuccess, m.ConflictsOpen, m.CallbacksOverdue,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	} {
 		f(c)
@@ -229,6 +239,9 @@ type Snapshot struct {
 	OutboxPending       int
 	OutboxOldestPending time.Duration
 	OutboxDead          int
+
+	ReconDiscrepancies map[[2]string]int // {kind, parked} → count, latest successful run
+	ReconLastSuccess   time.Time         // zero if none
 }
 
 // SetSnapshot replaces every state gauge, so label values that disappeared
@@ -256,6 +269,14 @@ func (m *Metrics) SetSnapshot(s Snapshot) {
 	m.OutboxPending.Set(float64(s.OutboxPending))
 	m.OutboxOldestPending.Set(s.OutboxOldestPending.Seconds())
 	m.OutboxDead.Set(float64(s.OutboxDead))
+	m.ReconDiscrepancies.Reset()
+	for k, n := range s.ReconDiscrepancies {
+		m.ReconDiscrepancies.WithLabelValues(k[0], k[1]).Set(float64(n))
+	}
+	m.ReconLastSuccess.Set(0)
+	if !s.ReconLastSuccess.IsZero() {
+		m.ReconLastSuccess.Set(float64(s.ReconLastSuccess.Unix()))
+	}
 	m.ConflictsOpen.Set(float64(s.ConflictsOpen))
 	m.CallbacksOverdue.Set(float64(s.CallbacksOverdue))
 	m.LastSnapshot.SetToCurrentTime()
