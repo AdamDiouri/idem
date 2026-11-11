@@ -104,6 +104,22 @@ services:
       fakeshop:
         condition: service_started
 
+  # Slice 2.6: compares the provider's record of money movements with the
+  # ledger every 10 minutes (each run: the last complete hour), reporting
+  # every difference; it changes nothing else.
+  reconcile:
+    build: .
+    command: ["reconcile", "--every", "10m"]
+    environment:
+      IDEM_DATABASE_URL: *database-url
+      IDEM_PROVIDER_URL: http://fakeprovider:9090
+      IDEM_RECON_LAG: 1m
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      fakeprovider:
+        condition: service_started
+
   # A shop receiving the demo client's webhooks: verifies, deduplicates, and
   # shows what it learned at http://localhost:8000/_seen.
   fakeshop:

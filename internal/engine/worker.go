@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -435,6 +436,21 @@ func snapshot(ctx context.Context, pool *pgxpool.Pool) (metrics.Snapshot, error)
 	}
 	s.OutboxPending, s.OutboxOldestPending = int(outbox.Pending), time.Duration(outbox.OldestPendingMs)*time.Millisecond
 	s.OutboxDead = int(outbox.Dead)
+	recon, err := q.ReconStats(ctx)
+	if err != nil {
+		return s, err
+	}
+	s.ReconDiscrepancies = map[[2]string]int{}
+	for _, r := range recon {
+		s.ReconDiscrepancies[[2]string{r.Kind, strconv.FormatBool(r.Parked)}] = int(r.N)
+	}
+	last, err := q.ReconLastSuccess(ctx)
+	if err != nil {
+		return s, err
+	}
+	if last > 0 {
+		s.ReconLastSuccess = time.Unix(last, 0)
+	}
 	for _, p := range parked {
 		reason := "refused"
 		if p.DeadReason != nil {

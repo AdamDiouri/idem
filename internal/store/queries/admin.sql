@@ -7,7 +7,10 @@ SELECT DISTINCT ON (w.id)
   (EXTRACT(EPOCH FROM (now() - w.updated_at)) * 1000)::bigint AS parked_ms,
   -- The provider's latest news about this step (D18), if any.
   COALESCE((SELECT i.note FROM webhook_inbox i WHERE i.step_id = s.id AND i.status = 'EVIDENCE'
-            ORDER BY i.processed_at DESC LIMIT 1), '')::text AS evidence
+            ORDER BY i.processed_at DESC LIMIT 1), '')::text AS evidence,
+  -- What reconciliation found open for this workflow (slice 2.6).
+  COALESCE((SELECT string_agg(d.kind || ' ' || d.effect_type || ' ' || COALESCE(d.provider_amount::text, '-'), '; ' ORDER BY d.effect_type)
+            FROM recon_open_discrepancies d WHERE d.workflow_id = w.id), '')::text AS reconciliation
 FROM workflows w
 JOIN steps s ON s.workflow_id = w.id AND s.status IN ('DEAD', 'FAILED_PERMANENT')
 WHERE w.status = 'NEEDS_ATTENTION'
@@ -113,3 +116,19 @@ UPDATE outbox
 SET status = 'PENDING', attempts = 0, next_attempt_at = now(), last_error = NULL,
     lease_owner = NULL, lease_expires_at = NULL, lease_epoch = lease_epoch + 1
 WHERE id = sqlc.arg(id)::uuid AND status IN ('DEAD', 'NO_ENDPOINT', 'SKIPPED', 'DELIVERED');
+
+-- name: LatestReconRun :one
+SELECT id, window_from, window_to, finished_at, records, workflows, in_flight, discrepancies
+FROM recon_runs WHERE status = 'SUCCEEDED' ORDER BY finished_at DESC LIMIT 1;
+
+-- name: ReconRunByID :one
+SELECT id, window_from, window_to, finished_at, records, workflows, in_flight, discrepancies
+FROM recon_runs WHERE id = sqlc.arg(id) AND status = 'SUCCEEDED';
+
+-- name: OpenReconDiscrepancies :many
+SELECT workflow_id, kind, effect_type, provider_refs, provider_amount, ledger_amount, parked, detail, found_at
+FROM recon_open_discrepancies ORDER BY parked, found_at, kind, effect_type;
+
+-- name: ReconDiscrepanciesOfRun :many
+SELECT workflow_id, kind, effect_type, provider_refs, provider_amount, ledger_amount, parked, detail
+FROM recon_discrepancies WHERE run_id = sqlc.arg(run_id) ORDER BY parked, kind, effect_type;

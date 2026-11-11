@@ -390,3 +390,98 @@ func errorCode(body []byte) string {
 	_ = json.Unmarshal(body, &e) // best effort, for messages only
 	return e.Error.Code
 }
+
+// BalanceTransaction is one money movement in the provider's report (M2
+// design §6): charge (+), payout (−, when paid), refund (−).
+type BalanceTransaction struct {
+	ID             string
+	Type           string
+	Amount         int64 // signed, minor units
+	Currency       string
+	Created        time.Time
+	Source         string // the charge, payout or refund it records
+	WorkflowID     string // metadata; may name a workflow idem does not know
+	IdempotencyKey string
+}
+
+// maxReportPages bounds one read of the report (100 rows a page).
+const maxReportPages = 10000
+
+// ListBalanceTransactions reads every movement created in [from, to), page by
+// page. Any failed or unreadable page is an error: a reconciliation must
+// never run on a partial report.
+func (c *Client) ListBalanceTransactions(ctx context.Context, from, to time.Time) ([]BalanceTransaction, error) {
+	lt := to.Unix()
+	if to.After(time.Unix(lt, 0)) {
+		lt++ // whole seconds: round the end up so nothing before `to` is left out
+	}
+	var out []BalanceTransaction
+	after := ""
+	for pages := 1; ; pages++ {
+		q := url.Values{"created_gte": {strconv.FormatInt(from.Unix(), 10)}, "created_lt": {strconv.FormatInt(lt, 10)}, "limit": {"100"}}
+		if after != "" {
+			q.Set("starting_after", after)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/reports/balance_transactions?"+q.Encode(), nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("balance transactions: %w", err)
+		}
+		var page struct {
+			Data *[]struct {
+				ID       string            `json:"id"`
+				Type     string            `json:"type"`
+				Amount   int64             `json:"amount"`
+				Currency string            `json:"currency"`
+				Created  int64             `json:"created"`
+				Source   string            `json:"source"`
+				Metadata map[string]string `json:"metadata"`
+			} `json:"data"`
+			HasMore bool `json:"has_more"`
+		}
+		err = func() error {
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("balance transactions: provider answered %d", resp.StatusCode)
+			}
+			if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&page); err != nil {
+				return err
+			}
+			if page.Data == nil {
+				return errors.New("not a report: no data array") // an error body or {} is not an empty report
+			}
+			return nil
+		}()
+		if err != nil {
+			return nil, fmt.Errorf("balance transactions: %w", err)
+		}
+		data := *page.Data
+		for _, d := range data {
+			switch {
+			case d.ID == "":
+				return nil, errors.New("balance transactions: a row without an id")
+			case d.Type != "charge" && d.Type != "payout" && d.Type != "refund":
+				return nil, fmt.Errorf("balance transactions: row %s has unknown type %q", d.ID, d.Type)
+			case d.Created <= 0:
+				return nil, fmt.Errorf("balance transactions: row %s has no creation time", d.ID)
+			}
+			out = append(out, BalanceTransaction{ID: d.ID, Type: d.Type, Amount: d.Amount, Currency: d.Currency,
+				Created: time.Unix(d.Created, 0), Source: d.Source, WorkflowID: d.Metadata["workflow_id"],
+				IdempotencyKey: d.Metadata["idempotency_key"]})
+		}
+		if !page.HasMore {
+			return out, nil
+		}
+		if len(data) == 0 {
+			return nil, errors.New("balance transactions: has_more with an empty page")
+		}
+		next := data[len(data)-1].ID
+		if next == after || pages >= maxReportPages {
+			return nil, fmt.Errorf("balance transactions: the cursor does not advance (%s after %d pages)", next, pages)
+		}
+		after = next
+	}
+}

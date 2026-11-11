@@ -61,6 +61,38 @@ func (q *Queries) InsertAdminAction(ctx context.Context, arg InsertAdminActionPa
 	return err
 }
 
+const latestReconRun = `-- name: LatestReconRun :one
+SELECT id, window_from, window_to, finished_at, records, workflows, in_flight, discrepancies
+FROM recon_runs WHERE status = 'SUCCEEDED' ORDER BY finished_at DESC LIMIT 1
+`
+
+type LatestReconRunRow struct {
+	ID            uuid.UUID
+	WindowFrom    pgtype.Timestamptz
+	WindowTo      pgtype.Timestamptz
+	FinishedAt    pgtype.Timestamptz
+	Records       int32
+	Workflows     int32
+	InFlight      int32
+	Discrepancies int32
+}
+
+func (q *Queries) LatestReconRun(ctx context.Context) (LatestReconRunRow, error) {
+	row := q.db.QueryRow(ctx, latestReconRun)
+	var i LatestReconRunRow
+	err := row.Scan(
+		&i.ID,
+		&i.WindowFrom,
+		&i.WindowTo,
+		&i.FinishedAt,
+		&i.Records,
+		&i.Workflows,
+		&i.InFlight,
+		&i.Discrepancies,
+	)
+	return i, err
+}
+
 const listConflicts = `-- name: ListConflicts :many
 SELECT i.provider_event_id, i.type, COALESCE(i.note, '')::text AS note, i.received_at, s.id AS step_id, s.workflow_id
 FROM webhook_inbox i JOIN steps s ON s.id = i.step_id
@@ -167,7 +199,10 @@ SELECT DISTINCT ON (w.id)
   (EXTRACT(EPOCH FROM (now() - w.updated_at)) * 1000)::bigint AS parked_ms,
   -- The provider's latest news about this step (D18), if any.
   COALESCE((SELECT i.note FROM webhook_inbox i WHERE i.step_id = s.id AND i.status = 'EVIDENCE'
-            ORDER BY i.processed_at DESC LIMIT 1), '')::text AS evidence
+            ORDER BY i.processed_at DESC LIMIT 1), '')::text AS evidence,
+  -- What reconciliation found open for this workflow (slice 2.6).
+  COALESCE((SELECT string_agg(d.kind || ' ' || d.effect_type || ' ' || COALESCE(d.provider_amount::text, '-'), '; ' ORDER BY d.effect_type)
+            FROM recon_open_discrepancies d WHERE d.workflow_id = w.id), '')::text AS reconciliation
 FROM workflows w
 JOIN steps s ON s.workflow_id = w.id AND s.status IN ('DEAD', 'FAILED_PERMANENT')
 WHERE w.status = 'NEEDS_ATTENTION'
@@ -175,18 +210,19 @@ ORDER BY w.id, s.created_at DESC
 `
 
 type ListParkedStepsRow struct {
-	WorkflowID   uuid.UUID
-	Version      int64
-	StepID       uuid.UUID
-	Name         string
-	Status       string
-	DeadReason   *string
-	LastError    *string
-	AttemptCount int32
-	PollCount    int32
-	Input        []byte
-	ParkedMs     int64
-	Evidence     string
+	WorkflowID     uuid.UUID
+	Version        int64
+	StepID         uuid.UUID
+	Name           string
+	Status         string
+	DeadReason     *string
+	LastError      *string
+	AttemptCount   int32
+	PollCount      int32
+	Input          []byte
+	ParkedMs       int64
+	Evidence       string
+	Reconciliation string
 }
 
 // Each parked workflow with the step that parked it (its most recent step).
@@ -214,6 +250,7 @@ func (q *Queries) ListParkedSteps(ctx context.Context) ([]ListParkedStepsRow, er
 			&i.Input,
 			&i.ParkedMs,
 			&i.Evidence,
+			&i.Reconciliation,
 		); err != nil {
 			return nil, err
 		}
@@ -362,6 +399,53 @@ func (q *Queries) NextStepGeneration(ctx context.Context, arg NextStepGeneration
 	return generation, err
 }
 
+const openReconDiscrepancies = `-- name: OpenReconDiscrepancies :many
+SELECT workflow_id, kind, effect_type, provider_refs, provider_amount, ledger_amount, parked, detail, found_at
+FROM recon_open_discrepancies ORDER BY parked, found_at, kind, effect_type
+`
+
+type OpenReconDiscrepanciesRow struct {
+	WorkflowID     *uuid.UUID
+	Kind           string
+	EffectType     string
+	ProviderRefs   []string
+	ProviderAmount *int64
+	LedgerAmount   *int64
+	Parked         bool
+	Detail         string
+	FoundAt        pgtype.Timestamptz
+}
+
+func (q *Queries) OpenReconDiscrepancies(ctx context.Context) ([]OpenReconDiscrepanciesRow, error) {
+	rows, err := q.db.Query(ctx, openReconDiscrepancies)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OpenReconDiscrepanciesRow
+	for rows.Next() {
+		var i OpenReconDiscrepanciesRow
+		if err := rows.Scan(
+			&i.WorkflowID,
+			&i.Kind,
+			&i.EffectType,
+			&i.ProviderRefs,
+			&i.ProviderAmount,
+			&i.LedgerAmount,
+			&i.Parked,
+			&i.Detail,
+			&i.FoundAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const parkedStepOfWorkflow = `-- name: ParkedStepOfWorkflow :one
 SELECT s.id FROM steps s
 JOIN workflows w ON w.id = s.workflow_id
@@ -396,6 +480,83 @@ func (q *Queries) ProviderRefInUse(ctx context.Context, arg ProviderRefInUsePara
 	var used bool
 	err := row.Scan(&used)
 	return used, err
+}
+
+const reconDiscrepanciesOfRun = `-- name: ReconDiscrepanciesOfRun :many
+SELECT workflow_id, kind, effect_type, provider_refs, provider_amount, ledger_amount, parked, detail
+FROM recon_discrepancies WHERE run_id = $1 ORDER BY parked, kind, effect_type
+`
+
+type ReconDiscrepanciesOfRunRow struct {
+	WorkflowID     *uuid.UUID
+	Kind           string
+	EffectType     string
+	ProviderRefs   []string
+	ProviderAmount *int64
+	LedgerAmount   *int64
+	Parked         bool
+	Detail         string
+}
+
+func (q *Queries) ReconDiscrepanciesOfRun(ctx context.Context, runID uuid.UUID) ([]ReconDiscrepanciesOfRunRow, error) {
+	rows, err := q.db.Query(ctx, reconDiscrepanciesOfRun, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ReconDiscrepanciesOfRunRow
+	for rows.Next() {
+		var i ReconDiscrepanciesOfRunRow
+		if err := rows.Scan(
+			&i.WorkflowID,
+			&i.Kind,
+			&i.EffectType,
+			&i.ProviderRefs,
+			&i.ProviderAmount,
+			&i.LedgerAmount,
+			&i.Parked,
+			&i.Detail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const reconRunByID = `-- name: ReconRunByID :one
+SELECT id, window_from, window_to, finished_at, records, workflows, in_flight, discrepancies
+FROM recon_runs WHERE id = $1 AND status = 'SUCCEEDED'
+`
+
+type ReconRunByIDRow struct {
+	ID            uuid.UUID
+	WindowFrom    pgtype.Timestamptz
+	WindowTo      pgtype.Timestamptz
+	FinishedAt    pgtype.Timestamptz
+	Records       int32
+	Workflows     int32
+	InFlight      int32
+	Discrepancies int32
+}
+
+func (q *Queries) ReconRunByID(ctx context.Context, id uuid.UUID) (ReconRunByIDRow, error) {
+	row := q.db.QueryRow(ctx, reconRunByID, id)
+	var i ReconRunByIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.WindowFrom,
+		&i.WindowTo,
+		&i.FinishedAt,
+		&i.Records,
+		&i.Workflows,
+		&i.InFlight,
+		&i.Discrepancies,
+	)
+	return i, err
 }
 
 const requeueOutboxEvent = `-- name: RequeueOutboxEvent :execrows

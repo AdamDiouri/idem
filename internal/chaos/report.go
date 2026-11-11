@@ -6,7 +6,9 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,8 +81,10 @@ type Report struct {
 	Shop          ShopCounts     `json:"shop"`
 	ShopFaultHits map[string]int `json:"shop_fault_hits"`
 	Outbox        map[string]int `json:"outbox"`
-	Passed        bool           `json:"passed"`
-	Reasons       []string       `json:"reasons"`
+	// Recon is the campaign's closing reconciliation (slice 2.6).
+	Recon   *ReconSummary `json:"recon,omitempty"`
+	Passed  bool          `json:"passed"`
+	Reasons []string      `json:"reasons"`
 }
 
 // Evaluate sets Passed and Reasons. A run passes only if every check holds AND
@@ -192,6 +196,14 @@ func (r *Report) Evaluate() {
 		add("vacuous: provider faults were set but never fired")
 	}
 	r.evaluateShop(add)
+	if r.Recon != nil {
+		switch {
+		case r.Recon.Error != "":
+			add("reconciliation failed: %s", r.Recon.Error)
+		case r.Recon.Workflows == 0:
+			add("vacuous: reconciliation compared no workflow")
+		}
+	}
 	if (r.Config.Failpoints != "" || r.Config.APIFailpoints != "" || r.Config.RelayFailpoints != "") && r.FailpointExits == 0 {
 		add("vacuous: failpoints were armed but none fired (binary built with -tags nofailpoint?)")
 	}
@@ -299,6 +311,10 @@ func (r *Report) Text() string {
 	fmt.Fprintf(&b, "webhooks: %d applied, %d duplicates, %d deferred, %d stale delivered (%d ignored as stale), %d in flight at the verdict\n",
 		r.Webhooks.Applied, r.Webhooks.Duplicates, r.Webhooks.Deferred, r.Webhooks.StaleDelivered, r.Webhooks.StaleIgnored, r.WebhooksInFlight)
 
+	if r.Recon != nil {
+		fmt.Fprintf(&b, "reconciliation: run %s, %d workflows (%d in flight), %d discrepancies (%d parked)%s\n",
+			r.Recon.RunID, r.Recon.Workflows, r.Recon.InFlight, r.Recon.Discrepancies, r.Recon.Parked, map[bool]string{true: ", error: " + r.Recon.Error}[r.Recon.Error != ""])
+	}
 	if r.Config.Relays > 0 {
 		fmt.Fprintf(&b, "shop: %d outcomes learned, %d redeliveries deduplicated; shop fault hits: %v; outbox: %v\n",
 			r.Shop.Events, r.Shop.Duplicates, r.ShopFaultHits, r.Outbox)
@@ -461,4 +477,27 @@ func (r *Report) evaluateShop(add func(string, ...any)) {
 			add("vacuous: shop fault %s never fired", mode)
 		}
 	}
+}
+
+// ReconSummary is what the campaign's `idem reconcile` reported.
+type ReconSummary struct {
+	RunID         string `json:"run_id"`
+	Records       int    `json:"records"`
+	Workflows     int    `json:"workflows"`
+	InFlight      int    `json:"in_flight"`
+	Discrepancies int    `json:"discrepancies"`
+	Parked        int    `json:"parked"`
+	Error         string `json:"error,omitempty"`
+}
+
+var reconLine = regexp.MustCompile(`run ([0-9a-f-]{36}): (\d+) records, (\d+) workflows \((\d+) in flight\), (\d+) discrepancies \((\d+) parked\)`)
+
+// parseReconOutput reads the run line `idem reconcile` prints.
+func parseReconOutput(out string) (ReconSummary, error) {
+	m := reconLine.FindStringSubmatch(out)
+	if m == nil {
+		return ReconSummary{}, fmt.Errorf("no run line in reconcile output: %q", out)
+	}
+	n := func(i int) int { v, _ := strconv.Atoi(m[i]); return v }
+	return ReconSummary{RunID: m[1], Records: n(2), Workflows: n(3), InFlight: n(4), Discrepancies: n(5), Parked: n(6)}, nil
 }

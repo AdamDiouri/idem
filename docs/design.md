@@ -446,6 +446,16 @@ A workflow's outcome (`workflow.succeeded`, `workflow.failed`, `workflow.compens
 
 The **relay** (`idem relay`, any number may run) delivers each `PENDING` event to its client's webhook URL: it claims the row under a lease fenced by `lease_epoch` (D7), `POST`s the frozen payload signed with the client's secret (`Idem-Signature`, the inbound scheme), and records `DELIVERED`, a retry with backoff, `DEAD` after `IDEM_RELAY_MAX_ATTEMPTS`, or `NO_ENDPOINT` for a client without a URL (D19). Delivery is at least once (D14): a relay that crashes after the shop answered sends again, with the same `Idem-Event-Id`. It never follows redirects and reads at most 4 KiB of an answer. Operators list and resend events with `idem admin outbox`. Events backfilled at the 2.4 upgrade are `SKIPPED`: not announced, but resendable. Invariant I9 checks in chaos that a misbehaving shop ends up knowing exactly idem's outcomes.
 
+### 11.3b Reconciliation (M2 slice 2.6, D15)
+
+`idem reconcile` compares the provider's own record of money movements (its balance-transactions report, never the test oracle) with the ledger and the steps, and records every difference in `recon_runs` and `recon_discrepancies`. It changes nothing else.
+
+- **What is compared:** for each workflow and effect type, the provider's records against the postings, whose `provider_receivable` entry is signed exactly like the provider's amount (charge `+amount`, payout `−(amount − fee)`, refund `−amount`).
+- **Kinds, one per workflow and type, by precedence:** `duplicate_effect` > `amount_mismatch` > `status_mismatch` (money moved for a step recorded `FAILED_PERMANENT`) > `missing_in_ledger` > `missing_at_provider`.
+- **Per movement, in a snapshot:** each provider movement created in the window must have its posting (matched through the step's `provider_ref`), and each posting created in the window its movement, looked for up to `IDEM_RECON_MARGIN` (24h) before it; history outside the window is never judged. idem's state is read first, in one read-only repeatable-read snapshot held while the report is fetched: a posting in it already has its movement, and a later movement belongs to a step the snapshot shows in flight (skipped, not a difference). Parked workflows are reported and flagged.
+- **Open until covered:** a discrepancy stays open (view `recon_open_discrepancies`) until a later successful run whose window contains it does not find it again.
+- **Surfaces:** `idem admin recon list`, the `RECON` column of `idem admin list`, the sweeper's gauges, alerts `IdemReconciliationDrift` and `IdemReconciliationStale`; compose runs it every 10 minutes. Every chaos campaign ends with it (invariant RECON).
+
 ### 11.4 Admin actions (CLI, audited)
 As built in slice 1.6.
 - **Safeguards on every mutating action:**
@@ -515,6 +525,7 @@ The heart of the design. Every row should eventually map to at least one automat
 | **I6** | Every inbound idempotency key maps to exactly one workflow. | DB |
 | **I7** | `SUCCEEDED` ⇒ charge+payout effects at provider; `COMPENSATED` ⇒ charge+refund of the same amount, no payout; `FAILED` ⇒ no effects; `NEEDS_ATTENTION` with the payout parked as `permanent_after_in_doubt` ⇒ the charge only. | DB × oracle |
 | **I8–I11** | Milestone 2: outbox, shop view, webhook inbox, webhook acknowledgement. See the [M2 design](superpowers/specs/2026-11-10-milestone-2-design.md) §9. | DB × oracles |
+| **RECON** | Milestone 2 (2.6): the campaign's closing `idem reconcile` reports no difference outside parked workflows, and exactly the differences between the oracle and the ledger for parked ones. | Reconciliation tables × oracle |
 
 `NEEDS_ATTENTION` workflows are allowed by I4 but listed in the report — a run that produces many of them is a design smell even if no invariant breaks.
 
@@ -626,7 +637,7 @@ Each decision has an architecture decision record in [`docs/adr/`](adr/README.md
 | [D12](adr/0012-workers-poll-waiting-payouts.md) | (M2) Workers poll waiting payouts, not the sweeper | Workers already own every provider call, leases and fencing; the sweeper stays database-only | Sweeper polls |
 | [D13](adr/0013-outbox-written-in-transition.md) | (M2, built 2.4) The outbox is written inside `transitionWorkflow`, in the transaction of the terminal transition | Every path that ends a workflow emits exactly one event, and none can forget | Publish from each code path (dual write) |
 | [D14](adr/0014-at-least-once-outbound-delivery.md) | (M2, built 2.5) Outbound delivery is at least once, with a stable event ID the shop deduplicates on | Exactly-once over HTTP is impossible without the receiver; this is how real providers do it | At most once; claiming exactly once |
-| [D15](adr/0015-reconciliation-only-reports.md) | (M2, planned 2.6) Reconciliation only reports | When ledger and provider disagree, idem cannot know which is right; humans resolve with evidence | Auto-correct the ledger |
+| [D15](adr/0015-reconciliation-only-reports.md) | (M2, built 2.6) Reconciliation only reports | When ledger and provider disagree, idem cannot know which is right; humans resolve with evidence | Auto-correct the ledger |
 | [D16](adr/0016-contradictory-news-never-flips-terminal-state.md) | (M2) Contradictory provider news never flips a terminal state; it is re-checked with the provider, and only a real disagreement pages | Late and reordered webhooks are normal; flipping on them is how money moves twice | Last event wins |
 | [D17](adr/0017-polls-never-create-doubt.md) | (M2) Polls are attempts of kind `poll` and never create doubt; the pivot rule reads the history of send attempts | A `GET` cannot move money; counting a crashed poll as doubt would park clean failures | Treat every attempt alike |
 | [D18](adr/0018-news-about-parked-steps-is-evidence.md) | (M2) Provider news about a parked step is evidence for a human, never an automatic resolution | Money decisions made under doubt end with a human, who sees the answer | Auto-resolve parked steps |

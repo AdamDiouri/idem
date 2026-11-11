@@ -103,7 +103,8 @@ A *shop* asks idem to take €100 from a *customer* and pay it, minus a *fee*, t
 - **Workflow view.** What a shop is allowed to see of a workflow: its ID, a public `status` (`processing`, `succeeded`, `failed`, `compensated`), a `reason` for failures, amounts and timestamps. No internal details. Defined once, as the SQL function `workflow_view`, used by both `GET /workflows/{id}` and the outbox.
 - **Relay.** The process (`idem relay`) that delivers outbox events to each shop's webhook URL, signed with that shop's secret, retrying with backoff. At-least-once: a shop may receive an event twice and deduplicates on its ID (D14). *Code:* `internal/relay/`.
 - **Outbox event statuses.** `PENDING` (waiting for the relay), `DELIVERED` (the shop answered `2xx`), `DEAD` (the relay gave up after its retry budget; an operator can resend it), `NO_ENDPOINT` (the client has no webhook URL; it may poll `GET` instead, D19), `SKIPPED` (an outcome from before the outbox existed, deliberately not announced at upgrade).
-- **Reconciliation** *(slice 2.6)*. A job that compares idem's ledger with the provider's own records and reports every difference without changing anything (D15).
+- **Reconciliation.** The job (`idem reconcile`) that compares idem's ledger with the provider's own record of money movements (its *balance-transactions report*) and reports every difference without changing anything (D15). *Code:* `internal/recon/`.
+- **Discrepancy kinds.** `missing_in_ledger` (the provider moved money idem never recorded), `missing_at_provider` (idem posted a movement the provider has no record of), `amount_mismatch`, `duplicate_effect` (two of the same movement for one workflow), `status_mismatch` (money moved for a step idem recorded as refused).
 
 ## When a human must decide
 
@@ -125,7 +126,8 @@ A *shop* asks idem to take €100 from a *customer* and pay it, minus a *fee*, t
   - I7: each outcome matches the money that moved;
   - I8: one outbox event per finished workflow;
   - I9: the shop ends up knowing exactly idem's outcomes;
-  - I10 and I11: the webhook inbox handled every event correctly.
+  - I10 and I11: the webhook inbox handled every event correctly;
+  - RECON: the closing reconciliation found no difference outside parked workflows, and exactly the real ones for parked workflows.
 
   Full list in [design §13](design.md#13-invariants-checked-after-every-chaos-run) and the [M2 design §9](superpowers/specs/2026-11-10-milestone-2-design.md).
 - **Oracle.** An independent record of the truth used to check invariants: the fake provider's log of effects it really performed (`GET /_effects`) and of webhooks it sent (`GET /_webhooks`). It counts per workflow, not per key, so a bug that invents a new key is still caught.

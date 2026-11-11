@@ -399,6 +399,49 @@ func (q *Queries) ReclaimExpiredLeases(ctx context.Context) (int64, error) {
 	return reclaimed, err
 }
 
+const reconLastSuccess = `-- name: ReconLastSuccess :one
+SELECT COALESCE(EXTRACT(EPOCH FROM max(finished_at)), 0)::bigint AS finished_unix FROM recon_runs WHERE status = 'SUCCEEDED'
+`
+
+func (q *Queries) ReconLastSuccess(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, reconLastSuccess)
+	var finished_unix int64
+	err := row.Scan(&finished_unix)
+	return finished_unix, err
+}
+
+const reconStats = `-- name: ReconStats :many
+SELECT kind, parked, count(*)::int AS n FROM recon_open_discrepancies GROUP BY kind, parked
+`
+
+type ReconStatsRow struct {
+	Kind   string
+	Parked bool
+	N      int32
+}
+
+// For the sweeper's gauges: discrepancies still open (recon_open_discrepancies:
+// not resolved by a later run that covered them), by kind and parked flag.
+func (q *Queries) ReconStats(ctx context.Context) ([]ReconStatsRow, error) {
+	rows, err := q.db.Query(ctx, reconStats)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ReconStatsRow
+	for rows.Next() {
+		var i ReconStatsRow
+		if err := rows.Scan(&i.Kind, &i.Parked, &i.N); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const stepStatusCounts = `-- name: StepStatusCounts :many
 SELECT name, status, count(*)::int AS n FROM steps GROUP BY name, status
 `

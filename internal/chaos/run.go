@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AdamDiouri/idem/internal/fakeprovider"
@@ -437,6 +438,21 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (rep Report, err 
 			return rep, err
 		}
 	}
+	// Slice 2.6: close with a reconciliation over the whole campaign, through
+	// the production path (the provider's report), judged against the oracle.
+	rep.Recon = runReconcile(ctx, idem, pg.AppDSN(), providerURL, start.Add(-time.Minute), time.Now().Add(time.Minute))
+	if rep.Recon.Error == "" {
+		runID, err := uuid.Parse(rep.Recon.RunID)
+		if err != nil {
+			return rep, err
+		}
+		reconViolations, err := invariants.CheckReconciliation(ctx, pool, runID, effects)
+		if err != nil {
+			return rep, err
+		}
+		rep.Violations = append(rep.Violations, reconViolations...)
+	}
+
 	rep.Outbox = map[string]int{}
 	orows, err := pool.Query(ctx, `SELECT status, count(*) FROM outbox GROUP BY status`)
 	if err != nil {
@@ -783,4 +799,24 @@ func (ev *Event) onRunning(procs []*Proc, f func(*Proc) error) error {
 		}
 	}
 	return err
+}
+
+// runReconcile runs `idem reconcile` over [from, to) and reads its run line.
+// Exit code 3 (discrepancies on workflows that are not parked) still yields a
+// run; CheckReconciliation judges it.
+func runReconcile(ctx context.Context, idem, dsn, providerURL string, from, to time.Time) *ReconSummary {
+	cmd := exec.CommandContext(ctx, idem, "reconcile", "--from", from.UTC().Format(time.RFC3339), "--to", to.UTC().Format(time.RFC3339)) //nolint:gosec // harness-controlled binary
+	cmd.Env = append(os.Environ(), "IDEM_DATABASE_URL="+dsn, "IDEM_PROVIDER_URL="+providerURL)
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 3) {
+		return &ReconSummary{Error: fmt.Sprintf("%v: %s", err, strings.TrimSpace(stderr.String()))}
+	}
+	s, perr := parseReconOutput(stdout.String())
+	if perr != nil {
+		return &ReconSummary{Error: perr.Error()}
+	}
+	return &s
 }

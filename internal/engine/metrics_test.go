@@ -315,3 +315,32 @@ func TestSweeper_PrunesOldInboxEvents(t *testing.T) {
 	<-done
 	require.Equal(t, 4, h.count(t, `SELECT count(*) FROM webhook_inbox`), "evidence, conflicts and recent events stay")
 }
+
+// Slice 2.6: the latest successful reconciliation, exported by the sweeper
+// (the reconcile job is short-lived and nothing scrapes it).
+func TestSweeper_ExportsReconGauges(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	old, latest := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	for _, run := range []uuid.UUID{old, latest} {
+		_, err := h.pool.Exec(ctx, `INSERT INTO recon_runs (id, window_from, window_to) VALUES ($1, now() - interval '1 hour', now())`, run)
+		require.NoError(t, err)
+		_, err = h.pool.Exec(ctx, `UPDATE recon_runs SET status = 'SUCCEEDED', finished_at = now() WHERE id = $1`, run)
+		require.NoError(t, err)
+	}
+	insert := func(run uuid.UUID, kind string, parked bool) {
+		_, err := h.pool.Exec(ctx, `INSERT INTO recon_discrepancies (id, run_id, kind, effect_type, parked, detail, item_key, item_at)
+			VALUES (gen_random_uuid(), $1, $2, 'payout', $3, 'x', gen_random_uuid()::text, now() - interval '30 minutes')`, run, kind, parked)
+		require.NoError(t, err)
+	}
+	insert(old, "amount_mismatch", false) // superseded by the latest run
+	insert(latest, "missing_in_ledger", false)
+	insert(latest, "missing_in_ledger", true)
+	insert(latest, "missing_in_ledger", true)
+
+	m := sweepOnce(t, h)
+	require.Equal(t, 1.0, testutil.ToFloat64(m.ReconDiscrepancies.WithLabelValues("missing_in_ledger", "false")))
+	require.Equal(t, 2.0, testutil.ToFloat64(m.ReconDiscrepancies.WithLabelValues("missing_in_ledger", "true")))
+	require.Zero(t, testutil.ToFloat64(m.ReconDiscrepancies.WithLabelValues("amount_mismatch", "false")))
+	require.InDelta(t, float64(time.Now().Unix()), testutil.ToFloat64(m.ReconLastSuccess), 60)
+}
