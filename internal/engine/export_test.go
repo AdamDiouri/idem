@@ -23,3 +23,6 @@ func SetBeforeRecordHookFailure(o *WorkerOptions, f func()) { o.beforeRecordHook
 func TransitionWorkflow(ctx context.Context, tx pgx.Tx, id uuid.UUID, from []string, to string) error {
 	return transitionWorkflow(ctx, db.New(tx), id, from, to)
 }
+
+// IsTerminal exposes terminal (tests only).
+func IsTerminal(status string) bool { return terminal(status) }

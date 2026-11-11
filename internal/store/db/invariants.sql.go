@@ -199,7 +199,7 @@ func (q *Queries) NeedsAttentionWorkflows(ctx context.Context) ([]uuid.UUID, err
 
 const nonTerminalWorkflows = `-- name: NonTerminalWorkflows :many
 SELECT id, status, updated_at FROM workflows
-WHERE status IN ('PENDING', 'RUNNING', 'COMPENSATING') ORDER BY updated_at
+WHERE workflow_is_active(status) ORDER BY updated_at
 `
 
 type NonTerminalWorkflowsRow struct {
@@ -426,7 +426,7 @@ func (q *Queries) PendingOutboxEvents(ctx context.Context) ([]PendingOutboxEvent
 }
 
 const terminalWorkflows = `-- name: TerminalWorkflows :many
-SELECT id, status FROM workflows WHERE status IN ('SUCCEEDED', 'FAILED', 'COMPENSATED')
+SELECT id, status FROM workflows WHERE workflow_is_terminal(status)
 `
 
 type TerminalWorkflowsRow struct {

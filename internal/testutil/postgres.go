@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -127,9 +128,10 @@ func NewPool(t *testing.T, dsn string) *pgxpool.Pool {
 	return pool
 }
 
-// SetWorkflowStatus moves a workflow to status as a real transition does: a
-// terminal status gets its outbox event in the same transaction (D13; the
-// database refuses one without the other). set adds SQL assignments to the
+// SetWorkflowStatus moves a workflow to status as real transitions do: along
+// allowed edges only (slice 2.5b; e.g. PENDING → RUNNING → COMPENSATING →
+// COMPENSATED), and a terminal status gets its outbox event in the same
+// transaction (D13). A state no legal path reaches needs Plant. set adds SQL assignments to the
 // UPDATE, e.g. "updated_at = now() - interval '2 hours'".
 func SetWorkflowStatus(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, status string, set ...string) {
 	t.Helper()
@@ -139,12 +141,26 @@ func SetWorkflowStatus(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, status st
 		t.Fatalf("begin: %v", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var from string
+	if err := tx.QueryRow(ctx, `SELECT status FROM workflows WHERE id = $1`, id).Scan(&from); err != nil {
+		t.Fatalf("set workflow status: %v", err)
+	}
+	path, err := legalPath(ctx, tx, from, status)
+	if err != nil {
+		t.Fatalf("set workflow status: %v", err)
+	}
 	assignments := "status = $2"
 	for _, s := range set {
 		assignments += ", " + s
 	}
-	if _, err := tx.Exec(ctx, `UPDATE workflows SET `+assignments+` WHERE id = $1`, id, status); err != nil {
-		t.Fatalf("set workflow status: %v", err)
+	for i, next := range path {
+		sql := `UPDATE workflows SET status = $2 WHERE id = $1`
+		if i == len(path)-1 {
+			sql = `UPDATE workflows SET ` + assignments + ` WHERE id = $1`
+		}
+		if _, err := tx.Exec(ctx, sql, id, next); err != nil {
+			t.Fatalf("set workflow status %s → %s: %v", from, next, err)
+		}
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO outbox (id, client_id, workflow_id, type, payload)
 		SELECT gen_random_uuid(), client_id, id, workflow_event_type(status), convert_to(workflow_view(id), 'UTF8')
@@ -155,4 +171,62 @@ func SetWorkflowStatus(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, status st
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit workflow status: %v", err)
 	}
+}
+
+// Plant runs one statement as the table owner with every trigger off
+// (session_replication_role = replica): for fixtures that need a state no
+// legal path reaches, such as a step already DEAD or a corrupted row. The
+// services can never do this; only tests, through this helper.
+func Plant(t *testing.T, dsn, sql string, args ...any) {
+	t.Helper()
+	ctx := context.Background()
+	owner := NewOwnerPool(t, dsn)
+	tx, err := owner.Begin(ctx)
+	if err != nil {
+		t.Fatalf("plant: begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
+		t.Fatalf("plant: %v", err)
+	}
+	if _, err := tx.Exec(ctx, sql, args...); err != nil {
+		t.Fatalf("plant: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("plant: commit: %v", err)
+	}
+}
+
+// legalPath is the shortest sequence of allowed workflow transitions from one
+// status to another (empty when equal), asking the database's own table
+// (workflow_transition_allowed), so tests never encode a second copy.
+func legalPath(ctx context.Context, tx pgx.Tx, from, to string) ([]string, error) {
+	statuses := []string{"PENDING", "RUNNING", "SUCCEEDED", "FAILED", "COMPENSATING", "COMPENSATED", "NEEDS_ATTENTION"}
+	prev := map[string]string{from: ""}
+	queue := []string{from}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == to {
+			var path []string
+			for s := to; s != from; s = prev[s] {
+				path = append([]string{s}, path...)
+			}
+			return path, nil
+		}
+		for _, next := range statuses {
+			if _, seen := prev[next]; seen {
+				continue
+			}
+			var ok bool
+			if err := tx.QueryRow(ctx, `SELECT workflow_transition_allowed($1, $2)`, cur, next).Scan(&ok); err != nil {
+				return nil, err
+			}
+			if ok {
+				prev[next] = cur
+				queue = append(queue, next)
+			}
+		}
+	}
+	return nil, fmt.Errorf("no allowed path from %s to %s (use testutil.Plant for a fixture state)", from, to)
 }

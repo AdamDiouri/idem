@@ -14,7 +14,7 @@ WITH next AS (
   WHERE st.status IN ('PENDING', 'IN_DOUBT', 'AWAITING_CALLBACK')
     AND st.run_after <= now()
     AND st.name = ANY(sqlc.arg(names)::text[])
-    AND wf.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+    AND workflow_is_active(wf.status)
   ORDER BY st.run_after
   LIMIT 1
   FOR UPDATE OF st SKIP LOCKED
@@ -144,7 +144,7 @@ SELECT id, status, idle_ms FROM (
     SELECT max(LEAST(ws.callback_deadline, now())) AS waiting_until
     FROM steps ws WHERE ws.workflow_id = w.id AND ws.status = 'AWAITING_CALLBACK'
   ) c ON true
-  WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING')
+  WHERE workflow_is_active(w.status)
 ) idle
 WHERE idle_ms > sqlc.arg(older_than_ms)::bigint
 ORDER BY idle_ms DESC;
@@ -173,7 +173,7 @@ LEFT JOIN LATERAL (
   SELECT max(LEAST(ws.callback_deadline, now())) AS waiting_until
   FROM steps ws WHERE ws.workflow_id = w.id AND ws.status = 'AWAITING_CALLBACK'
 ) c ON true
-WHERE w.status IN ('PENDING', 'RUNNING', 'COMPENSATING');
+WHERE workflow_is_active(w.status);
 
 -- name: StepsOverAttemptLimit :one
 -- Unfinished steps claimed more than once past their limit. (A crash or lost

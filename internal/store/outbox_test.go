@@ -31,8 +31,8 @@ func insertWorkflowRaw(t *testing.T, pool *pgxpool.Pool, client, status string) 
 // leave it: a terminal one gets its outbox event in the same transaction.
 func insertWorkflow(t *testing.T, pool *pgxpool.Pool, client, status string) uuid.UUID {
 	t.Helper()
-	id := insertWorkflowRaw(t, pool, client, "RUNNING")
-	testutil.SetWorkflowStatus(t, pool, id, status)
+	id := insertWorkflowRaw(t, pool, client, "PENDING")
+	testutil.SetWorkflowStatus(t, pool, id, status) // along allowed transitions
 	return id
 }
 

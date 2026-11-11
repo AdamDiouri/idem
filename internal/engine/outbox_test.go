@@ -165,3 +165,11 @@ func scalarTx(t *testing.T, tx pgx.Tx, wf uuid.UUID) int {
 	require.NoError(t, tx.QueryRow(context.Background(), `SELECT count(*) FROM outbox WHERE workflow_id = $1`, wf).Scan(&n))
 	return n
 }
+
+// Slice 2.5b: Go's terminal() and SQL's workflow_is_terminal() agree.
+func TestTerminal_GoAgreesWithSQL(t *testing.T) {
+	h := newHarness(t)
+	for _, s := range []string{"PENDING", "RUNNING", "SUCCEEDED", "FAILED", "COMPENSATING", "COMPENSATED", "NEEDS_ATTENTION"} {
+		require.Equal(t, scalar[bool](t, h.pool, `SELECT workflow_is_terminal($1)`, s), engine.IsTerminal(s), s)
+	}
+}
