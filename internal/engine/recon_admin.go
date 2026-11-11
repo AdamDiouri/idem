@@ -34,10 +34,13 @@ type ReconDiscrepancy struct {
 	LedgerAmount   *int64     `json:"ledger_amount,omitempty"`
 	Parked         bool       `json:"parked"`
 	Detail         string     `json:"detail"`
+	FoundAt        time.Time  `json:"found_at,omitzero"` // open discrepancies: when it was last found
 }
 
-// ListReconciliation returns a successful run and its discrepancies: runID,
-// or the latest one when nil (ErrNotActionable if there is none).
+// ListReconciliation returns the open discrepancies (found, and not resolved
+// by a later run covering them) with the latest successful run as context; or,
+// with runID, that run and exactly what it found. ErrNotActionable if no run
+// has succeeded.
 func (a *Admin) ListReconciliation(ctx context.Context, runID *uuid.UUID) (ReconRun, []ReconDiscrepancy, error) {
 	q := db.New(a.pool)
 	var row db.LatestReconRunRow
@@ -57,6 +60,18 @@ func (a *Admin) ListReconciliation(ctx context.Context, runID *uuid.UUID) (Recon
 	}
 	run := ReconRun{ID: row.ID, WindowFrom: row.WindowFrom.Time, WindowTo: row.WindowTo.Time, FinishedAt: row.FinishedAt.Time,
 		Records: row.Records, Workflows: row.Workflows, InFlight: row.InFlight, Discrepancies: row.Discrepancies}
+	if runID == nil {
+		rows, err := q.OpenReconDiscrepancies(ctx)
+		if err != nil {
+			return ReconRun{}, nil, fmt.Errorf("open discrepancies: %w", err)
+		}
+		out := make([]ReconDiscrepancy, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, ReconDiscrepancy{WorkflowID: r.WorkflowID, Kind: r.Kind, EffectType: r.EffectType, ProviderRefs: r.ProviderRefs,
+				ProviderAmount: r.ProviderAmount, LedgerAmount: r.LedgerAmount, Parked: r.Parked, Detail: r.Detail, FoundAt: r.FoundAt.Time})
+		}
+		return run, out, nil
+	}
 	rows, err := q.ReconDiscrepanciesOfRun(ctx, row.ID)
 	if err != nil {
 		return ReconRun{}, nil, fmt.Errorf("discrepancies: %w", err)

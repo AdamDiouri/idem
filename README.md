@@ -181,7 +181,7 @@ idem's ledger and the provider are two separate records of the same money. `idem
 idem reconcile                                  # the last complete hour, ending IDEM_RECON_LAG ago
 idem reconcile --from 2026-11-11T10:00:00Z --to 2026-11-11T12:00:00Z
 # run 0193…: 412 records, 205 workflows (3 in flight), 0 discrepancies (0 parked)
-idem admin recon list                           # the latest run's discrepancies
+idem admin recon list                           # open discrepancies (--run ID: exactly what one run found)
 ```
 
 - **What counts as a difference**, one per workflow and kind of movement:
@@ -193,9 +193,10 @@ idem admin recon list                           # the latest run's discrepancies
 - **Not yet final is never a difference:** a workflow with a step still running or waiting is skipped (`in flight`).
 - **Parked workflows are reported, flagged `parked`,** and shown next to them in `idem admin list` (column `RECON`): "the provider shows a payout the ledger doesn't have" is exactly what an operator needs to choose `confirm-step` over `compensate`.
 - **Exit codes:** `0` clean, `3` differences on workflows that are not parked, `1` the run failed (e.g. the provider was unreachable; it then reports nothing).
-- **Timing:** a payout settles at the provider before idem posts it. The window decides which workflows are reconciled (those with a movement or a posting in it); each is compared on everything known about it, reading the provider's report `IDEM_RECON_MARGIN` (`1h`) beyond both edges.
+- **Per movement, not per workflow:** each provider movement created in the window must have its posting (matched through the step's provider reference), and each posting created in the window its movement, looked for up to `IDEM_RECON_MARGIN` (`24h`) before the window. A payout settling days after its charge is not a difference: each is judged in its own window. idem's state is read first, in one read-only snapshot, so a movement made while the report is read belongs to a step still in flight, never to "missing".
+- **Open until fixed:** a difference stays open (in the gauge, the alert and `idem admin recon list`) until a later run whose window contains it no longer finds it. The next hour's run, or an operator's run over a quiet window, resolves nothing.
 
-Compose runs it every 10 minutes; the sweeper exports the latest run as `idem_reconciliation_discrepancies{kind,parked}` and `idem_reconciliation_last_success_timestamp_seconds`, which the alerts watch.
+Compose runs it every 10 minutes; the sweeper exports the open discrepancies as `idem_reconciliation_discrepancies{kind,parked}` and `idem_reconciliation_last_success_timestamp_seconds`, which the alerts watch.
 
 ## Operate it
 
@@ -364,7 +365,8 @@ Worker, sweeper and `check` (no API tokens needed):
 | `IDEM_RELAY_CONCURRENCY` | `4` | Deliveries at once per relay |
 | `IDEM_RELAY_PER_CLIENT` | `2` | At most this many of them for one client, so a slow shop cannot delay the others |
 | `IDEM_RECON_LAG` | `5m` | Reconcile: the default window is the last complete hour ending this long ago |
-| `IDEM_RECON_MARGIN` | `1h` | Reconcile: how far beyond the window's edges the provider's report is read (late settlements) |
+| `IDEM_RECON_MARGIN` | `24h` | Reconcile: how far before the window the provider's report is read (a posting can follow its movement by this long) |
+| `IDEM_RECON_TIMEOUT` | `10m` | Reconcile: the deadline of one run |
 | `IDEM_RELAY_TIMEOUT` | `10s` | How long a shop has to answer; plus 2s must stay below the lease |
 | `IDEM_RELAY_LEASE_TTL` | `30s` | How long a relay owns an event while delivering it |
 | `IDEM_RELAY_MAX_ATTEMPTS` | `15` | Deliveries before an event is `DEAD` |

@@ -478,7 +478,7 @@ func adminReconCmd() *cobra.Command {
 	var runFlag string
 	list := &cobra.Command{
 		Use:   "list",
-		Short: "List the discrepancies of the latest successful reconciliation (or --run)",
+		Short: "List open discrepancies (not resolved by a later run covering them), or exactly what one --run found",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var runID *uuid.UUID
@@ -500,7 +500,7 @@ func adminReconCmd() *cobra.Command {
 					enc.SetIndent("", "  ")
 					return enc.Encode(map[string]any{"run": run, "discrepancies": ds})
 				}
-				_, _ = fmt.Fprintf(out, "run %s: window %s to %s, finished %s; %d workflows (%d in flight), %d discrepancies\n\n",
+				_, _ = fmt.Fprintf(out, "latest run %s: window %s to %s, finished %s; %d workflows (%d in flight), %d discrepancies found\n\n",
 					run.ID, run.WindowFrom.UTC().Format(time.RFC3339), run.WindowTo.UTC().Format(time.RFC3339),
 					run.FinishedAt.UTC().Format(time.RFC3339), run.Workflows, run.InFlight, run.Discrepancies)
 				tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)

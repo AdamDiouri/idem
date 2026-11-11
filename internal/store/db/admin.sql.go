@@ -200,11 +200,9 @@ SELECT DISTINCT ON (w.id)
   -- The provider's latest news about this step (D18), if any.
   COALESCE((SELECT i.note FROM webhook_inbox i WHERE i.step_id = s.id AND i.status = 'EVIDENCE'
             ORDER BY i.processed_at DESC LIMIT 1), '')::text AS evidence,
-  -- What the latest successful reconciliation found for this workflow (slice 2.6).
+  -- What reconciliation found open for this workflow (slice 2.6).
   COALESCE((SELECT string_agg(d.kind || ' ' || d.effect_type || ' ' || COALESCE(d.provider_amount::text, '-'), '; ' ORDER BY d.effect_type)
-            FROM recon_discrepancies d
-            WHERE d.workflow_id = w.id
-              AND d.run_id = (SELECT r.id FROM recon_runs r WHERE r.status = 'SUCCEEDED' ORDER BY r.finished_at DESC LIMIT 1)), '')::text AS reconciliation
+            FROM recon_open_discrepancies d WHERE d.workflow_id = w.id), '')::text AS reconciliation
 FROM workflows w
 JOIN steps s ON s.workflow_id = w.id AND s.status IN ('DEAD', 'FAILED_PERMANENT')
 WHERE w.status = 'NEEDS_ATTENTION'
@@ -399,6 +397,53 @@ func (q *Queries) NextStepGeneration(ctx context.Context, arg NextStepGeneration
 	var generation int32
 	err := row.Scan(&generation)
 	return generation, err
+}
+
+const openReconDiscrepancies = `-- name: OpenReconDiscrepancies :many
+SELECT workflow_id, kind, effect_type, provider_refs, provider_amount, ledger_amount, parked, detail, found_at
+FROM recon_open_discrepancies ORDER BY parked, found_at, kind, effect_type
+`
+
+type OpenReconDiscrepanciesRow struct {
+	WorkflowID     *uuid.UUID
+	Kind           string
+	EffectType     string
+	ProviderRefs   []string
+	ProviderAmount *int64
+	LedgerAmount   *int64
+	Parked         bool
+	Detail         string
+	FoundAt        pgtype.Timestamptz
+}
+
+func (q *Queries) OpenReconDiscrepancies(ctx context.Context) ([]OpenReconDiscrepanciesRow, error) {
+	rows, err := q.db.Query(ctx, openReconDiscrepancies)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OpenReconDiscrepanciesRow
+	for rows.Next() {
+		var i OpenReconDiscrepanciesRow
+		if err := rows.Scan(
+			&i.WorkflowID,
+			&i.Kind,
+			&i.EffectType,
+			&i.ProviderRefs,
+			&i.ProviderAmount,
+			&i.LedgerAmount,
+			&i.Parked,
+			&i.Detail,
+			&i.FoundAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const parkedStepOfWorkflow = `-- name: ParkedStepOfWorkflow :one

@@ -464,9 +464,10 @@ func (h harness) reconRun(t *testing.T, ago time.Duration, ds ...[4]string) uuid
 		id, ago.String(), len(ds))
 	require.NoError(t, err)
 	for _, d := range ds {
-		_, err := h.pool.Exec(ctx, `INSERT INTO recon_discrepancies (id, run_id, workflow_id, kind, effect_type, provider_refs, provider_amount, parked, detail)
-			VALUES (gen_random_uuid(), $1, $2, $3, $4, '{po_1}', -9825, $5, 'the provider moved -9825 (payout po_1) with no ledger posting')`,
-			id, d[0], d[1], d[2], d[3] == "true")
+		_, err := h.pool.Exec(ctx, `INSERT INTO recon_discrepancies (id, run_id, workflow_id, kind, effect_type, provider_refs, provider_amount, parked, detail, item_key, item_at)
+			VALUES (gen_random_uuid(), $1, $2, $3, $4, '{po_1}', -9825, $5, 'the provider moved -9825 (payout po_1) with no ledger posting',
+			        $6, now() - interval '90 minutes')`,
+			id, d[0], d[1], d[2], d[3] == "true", d[0]+"|"+d[2])
 		require.NoError(t, err)
 	}
 	return id

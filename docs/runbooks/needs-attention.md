@@ -273,18 +273,23 @@ The event gets a fresh budget and the relay sends it at once, with the same `Ide
 
 ### IdemReconciliationDrift
 
-The latest reconciliation found differences between the provider's record of money movements and idem's ledger, on workflows that are **not** parked. This is the alert that says the books disagree. Nothing was changed automatically (D15). Start with:
+Reconciliation found differences between the provider's record of money movements and idem's ledger, on workflows that are **not** parked, and they are still open: no later run covering them has found them fixed. This is the alert that says the books disagree. Nothing was changed automatically (D15). Start with:
 
 ```bash
 idem admin recon list         # WORKFLOW, KIND, TYPE, PROVIDER and LEDGER amounts, DETAIL
 ```
 
 By kind:
-- **`missing_in_ledger`**: the provider moved money idem never recorded. If the workflow is unknown to idem (no workflow ID, or one idem has no row for), the money moved outside idem: find who made the request (the provider's idempotency key and metadata). If idem knows the workflow, check its steps and the provider's object: the effect happened, so the ledger must get it, through `confirm-step` once the workflow is parked, never by hand.
+- **`missing_in_ledger`**: the provider moved money idem never recorded.
+  - The workflow is unknown to idem (no workflow ID, or one idem has no row for): the money moved outside idem. Find who made the request (the provider's idempotency key and metadata) and recover it outside idem.
+  - The workflow is final (`SUCCEEDED`, `FAILED`, `COMPENSATED`): its saga already moved on, so this movement is extra (for example a request replayed under another key). Recover the money outside idem (refund the charge, claw back the payout) and record a correcting ledger transaction with finance; idem never rewrites its history.
+  - A parked workflow does not page here: its difference shows next to it in `idem admin list`, and `confirm-step` records the movement through the step's own hooks.
 - **`missing_at_provider`**: idem posted a movement the provider has no record of. Check the step's `provider_ref` at the provider; a provider-side reversal or a lost record needs the provider's support. Correct the ledger only with a new reversing transaction.
 - **`amount_mismatch`**: both sides recorded the movement with different amounts. Compare the request idem sent (the step's input and fee) with the provider's object.
 - **`duplicate_effect`**: two charges, payouts or refunds for one workflow. The customer or the merchant got money twice; recover it outside idem (refund the extra charge, claw back the extra payout) and record why.
 - **`status_mismatch`**: money moved for a step idem recorded as definitely refused. The provider said no and then did it anyway (or a later attempt did): treat it as `missing_in_ledger` on a workflow whose saga already moved on, and decide the recovery with finance.
+
+Once fixed, run `idem reconcile --from … --to …` over a window that contains the item: a run that covers it and no longer finds it resolves it, and the alert clears. A run over another window resolves nothing.
 
 Differences on **parked** workflows do not page here (the parked alert already does); they appear next to the workflow in `idem admin list` (column `RECON`) as evidence for the operator's choice.
 

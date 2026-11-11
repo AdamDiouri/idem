@@ -399,26 +399,29 @@ func (q *Queries) ReclaimExpiredLeases(ctx context.Context) (int64, error) {
 	return reclaimed, err
 }
 
+const reconLastSuccess = `-- name: ReconLastSuccess :one
+SELECT COALESCE(EXTRACT(EPOCH FROM max(finished_at)), 0)::bigint AS finished_unix FROM recon_runs WHERE status = 'SUCCEEDED'
+`
+
+func (q *Queries) ReconLastSuccess(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, reconLastSuccess)
+	var finished_unix int64
+	err := row.Scan(&finished_unix)
+	return finished_unix, err
+}
+
 const reconStats = `-- name: ReconStats :many
-WITH latest AS (
-  SELECT id, finished_at FROM recon_runs WHERE status = 'SUCCEEDED' ORDER BY finished_at DESC LIMIT 1
-)
-SELECT COALESCE(d.kind, '')::text AS kind, COALESCE(d.parked, false)::bool AS parked, count(d.id)::int AS n,
-       EXTRACT(EPOCH FROM l.finished_at)::bigint AS finished_unix
-FROM latest l LEFT JOIN recon_discrepancies d ON d.run_id = l.id
-GROUP BY d.kind, d.parked, l.finished_at
+SELECT kind, parked, count(*)::int AS n FROM recon_open_discrepancies GROUP BY kind, parked
 `
 
 type ReconStatsRow struct {
-	Kind         string
-	Parked       bool
-	N            int32
-	FinishedUnix int64
+	Kind   string
+	Parked bool
+	N      int32
 }
 
-// For the sweeper's gauges: the latest successful reconciliation's
-// discrepancies by kind and parked flag, and when it finished (one row with
-// an empty kind when it found none; no row if no run ever succeeded).
+// For the sweeper's gauges: discrepancies still open (recon_open_discrepancies:
+// not resolved by a later run that covered them), by kind and parked flag.
 func (q *Queries) ReconStats(ctx context.Context) ([]ReconStatsRow, error) {
 	rows, err := q.db.Query(ctx, reconStats)
 	if err != nil {
@@ -428,12 +431,7 @@ func (q *Queries) ReconStats(ctx context.Context) ([]ReconStatsRow, error) {
 	var items []ReconStatsRow
 	for rows.Next() {
 		var i ReconStatsRow
-		if err := rows.Scan(
-			&i.Kind,
-			&i.Parked,
-			&i.N,
-			&i.FinishedUnix,
-		); err != nil {
+		if err := rows.Scan(&i.Kind, &i.Parked, &i.N); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

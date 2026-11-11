@@ -78,6 +78,24 @@ type ReconDiscrepancy struct {
 	LedgerAmount   *int64
 	Parked         bool
 	Detail         string
+	ItemKey        string
+	ItemAt         pgtype.Timestamptz
+}
+
+type ReconOpenDiscrepancy struct {
+	ID             uuid.UUID
+	RunID          uuid.UUID
+	WorkflowID     *uuid.UUID
+	Kind           string
+	EffectType     string
+	ProviderRefs   []string
+	ProviderAmount *int64
+	LedgerAmount   *int64
+	Parked         bool
+	Detail         string
+	ItemKey        string
+	ItemAt         pgtype.Timestamptz
+	FoundAt        pgtype.Timestamptz
 }
 
 type ReconRun struct {

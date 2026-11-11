@@ -172,8 +172,7 @@ func TestRun_SkipsInFlightWorkflows(t *testing.T) {
 	e.submit(t, "cus_1", "mer_1")
 	e.drain(t, func(o *engine.WorkerOptions) { o.CallbackDeadline = time.Hour }) // the payout waits
 	res := e.run(t, e.start, time.Now().Add(time.Minute))
-	require.Equal(t, 1, res.InFlight)
-	require.Zero(t, res.Discrepancies)
+	require.Zero(t, res.Discrepancies, "a pending payout moved nothing; its charge matches")
 }
 
 // Review focus 1: a payout that settled after the window's end is matched
@@ -249,4 +248,57 @@ func TestRun_ChangesNothingElse(t *testing.T) {
 	before := snapshot()
 	e.run(t, e.start, time.Now().Add(time.Minute))
 	require.Equal(t, before, snapshot())
+}
+
+// Final review, C1: a payout settling long after its charge (beyond the
+// margin) is honest; only the window's own items are judged.
+func TestRun_SettlementLongerThanTheMargin(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t, fakeprovider.Options{PayoutSettle: 4 * time.Second})
+	wf := e.submit(t, "cus_1", "mer_1")
+	e.drain(t, func(o *engine.WorkerOptions) { o.CallbackDeadline = 5 * time.Second }) // charge, payout accepted
+	time.Sleep(5 * time.Second)
+	e.drain(t, nil) // polled: paid and posted
+	var status string
+	require.NoError(t, e.pool.QueryRow(ctx, `SELECT status FROM workflows WHERE id = $1`, wf).Scan(&status))
+	require.Equal(t, "SUCCEEDED", status)
+	var payoutAt time.Time
+	for _, eff := range e.fake.Effects() {
+		if eff.Type == "payout" {
+			payoutAt = eff.At
+		}
+	}
+	res, err := recon.Run(ctx, e.pool, e.client, payoutAt.Add(-500*time.Millisecond), time.Now().Add(time.Minute), recon.Options{Margin: 2 * time.Second})
+	require.NoError(t, err)
+	require.Zero(t, res.Discrepancies, "%v", e.discrepancies(t, res.RunID))
+}
+
+// lateReporter reads the report, then lets the world move on (a payout
+// settles and is posted) before the run reads anything else.
+type lateReporter struct {
+	inner *provider.Client
+	then  func()
+}
+
+func (l lateReporter) ListBalanceTransactions(ctx context.Context, from, to time.Time) ([]provider.BalanceTransaction, error) {
+	rows, err := l.inner.ListBalanceTransactions(ctx, from, to)
+	l.then()
+	return rows, err
+}
+
+// Final review, I3: idem's state is read before the report, in one snapshot,
+// so a posting made while the report is read is never "missing at provider".
+func TestRun_SnapshotBeforeReport(t *testing.T) {
+	e := newEnv(t, fakeprovider.Options{PayoutSettle: time.Hour})
+	e.submit(t, "cus_1", "mer_1")
+	e.drain(t, func(o *engine.WorkerOptions) { o.CallbackDeadline = time.Hour }) // the payout waits
+	reporter := lateReporter{inner: e.client, then: func() {
+		e.fake.SettleNow()
+		_, err := e.pool.Exec(context.Background(), `UPDATE steps SET run_after = now(), callback_deadline = now() WHERE name = 'payout'`)
+		require.NoError(t, err)
+		e.drain(t, nil) // polled: paid and posted, after the report was read
+	}}
+	res, err := recon.Run(context.Background(), e.pool, reporter, e.start, time.Now().Add(time.Minute), recon.Options{Margin: time.Hour})
+	require.NoError(t, err)
+	require.Zero(t, res.Discrepancies, "%v", e.discrepancies(t, res.RunID))
 }

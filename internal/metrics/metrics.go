@@ -130,7 +130,7 @@ func New() *Metrics {
 		}),
 		ReconDiscrepancies: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "idem_reconciliation_discrepancies",
-			Help: "Differences between the provider's records and the ledger found by the latest successful reconciliation, by kind and whether the workflow is parked.",
+			Help: "Open differences between the provider's records and the ledger (not resolved by a later reconciliation covering them), by kind and whether the workflow is parked.",
 		}, []string{"kind", "parked"}),
 		ReconLastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "idem_reconciliation_last_success_timestamp_seconds",
@@ -240,7 +240,7 @@ type Snapshot struct {
 	OutboxOldestPending time.Duration
 	OutboxDead          int
 
-	ReconDiscrepancies map[[2]string]int // {kind, parked} → count, latest successful run
+	ReconDiscrepancies map[[2]string]int // {kind, parked} → count of open discrepancies
 	ReconLastSuccess   time.Time         // zero if none
 }
 

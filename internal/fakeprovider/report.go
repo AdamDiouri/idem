@@ -44,6 +44,11 @@ func (p *Provider) getBalanceTransactions(w http.ResponseWriter, r *http.Request
 		at  time.Time
 		row balanceTransaction
 	}
+	// Settle what is due first, so a payout cannot settle with a past time
+	// between two page reads and land behind the cursor.
+	p.mu.Lock()
+	p.settleDueLocked(time.Now())
+	p.mu.Unlock()
 	var all []timed
 	for _, e := range p.Effects() {
 		if e.At.Before(time.Unix(from, 0)) || !e.At.Before(time.Unix(to, 0)) {

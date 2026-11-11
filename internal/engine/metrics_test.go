@@ -329,8 +329,8 @@ func TestSweeper_ExportsReconGauges(t *testing.T) {
 		require.NoError(t, err)
 	}
 	insert := func(run uuid.UUID, kind string, parked bool) {
-		_, err := h.pool.Exec(ctx, `INSERT INTO recon_discrepancies (id, run_id, kind, effect_type, parked, detail)
-			VALUES (gen_random_uuid(), $1, $2, 'payout', $3, 'x')`, run, kind, parked)
+		_, err := h.pool.Exec(ctx, `INSERT INTO recon_discrepancies (id, run_id, kind, effect_type, parked, detail, item_key, item_at)
+			VALUES (gen_random_uuid(), $1, $2, 'payout', $3, 'x', gen_random_uuid()::text, now() - interval '30 minutes')`, run, kind, parked)
 		require.NoError(t, err)
 	}
 	insert(old, "amount_mismatch", false) // superseded by the latest run

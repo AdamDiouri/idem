@@ -27,8 +27,8 @@ func reconRunWith(t *testing.T, e env, ds ...struct {
 	_, err = e.pool.Exec(ctx, `UPDATE recon_runs SET status = 'SUCCEEDED', finished_at = now() WHERE id = $1`, run)
 	require.NoError(t, err)
 	for _, d := range ds {
-		_, err := e.pool.Exec(ctx, `INSERT INTO recon_discrepancies (id, run_id, workflow_id, kind, effect_type, parked, detail)
-			VALUES (gen_random_uuid(), $1, $2, 'missing_in_ledger', $3, $4, 'x')`, run, d.wf, d.typ, d.parked)
+		_, err := e.pool.Exec(ctx, `INSERT INTO recon_discrepancies (id, run_id, workflow_id, kind, effect_type, parked, detail, item_key, item_at)
+			VALUES (gen_random_uuid(), $1, $2, 'missing_in_ledger', $3, $4, 'x', $5, now() - interval '30 minutes')`, run, d.wf, d.typ, d.parked, d.wf.String()+"|"+d.typ)
 		require.NoError(t, err)
 	}
 	return run

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -70,7 +71,9 @@ func reconcileCmd() *cobra.Command {
 					t = time.Now().Add(-cfg.Lag).Truncate(time.Hour)
 					f = t.Add(-time.Hour)
 				}
-				res, err := recon.Run(ctx, pool, client, f, t, recon.Options{Margin: cfg.Margin, Logger: logger})
+				runCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+				defer cancel()
+				res, err := recon.Run(runCtx, pool, client, f, t, recon.Options{Margin: cfg.Margin, Logger: logger})
 				if err != nil {
 					return err
 				}

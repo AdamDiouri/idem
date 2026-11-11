@@ -17,9 +17,12 @@ type ReconConfig struct {
 	// Lag: the default window is the last complete hour ending this long ago,
 	// leaving the provider's report time to catch up.
 	Lag time.Duration `env:"IDEM_RECON_LAG" envDefault:"5m"`
-	// Margin widens the provider report on both sides of the window: a payout
-	// settles at the provider before idem posts it.
-	Margin   time.Duration `env:"IDEM_RECON_MARGIN" envDefault:"1h"`
+	// Margin is how far before the window the provider's report is read: a
+	// posting in the window may follow its movement by up to this long (a
+	// payout settles before the webhook or a poll lets idem post it).
+	Margin time.Duration `env:"IDEM_RECON_MARGIN" envDefault:"24h"`
+	// Timeout bounds one run, so a provider that hangs cannot stall it.
+	Timeout  time.Duration `env:"IDEM_RECON_TIMEOUT" envDefault:"10m"`
 	LogLevel string        `env:"IDEM_LOG_LEVEL" envDefault:"info"`
 }
 
@@ -39,6 +42,8 @@ func LoadRecon() (ReconConfig, error) {
 		return ReconConfig{}, fmt.Errorf("load reconcile config: IDEM_RECON_LAG must not be negative")
 	case cfg.Margin <= 0:
 		return ReconConfig{}, fmt.Errorf("load reconcile config: IDEM_RECON_MARGIN must be positive")
+	case cfg.Timeout <= 0:
+		return ReconConfig{}, fmt.Errorf("load reconcile config: IDEM_RECON_TIMEOUT must be positive")
 	}
 	if _, err := parseLevel(cfg.LogLevel); err != nil {
 		return ReconConfig{}, err

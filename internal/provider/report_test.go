@@ -82,3 +82,33 @@ func TestListBalanceTransactions_FailsOnABadPage(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, 2, calls)
 }
+
+// Final review, I1: a 200 that is not a report is not an empty report.
+func TestListBalanceTransactions_RejectsUnexpectedBodies(t *testing.T) {
+	for name, body := range map[string]string{
+		"error object":   `{"error":"maintenance"}`,
+		"empty object":   `{}`,
+		"null":           `null`,
+		"row without id": `{"data":[{"type":"charge","amount":100,"currency":"EUR","created":1}],"has_more":false}`,
+		"unknown type":   `{"data":[{"id":"txn_1","type":"adjustment","amount":100,"currency":"EUR","created":1}],"has_more":false}`,
+		"no time":        `{"data":[{"id":"txn_1","type":"charge","amount":100,"currency":"EUR"}],"has_more":false}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+			t.Cleanup(srv.Close)
+			_, err := provider.NewClient(srv.URL, time.Second).ListBalanceTransactions(context.Background(), time.Unix(0, 0), time.Now())
+			require.Error(t, err)
+		})
+	}
+}
+
+// Final review, minor: a provider that never stops paging is an error, not a
+// hang.
+func TestListBalanceTransactions_CursorMustAdvance(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"txn_1","type":"charge","amount":100,"currency":"EUR","created":1}],"has_more":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	_, err := provider.NewClient(srv.URL, time.Second).ListBalanceTransactions(context.Background(), time.Unix(0, 0), time.Now())
+	require.ErrorContains(t, err, "cursor")
+}

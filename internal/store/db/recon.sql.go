@@ -44,9 +44,10 @@ func (q *Queries) FinishReconRun(ctx context.Context, arg FinishReconRunParams) 
 }
 
 const insertReconDiscrepancy = `-- name: InsertReconDiscrepancy :exec
-INSERT INTO recon_discrepancies (id, run_id, workflow_id, kind, effect_type, provider_refs, provider_amount, ledger_amount, parked, detail)
+INSERT INTO recon_discrepancies (id, run_id, workflow_id, kind, effect_type, provider_refs, provider_amount, ledger_amount, parked, detail,
+                                 item_key, item_at)
 VALUES ($1, $2, $3, $4, $5, $6::text[],
-        $7, $8, $9, $10)
+        $7, $8, $9, $10, $11, $12)
 `
 
 type InsertReconDiscrepancyParams struct {
@@ -60,6 +61,8 @@ type InsertReconDiscrepancyParams struct {
 	LedgerAmount   *int64
 	Parked         bool
 	Detail         string
+	ItemKey        string
+	ItemAt         pgtype.Timestamptz
 }
 
 func (q *Queries) InsertReconDiscrepancy(ctx context.Context, arg InsertReconDiscrepancyParams) error {
@@ -74,6 +77,8 @@ func (q *Queries) InsertReconDiscrepancy(ctx context.Context, arg InsertReconDis
 		arg.LedgerAmount,
 		arg.Parked,
 		arg.Detail,
+		arg.ItemKey,
+		arg.ItemAt,
 	)
 	return err
 }
@@ -93,67 +98,8 @@ func (q *Queries) InsertReconRun(ctx context.Context, arg InsertReconRunParams) 
 	return err
 }
 
-const reconInFlight = `-- name: ReconInFlight :many
-SELECT DISTINCT workflow_id FROM steps
-WHERE workflow_id = ANY($1::uuid[]) AND status IN ('PENDING', 'RUNNING', 'IN_DOUBT', 'AWAITING_CALLBACK')
-`
-
-// Workflows not final yet: never a discrepancy (M2 design §6).
-func (q *Queries) ReconInFlight(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, reconInFlight, ids)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []uuid.UUID
-	for rows.Next() {
-		var workflow_id uuid.UUID
-		if err := rows.Scan(&workflow_id); err != nil {
-			return nil, err
-		}
-		items = append(items, workflow_id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const reconLatestStepStatuses = `-- name: ReconLatestStepStatuses :many
-SELECT DISTINCT ON (workflow_id, name) workflow_id, name, status FROM steps
-WHERE workflow_id = ANY($1::uuid[])
-ORDER BY workflow_id, name, generation DESC, created_at DESC
-`
-
-type ReconLatestStepStatusesRow struct {
-	WorkflowID uuid.UUID
-	Name       string
-	Status     string
-}
-
-// The latest generation of each step of each workflow.
-func (q *Queries) ReconLatestStepStatuses(ctx context.Context, ids []uuid.UUID) ([]ReconLatestStepStatusesRow, error) {
-	rows, err := q.db.Query(ctx, reconLatestStepStatuses, ids)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ReconLatestStepStatusesRow
-	for rows.Next() {
-		var i ReconLatestStepStatusesRow
-		if err := rows.Scan(&i.WorkflowID, &i.Name, &i.Status); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const reconPostings = `-- name: ReconPostings :many
-SELECT t.workflow_id, t.kind, e.amount_cents
+SELECT t.workflow_id, t.kind, e.amount_cents, t.step_id, t.created_at, e.currency
 FROM ledger_transactions t
 JOIN ledger_entries e ON e.transaction_id = t.id AND e.account = 'provider_receivable'
 WHERE t.workflow_id = ANY($1::uuid[])
@@ -164,6 +110,9 @@ type ReconPostingsRow struct {
 	WorkflowID  uuid.UUID
 	Kind        string
 	AmountCents int64
+	StepID      uuid.UUID
+	CreatedAt   pgtype.Timestamptz
+	Currency    string
 }
 
 // Each posting's provider_receivable entry: charge +amount, payout −(amount −
@@ -177,7 +126,56 @@ func (q *Queries) ReconPostings(ctx context.Context, ids []uuid.UUID) ([]ReconPo
 	var items []ReconPostingsRow
 	for rows.Next() {
 		var i ReconPostingsRow
-		if err := rows.Scan(&i.WorkflowID, &i.Kind, &i.AmountCents); err != nil {
+		if err := rows.Scan(
+			&i.WorkflowID,
+			&i.Kind,
+			&i.AmountCents,
+			&i.StepID,
+			&i.CreatedAt,
+			&i.Currency,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const reconSteps = `-- name: ReconSteps :many
+SELECT workflow_id, id, name, status, COALESCE(provider_ref, '')::text AS provider_ref
+FROM steps WHERE workflow_id = ANY($1::uuid[])
+ORDER BY workflow_id, name, generation, created_at
+`
+
+type ReconStepsRow struct {
+	WorkflowID  uuid.UUID
+	ID          uuid.UUID
+	Name        string
+	Status      string
+	ProviderRef string
+}
+
+// Every step of the workflows, every generation, with the provider object it
+// learned (a movement is matched to its step through provider_ref).
+func (q *Queries) ReconSteps(ctx context.Context, ids []uuid.UUID) ([]ReconStepsRow, error) {
+	rows, err := q.db.Query(ctx, reconSteps, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ReconStepsRow
+	for rows.Next() {
+		var i ReconStepsRow
+		if err := rows.Scan(
+			&i.WorkflowID,
+			&i.ID,
+			&i.Name,
+			&i.Status,
+			&i.ProviderRef,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

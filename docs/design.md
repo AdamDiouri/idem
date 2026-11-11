@@ -452,7 +452,8 @@ The **relay** (`idem relay`, any number may run) delivers each `PENDING` event t
 
 - **What is compared:** for each workflow and effect type, the provider's records against the postings, whose `provider_receivable` entry is signed exactly like the provider's amount (charge `+amount`, payout `−(amount − fee)`, refund `−amount`).
 - **Kinds, one per workflow and type, by precedence:** `duplicate_effect` > `amount_mismatch` > `status_mismatch` (money moved for a step recorded `FAILED_PERMANENT`) > `missing_in_ledger` > `missing_at_provider`.
-- **Which workflows:** those with a provider record or a posting created in the window; each compared on everything known about it, the report read `IDEM_RECON_MARGIN` beyond both edges (a payout settles before it is posted). Workflows not final yet are skipped; parked ones are reported and flagged.
+- **Per movement, in a snapshot:** each provider movement created in the window must have its posting (matched through the step's `provider_ref`), and each posting created in the window its movement, looked for up to `IDEM_RECON_MARGIN` (24h) before it; history outside the window is never judged. idem's state is read first, in one read-only repeatable-read snapshot held while the report is fetched: a posting in it already has its movement, and a later movement belongs to a step the snapshot shows in flight (skipped, not a difference). Parked workflows are reported and flagged.
+- **Open until covered:** a discrepancy stays open (view `recon_open_discrepancies`) until a later successful run whose window contains it does not find it again.
 - **Surfaces:** `idem admin recon list`, the `RECON` column of `idem admin list`, the sweeper's gauges, alerts `IdemReconciliationDrift` and `IdemReconciliationStale`; compose runs it every 10 minutes. Every chaos campaign ends with it (invariant RECON).
 
 ### 11.4 Admin actions (CLI, audited)

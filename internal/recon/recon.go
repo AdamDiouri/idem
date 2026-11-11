@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -24,9 +26,9 @@ type Reporter interface {
 
 // Options configures a run.
 type Options struct {
-	// Margin widens the provider report on both sides of the window: a payout
-	// can settle at the provider before idem posts it, on either side of a
-	// window's edge.
+	// Margin is how far before the window the provider's report is read: a
+	// posting in the window may follow its movement by up to this long (a
+	// payout settles before the webhook or poll lets idem post it).
 	Margin time.Duration
 	Logger *slog.Logger
 }
@@ -41,11 +43,15 @@ type Result struct {
 	Parked        int // discrepancies on parked workflows
 }
 
-// Run reconciles the window [from, to). The workflows compared are those with
-// a provider record or a ledger posting created in it, each compared on
-// everything known about it; workflows not final yet are skipped. The run and
-// its discrepancies are written in one transaction; a run that fails is
-// recorded FAILED with its error and reports nothing. Nothing else changes (D15).
+// Run reconciles the window [from, to): each provider movement created in it
+// must have its posting, and each posting created in it its movement (looked
+// for up to Margin before the window). idem's state is read first, in one
+// read-only repeatable-read snapshot held while the provider's report is
+// fetched: a posting in the snapshot already has its movement at the
+// provider, and a movement made later belongs to a step the snapshot shows in
+// flight. The run and its discrepancies are written in one transaction; a run
+// that fails is recorded FAILED with its error and reports nothing. Nothing
+// else changes (D15): the snapshot is read-only.
 func Run(ctx context.Context, pool *pgxpool.Pool, provider Reporter, from, to time.Time, opts Options) (Result, error) {
 	logger := opts.Logger
 	if logger == nil {
@@ -56,10 +62,13 @@ func Run(ctx context.Context, pool *pgxpool.Pool, provider Reporter, from, to ti
 	if err := q.InsertReconRun(ctx, db.InsertReconRunParams{ID: res.RunID, WindowFrom: ts(from), WindowTo: ts(to)}); err != nil {
 		return res, fmt.Errorf("start reconciliation run: %w", err)
 	}
-	found, err := reconcile(ctx, pool, provider, from, to, opts.Margin, res.RunID)
+	found, err := reconcile(ctx, pool, provider, Window{From: from, To: to}, opts.Margin, res.RunID)
 	if err != nil {
 		msg := err.Error()
-		if ferr := q.FinishReconRun(ctx, db.FinishReconRunParams{ID: res.RunID, Status: "FAILED", Error: &msg}); ferr != nil {
+		// Record the failure even if ctx was cancelled (SIGTERM mid-run).
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if ferr := q.FinishReconRun(finishCtx, db.FinishReconRunParams{ID: res.RunID, Status: "FAILED", Error: &msg}); ferr != nil {
 			err = errors.Join(err, fmt.Errorf("record the failed run: %w", ferr))
 		}
 		logger.Error("reconciliation failed", "run_id", res.RunID, "error", err)
@@ -71,64 +80,71 @@ func Run(ctx context.Context, pool *pgxpool.Pool, provider Reporter, from, to ti
 	return found, nil
 }
 
-func reconcile(ctx context.Context, pool *pgxpool.Pool, reporter Reporter, from, to time.Time, margin time.Duration, runID uuid.UUID) (Result, error) {
+func reconcile(ctx context.Context, pool *pgxpool.Pool, reporter Reporter, win Window, margin time.Duration, runID uuid.UUID) (Result, error) {
 	var res Result
-	records, err := reporter.ListBalanceTransactions(ctx, from.Add(-margin), to.Add(margin))
+	snap, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return res, fmt.Errorf("open snapshot: %w", err)
+	}
+	defer func() { _ = snap.Rollback(ctx) }()
+	sq := db.New(snap)
+	// The first statement fixes the snapshot, before the report is read.
+	posted, err := sq.WorkflowsPostedBetween(ctx, db.WorkflowsPostedBetweenParams{WindowFrom: ts(win.From), WindowTo: ts(win.To)})
+	if err != nil {
+		return res, fmt.Errorf("workflows posted in the window: %w", err)
+	}
+
+	records, err := reporter.ListBalanceTransactions(ctx, win.From.Add(-margin), win.To)
 	if err != nil {
 		return res, err
 	}
 	res.Records = len(records)
 
-	q := db.New(pool)
 	byWorkflow := map[string][]provider.BalanceTransaction{}
 	anchored := map[string]bool{}
 	for _, r := range records {
-		byWorkflow[r.WorkflowID] = append(byWorkflow[r.WorkflowID], r)
-		if !r.Created.Before(from) && r.Created.Before(to) {
-			anchored[r.WorkflowID] = true
+		key := r.WorkflowID
+		if id, err := uuid.Parse(r.WorkflowID); err == nil {
+			key = id.String() // one key per workflow, whatever form the metadata used
 		}
-	}
-	posted, err := q.WorkflowsPostedBetween(ctx, db.WorkflowsPostedBetweenParams{WindowFrom: ts(from), WindowTo: ts(to)})
-	if err != nil {
-		return res, fmt.Errorf("workflows posted in the window: %w", err)
+		byWorkflow[key] = append(byWorkflow[key], r)
+		if win.contains(r.Created) {
+			anchored[key] = true
+		}
 	}
 	for _, id := range posted {
 		anchored[id.String()] = true
 	}
-
 	var ids []uuid.UUID
-	var unknownIDs []string // the provider names a workflow idem cannot even parse
-	for id := range anchored {
-		parsed, err := uuid.Parse(id)
-		if err != nil {
-			unknownIDs = append(unknownIDs, id)
-			continue
+	var unparsable []string
+	for key := range anchored {
+		if id, err := uuid.Parse(key); err == nil {
+			ids = append(ids, id)
+		} else {
+			unparsable = append(unparsable, key)
 		}
-		ids = append(ids, parsed)
 	}
-	workflows, err := load(ctx, q, ids)
+	slices.SortFunc(ids, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+	workflows, err := load(ctx, sq, ids)
 	if err != nil {
 		return res, err
 	}
-	inFlight, err := q.ReconInFlight(ctx, ids)
-	if err != nil {
-		return res, fmt.Errorf("in-flight workflows: %w", err)
+	if err := snap.Commit(ctx); err != nil {
+		return res, err
 	}
 
 	var found []Discrepancy
 	for _, id := range ids {
-		if slices.Contains(inFlight, id) {
-			res.InFlight++
-			continue
-		}
 		w := workflows[id] // nil: a workflow idem does not know
 		if w != nil {
 			res.Workflows++
 		}
-		found = append(found, Classify(w, byWorkflow[id.String()])...)
+		ds, inFlight := Classify(w, byWorkflow[id.String()], win)
+		found, res.InFlight = append(found, ds...), res.InFlight+inFlight
 	}
-	for _, id := range unknownIDs {
-		found = append(found, Classify(nil, byWorkflow[id])...)
+	for _, key := range unparsable {
+		ds, _ := Classify(nil, byWorkflow[key], win)
+		found = append(found, ds...)
 	}
 
 	tx, err := pool.Begin(ctx)
@@ -145,6 +161,7 @@ func reconcile(ctx context.Context, pool *pgxpool.Pool, reporter Reporter, from,
 		if err := qtx.InsertReconDiscrepancy(ctx, db.InsertReconDiscrepancyParams{
 			ID: uuid.Must(uuid.NewV7()), RunID: runID, WorkflowID: d.WorkflowID, Kind: d.Kind, EffectType: d.EffectType,
 			ProviderRefs: refs, ProviderAmount: d.ProviderAmount, LedgerAmount: d.LedgerAmount, Parked: d.Parked, Detail: d.Detail,
+			ItemKey: d.ItemKey, ItemAt: ts(d.ItemAt),
 		}); err != nil {
 			return res, fmt.Errorf("record discrepancy: %w", err)
 		}
@@ -160,7 +177,7 @@ func reconcile(ctx context.Context, pool *pgxpool.Pool, reporter Reporter, from,
 	return res, tx.Commit(ctx)
 }
 
-// load reads what idem knows about each workflow.
+// load reads, in the snapshot, what idem knows about each workflow.
 func load(ctx context.Context, q *db.Queries, ids []uuid.UUID) (map[uuid.UUID]*Workflow, error) {
 	out := map[uuid.UUID]*Workflow{}
 	statuses, err := q.ReconWorkflowStatuses(ctx, ids)
@@ -168,15 +185,15 @@ func load(ctx context.Context, q *db.Queries, ids []uuid.UUID) (map[uuid.UUID]*W
 		return nil, fmt.Errorf("workflow statuses: %w", err)
 	}
 	for _, s := range statuses {
-		out[s.ID] = &Workflow{ID: s.ID, Status: s.Status, StepStatus: map[string]string{}, Postings: map[string][]int64{}}
+		out[s.ID] = &Workflow{ID: s.ID, Status: s.Status}
 	}
-	steps, err := q.ReconLatestStepStatuses(ctx, ids)
+	steps, err := q.ReconSteps(ctx, ids)
 	if err != nil {
-		return nil, fmt.Errorf("step statuses: %w", err)
+		return nil, fmt.Errorf("steps: %w", err)
 	}
 	for _, s := range steps {
 		if w := out[s.WorkflowID]; w != nil {
-			w.StepStatus[s.Name] = s.Status
+			w.Steps = append(w.Steps, Step{ID: s.ID, Name: s.Name, Status: s.Status, ProviderRef: s.ProviderRef})
 		}
 	}
 	postings, err := q.ReconPostings(ctx, ids)
@@ -185,7 +202,7 @@ func load(ctx context.Context, q *db.Queries, ids []uuid.UUID) (map[uuid.UUID]*W
 	}
 	for _, p := range postings {
 		if w := out[p.WorkflowID]; w != nil {
-			w.Postings[p.Kind] = append(w.Postings[p.Kind], p.AmountCents)
+			w.Postings = append(w.Postings, Posting{StepID: p.StepID, Kind: p.Kind, Amount: p.AmountCents, Currency: p.Currency, At: p.CreatedAt.Time})
 		}
 	}
 	return out, nil
