@@ -52,6 +52,9 @@ type ParkedWorkflow struct {
 	MerchantID  string        `json:"merchant_id"`
 	ParkedFor   time.Duration `json:"parked_for"`
 	Evidence    string        `json:"provider_says,omitempty"` // the provider's latest news about the step (D18)
+	// Reconciliation is what the latest reconciliation found for the
+	// workflow, e.g. "missing_in_ledger payout -9825" (slice 2.6).
+	Reconciliation string `json:"reconciliation,omitempty"`
 }
 
 // Admin performs audited human interventions on parked workflows (design
@@ -87,7 +90,7 @@ func (a *Admin) ListParked(ctx context.Context, reason string) ([]ParkedWorkflow
 		p := ParkedWorkflow{
 			WorkflowID: r.WorkflowID, Version: r.Version, StepID: r.StepID, Step: r.Name, StepStatus: r.Status,
 			DeadReason: deref(r.DeadReason), LastError: deref(r.LastError), Attempts: r.AttemptCount, Polls: r.PollCount,
-			ParkedFor: time.Duration(r.ParkedMs) * time.Millisecond, Evidence: r.Evidence,
+			ParkedFor: time.Duration(r.ParkedMs) * time.Millisecond, Evidence: r.Evidence, Reconciliation: r.Reconciliation,
 		}
 		var in workflow.PaymentInput
 		if err := json.Unmarshal(r.Input, &in); err == nil {

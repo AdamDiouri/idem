@@ -451,3 +451,61 @@ func TestMayHaveMoved_DeadSendAttemptCounts(t *testing.T) {
 	err = h.admin().Fail(ctx, wf, h.version(t, wf), "looks uncharged", false)
 	require.ErrorIs(t, err, engine.ErrConfirmationRequired)
 }
+
+// reconRun records a successful reconciliation run (as recon.Run would) and
+// returns its ID; discrepancies are (workflow, kind, type, parked).
+func (h harness) reconRun(t *testing.T, ago time.Duration, ds ...[4]string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	id := uuid.Must(uuid.NewV7())
+	_, err := h.pool.Exec(ctx, `INSERT INTO recon_runs (id, window_from, window_to) VALUES ($1, now() - interval '2 hours', now() - interval '1 hour')`, id)
+	require.NoError(t, err)
+	_, err = h.pool.Exec(ctx, `UPDATE recon_runs SET status = 'SUCCEEDED', finished_at = now() - $2::interval, discrepancies = $3 WHERE id = $1`,
+		id, ago.String(), len(ds))
+	require.NoError(t, err)
+	for _, d := range ds {
+		_, err := h.pool.Exec(ctx, `INSERT INTO recon_discrepancies (id, run_id, workflow_id, kind, effect_type, provider_refs, provider_amount, parked, detail)
+			VALUES (gen_random_uuid(), $1, $2, $3, $4, '{po_1}', -9825, $5, 'the provider moved -9825 (payout po_1) with no ledger posting')`,
+			id, d[0], d[1], d[2], d[3] == "true")
+		require.NoError(t, err)
+	}
+	return id
+}
+
+// Slice 2.6: the latest successful run, by default.
+func TestAdmin_ListReconciliationLatestRun(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	wf := submitTo(t, h, "cus_1", "mer_1")
+	old := h.reconRun(t, time.Hour, [4]string{wf.String(), "amount_mismatch", "charge", "false"})
+	latest := h.reconRun(t, time.Minute, [4]string{wf.String(), "missing_in_ledger", "payout", "false"})
+
+	run, ds, err := h.admin().ListReconciliation(ctx, nil)
+	require.NoError(t, err)
+	require.Equal(t, latest, run.ID)
+	require.Len(t, ds, 1)
+	require.Equal(t, "missing_in_ledger", ds[0].Kind)
+	require.Equal(t, int64(-9825), *ds[0].ProviderAmount)
+
+	run, ds, err = h.admin().ListReconciliation(ctx, &old)
+	require.NoError(t, err)
+	require.Equal(t, old, run.ID)
+	require.Equal(t, "amount_mismatch", ds[0].Kind)
+}
+
+func TestAdmin_ListReconciliationWithoutRuns(t *testing.T) {
+	h := newHarness(t)
+	_, _, err := h.admin().ListReconciliation(context.Background(), nil)
+	require.ErrorIs(t, err, engine.ErrNotActionable)
+}
+
+// A parked workflow's discrepancies are evidence next to it: they tell the
+// operator whether the provider moved the money (confirm-step) or not
+// (compensate, fail).
+func TestAdmin_ListParkedShowsReconEvidence(t *testing.T) {
+	h := newHarness(t)
+	wf := parkPayoutAfterDoubt(t, h)
+	h.reconRun(t, time.Minute, [4]string{wf.String(), "missing_in_ledger", "payout", "true"})
+	p := h.parkedStep(t, wf)
+	require.Equal(t, "missing_in_ledger payout -9825", p.Reconciliation)
+}

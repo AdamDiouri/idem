@@ -218,3 +218,25 @@ func TestAdminOutbox_RedeliverAll(t *testing.T) {
 	code, out = admin(t, "outbox", "redeliver-all", "--client", "c", "--status", "DEAD")
 	require.Equal(t, 2, code, out) // --reason is required
 }
+
+// Slice 2.6.
+func TestAdminCLI_ReconList(t *testing.T) {
+	pool := testutil.NewPool(t, dsn)
+	code, out := admin(t, "recon", "list")
+	require.Equal(t, 1, code, "no run yet: %s", out)
+
+	ctx := context.Background()
+	run := uuid.Must(uuid.NewV7())
+	_, err := pool.Exec(ctx, `INSERT INTO recon_runs (id, window_from, window_to) VALUES ($1, now() - interval '1 hour', now())`, run)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `UPDATE recon_runs SET status = 'SUCCEEDED', finished_at = now(), workflows = 4, discrepancies = 1 WHERE id = $1`, run)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `INSERT INTO recon_discrepancies (id, run_id, kind, effect_type, provider_amount, parked, detail)
+		VALUES (gen_random_uuid(), $1, 'missing_in_ledger', 'charge', 500, false, 'money moved')`, run)
+	require.NoError(t, err)
+	code, out = admin(t, "recon", "list")
+	require.Equal(t, 0, code, out)
+	require.Contains(t, out, run.String())
+	require.Contains(t, out, "missing_in_ledger")
+	require.Contains(t, out, "KIND")
+}

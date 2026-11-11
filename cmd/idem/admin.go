@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"text/tabwriter"
 	"time"
 
@@ -90,7 +91,7 @@ func adminCmd() *cobra.Command {
 			"See docs/runbooks/needs-attention.md for which action fits which situation.",
 	}
 	cmd.AddCommand(adminListCmd(), adminRetryCmd(), adminNewGenerationCmd(), adminConfirmCmd(), adminCompensateCmd(), adminFailCmd(),
-		adminConflictCmd(), adminOutboxCmd())
+		adminConflictCmd(), adminOutboxCmd(), adminReconCmd())
 	return cmd
 }
 
@@ -161,14 +162,14 @@ func adminListCmd() *cobra.Command {
 					return enc.Encode(parked)
 				}
 				tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-				_, _ = fmt.Fprintln(tw, "WORKFLOW\tVERSION\tSTEP\tSTATUS\tREASON\tATTEMPTS\tPOLLS\tPARKED FOR\tLAST ERROR\tPROVIDER SAYS")
+				_, _ = fmt.Fprintln(tw, "WORKFLOW\tVERSION\tSTEP\tSTATUS\tREASON\tATTEMPTS\tPOLLS\tPARKED FOR\tLAST ERROR\tPROVIDER SAYS\tRECON")
 				for _, p := range parked {
 					why := p.DeadReason
 					if why == "" {
 						why = "refused"
 					}
-					_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n", p.WorkflowID, p.Version, p.Step, p.StepStatus, why,
-						p.Attempts, p.Polls, p.ParkedFor.Round(time.Second), truncate(p.LastError, 60), p.Evidence)
+					_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\n", p.WorkflowID, p.Version, p.Step, p.StepStatus, why,
+						p.Attempts, p.Polls, p.ParkedFor.Round(time.Second), truncate(p.LastError, 60), p.Evidence, p.Reconciliation)
 				}
 				return tw.Flush()
 			})
@@ -468,6 +469,65 @@ func adminOutboxCmd() *cobra.Command {
 	}
 	cmd.AddCommand(list, redeliver, redeliverAll)
 	return cmd
+}
+
+// adminReconCmd shows what reconciliation found (slice 2.6).
+func adminReconCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "recon", Short: "Differences between the provider's records and the ledger"}
+	var asJSON bool
+	var runFlag string
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List the discrepancies of the latest successful reconciliation (or --run)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var runID *uuid.UUID
+			if runFlag != "" {
+				id, err := parseID(runFlag)
+				if err != nil {
+					return err
+				}
+				runID = &id
+			}
+			return withAdmin(cmd, func(ctx context.Context, a *engine.Admin) error {
+				run, ds, err := a.ListReconciliation(ctx, runID)
+				if err != nil {
+					return err
+				}
+				out := cmd.OutOrStdout()
+				if asJSON {
+					enc := json.NewEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(map[string]any{"run": run, "discrepancies": ds})
+				}
+				_, _ = fmt.Fprintf(out, "run %s: window %s to %s, finished %s; %d workflows (%d in flight), %d discrepancies\n\n",
+					run.ID, run.WindowFrom.UTC().Format(time.RFC3339), run.WindowTo.UTC().Format(time.RFC3339),
+					run.FinishedAt.UTC().Format(time.RFC3339), run.Workflows, run.InFlight, run.Discrepancies)
+				tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+				_, _ = fmt.Fprintln(tw, "WORKFLOW\tKIND\tTYPE\tPROVIDER\tLEDGER\tPARKED\tDETAIL")
+				for _, d := range ds {
+					wf := "-"
+					if d.WorkflowID != nil {
+						wf = d.WorkflowID.String()
+					}
+					_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%v\t%s\n", wf, d.Kind, d.EffectType, amount(d.ProviderAmount),
+						amount(d.LedgerAmount), d.Parked, truncate(d.Detail, 80))
+				}
+				return tw.Flush()
+			})
+		},
+	}
+	list.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	list.Flags().StringVar(&runFlag, "run", "", "a run ID instead of the latest")
+	cmd.AddCommand(list)
+	return cmd
+}
+
+func amount(v *int64) string {
+	if v == nil {
+		return "-"
+	}
+	return strconv.FormatInt(*v, 10)
 }
 
 func truncate(s string, n int) string {
