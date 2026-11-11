@@ -67,6 +67,33 @@ type Outbox struct {
 	LeaseEpoch     int64
 }
 
+type ReconDiscrepancy struct {
+	ID             uuid.UUID
+	RunID          uuid.UUID
+	WorkflowID     *uuid.UUID
+	Kind           string
+	EffectType     string
+	ProviderRefs   []string
+	ProviderAmount *int64
+	LedgerAmount   *int64
+	Parked         bool
+	Detail         string
+}
+
+type ReconRun struct {
+	ID            uuid.UUID
+	StartedAt     pgtype.Timestamptz
+	FinishedAt    pgtype.Timestamptz
+	WindowFrom    pgtype.Timestamptz
+	WindowTo      pgtype.Timestamptz
+	Status        string
+	Records       int32
+	Workflows     int32
+	InFlight      int32
+	Discrepancies int32
+	Error         *string
+}
+
 type Step struct {
 	ID               uuid.UUID
 	WorkflowID       uuid.UUID
