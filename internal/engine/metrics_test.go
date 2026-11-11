@@ -223,9 +223,15 @@ func TestSweeper_ExportsOutboxGauges(t *testing.T) {
 		_, err := h.pool.Exec(ctx, `UPDATE outbox SET created_at = now() - interval '1 hour' WHERE workflow_id = $1`, wf)
 		require.NoError(t, err)
 	}
+	dead := submitTo(t, h, "cus_1", "mer_1")
+	setWorkflowStatus(t, h.pool, dead, "FAILED")
+	_, err := h.pool.Exec(ctx, `UPDATE outbox SET status = 'DEAD' WHERE workflow_id = $1`, dead)
+	require.NoError(t, err)
+
 	m := sweepOnce(t, h)
 	require.Equal(t, 2.0, testutil.ToFloat64(m.OutboxPending))
 	require.GreaterOrEqual(t, testutil.ToFloat64(m.OutboxOldestPending), 3500.0)
+	require.Equal(t, 1.0, testutil.ToFloat64(m.OutboxDead), "slice 2.5: events the relay gave up on")
 }
 
 // Review focus: labels must stay bounded — no IDs, keys or error text.

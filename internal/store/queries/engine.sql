@@ -194,7 +194,8 @@ SELECT
 -- For the sweeper's gauges: outcome events not delivered yet.
 SELECT
   (SELECT count(*) FROM outbox WHERE status = 'PENDING')::int AS pending,
-  COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000 FROM outbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms;
+  COALESCE((SELECT EXTRACT(EPOCH FROM (now() - min(created_at))) * 1000 FROM outbox WHERE status = 'PENDING'), 0)::bigint AS oldest_pending_ms,
+  (SELECT count(*) FROM outbox WHERE status = 'DEAD')::int AS dead;
 
 -- name: IncrementHookFailures :one
 -- Fenced like CompleteStep: only the current lease holder counts a failure.
