@@ -626,10 +626,13 @@ func apply(ctx context.Context, ev Event, procs procSet, pg *Postgres, providerU
 	case RestartAll:
 		return restartAll(ctx, procs)
 	case KillWorker:
-		return workers[ev.Target].Kill()
+		return onRunning(workers, ev.Target, (*Proc).Kill)
 	case PauseWorker:
-		w := workers[ev.Target]
-		if err := w.Pause(); err != nil {
+		var w *Proc
+		if err := onRunning(workers, ev.Target, func(p *Proc) error {
+			w = p
+			return p.Pause()
+		}); err != nil {
 			return err
 		}
 		pauses.Add(1)
@@ -756,4 +759,20 @@ func restartAll(ctx context.Context, procs procSet) error {
 	}
 	wg.Wait()
 	return errors.Join(errs...)
+}
+
+// onRunning applies f to procs[target], or, if that one is not running (a
+// crash restart in progress), to the next one that is, in index order. Only
+// when none runs is the event skipped (ErrNotRunning): otherwise bad timing
+// could cost a seed every event of a kind, and the verdict would call the run
+// vacuous (slice 2.5b; seen once in 2.5).
+func onRunning(procs []*Proc, target int, f func(*Proc) error) error {
+	var err error
+	for i := range procs {
+		p := procs[(target+i)%len(procs)]
+		if err = f(p); !errors.Is(err, ErrNotRunning) {
+			return err
+		}
+	}
+	return err
 }

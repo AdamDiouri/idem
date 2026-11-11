@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -239,4 +240,40 @@ func TestApply_KillRelay(t *testing.T) {
 	require.NoError(t, apply(context.Background(), Event{Kind: KillRelay, Target: 1}, procs, nil, "", "", nil))
 	require.Eventually(t, func() bool { return procs.relays[1].Restarts() == 1 }, 5*time.Second, 20*time.Millisecond)
 	require.Zero(t, procs.relays[0].Restarts())
+}
+
+// Slice 2.5b (the 2.5 flake): an event whose target worker is mid-restart
+// goes to another running worker, so a seed cannot lose a whole event kind to
+// bad timing; it is skipped only when no worker runs.
+func TestApply_KillRetargetsWhenTargetDown(t *testing.T) {
+	s := newSupervisor(t)
+	var procs procSet
+	for _, name := range []string{"worker-0", "worker-1"} {
+		p, err := s.Start(helperSpec(t, name))
+		require.NoError(t, err)
+		procs.workers = append(procs.workers, p)
+	}
+	require.NoError(t, procs.workers[0].Stop(context.Background()))
+	require.NoError(t, apply(context.Background(), Event{Kind: KillWorker, Target: 0}, procs, nil, "", "", nil))
+	require.Eventually(t, func() bool { return procs.workers[1].Restarts() == 1 }, 5*time.Second, 20*time.Millisecond)
+
+	require.NoError(t, procs.workers[1].Stop(context.Background()))
+	require.ErrorIs(t, apply(context.Background(), Event{Kind: KillWorker, Target: 0}, procs, nil, "", "", nil), ErrNotRunning)
+}
+
+func TestApply_PauseRetargetsWhenTargetDown(t *testing.T) {
+	s := newSupervisor(t)
+	var procs procSet
+	for _, name := range []string{"worker-0", "worker-1"} {
+		p, err := s.Start(helperSpec(t, name))
+		require.NoError(t, err)
+		procs.workers = append(procs.workers, p)
+	}
+	require.NoError(t, procs.workers[0].Stop(context.Background()))
+	var pauses sync.WaitGroup
+	require.NoError(t, apply(context.Background(), Event{Kind: PauseWorker, Target: 0, Duration: 200 * time.Millisecond}, procs, nil, "", "", &pauses))
+	before := logSize(t, procs.workers[1].spec.LogPath)
+	time.Sleep(120 * time.Millisecond)
+	require.Equal(t, before, logSize(t, procs.workers[1].spec.LogPath), "worker-1 is the one frozen")
+	pauses.Wait()
 }
